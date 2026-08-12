@@ -70,7 +70,7 @@ export class PersistentJobStore {
     this.#jobTtlMs = jobTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
 
     return this.#mutate(async (data) => {
@@ -87,6 +87,9 @@ export class PersistentJobStore {
         jobId: this.#createJobId(),
         attemptId,
         sourceUrl,
+        snapshot,
+        destination,
+        includeImages,
         status: JOB_STATUS.QUEUED,
         step: JOB_STEP.CREATE_DOCUMENT,
         document: null,

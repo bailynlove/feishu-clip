@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "飞书剪藏",
+  "version": "0.1.0",
+  "description": "一键将当前网页剪藏到飞书知识库",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://127.0.0.1:38479/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "保存到飞书" },
+  "options_page": "options.html"
+}

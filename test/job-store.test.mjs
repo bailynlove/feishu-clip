@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { PersistentJobStore } from './persistent-job-store.mjs';
+import { PersistentJobStore } from '../src/bridge/job-store.mjs';
 
 async function withStore(run, options = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-job-store-'));

@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0",
+  "host": "127.0.0.1",
+  "port": 38479,
+  "larkCliPath": "/absolute/path/to/lark-cli",
+  "jobFile": "/Users/you/Library/Application Support/FeishuClip/state/jobs.json",
+  "pairingFile": "/Users/you/Library/Application Support/FeishuClip/config/pairing.json"
+}
