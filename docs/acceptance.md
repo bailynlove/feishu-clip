@@ -26,6 +26,33 @@ The extension extracted the live page, submitted a persistent Bridge job, recove
 
 A separate production Bridge acceptance with a public PNG returned `succeeded` with no warnings and read back an embedded Feishu image block: <<redacted-feishu-doc>>.
 
-## Remaining release check
+## Real logout/login release check
 
-The LaunchAgent has passed install, KeepAlive recovery, persisted-plist bootstrap, upgrade, and uninstall testing. A real macOS logout/login remains the final release-environment check because it necessarily interrupts the active user session.
+Completed on 2026-08-18 (Asia/Shanghai) after the user performed a real macOS
+logout and login. The persisted plist from 2026-08-12 was loaded automatically
+into the new `gui/501` session without running the installer or manually calling
+`launchctl bootstrap`:
+
+- `launchctl print gui/501/com.feishu-clip.bridge` reported `state = running`,
+  `runs = 1`, PID `790`, `last exit code = never exited`, and the expected
+  `runatload | keepalive` properties.
+- The process start time was 2026-08-18 15:59:25 and its parent PID was `1`,
+  confirming that it belonged to the login-session LaunchAgent rather than the
+  previous interactive shell.
+- The process listened only on `127.0.0.1:38479`. The application root remained
+  mode `0700`; the plist, Bridge configuration, and pairing state remained mode
+  `0600`.
+- The authenticated Bridge health endpoint returned HTTP 200, version `0.1.0`,
+  PID `790`, address `127.0.0.1`, and `larkAuth.ready = true`. A direct
+  `lark-cli auth status --json --verify` check reported the user identity ready
+  with a valid token; no Keychain downgrade was used.
+
+The first health query immediately after reconnecting to the desktop session
+reported `larkAuth.ready = false`; verifying the existing user token refreshed
+the CLI state, after which the same already-running LaunchAgent returned
+`larkAuth.ready = true`. No reinstall, re-pairing, plist reload, Bridge restart,
+or new OAuth login was required.
+
+This completes the final release-environment check. The LaunchAgent has now
+passed installation, KeepAlive recovery, persisted-plist bootstrap, upgrade,
+uninstall, and a real logout/login cycle.
