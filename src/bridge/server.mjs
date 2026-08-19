@@ -49,6 +49,34 @@ function jobView(job) {
   return visible;
 }
 
+const WIKI_TOKEN = /^[0-9A-Za-z_-]{1,64}$/;
+const MAX_CURSOR_LENGTH = 512;
+
+function parseTargetQuery(request, allowedKeys) {
+  const url = new URL(request.url || '/', 'http://127.0.0.1');
+  const query = url.searchParams;
+  for (const key of query.keys()) {
+    if (!allowedKeys.includes(key)) throw Object.assign(new Error(`未知查询参数：${key}`), { status: 400, code: 'TARGET_QUERY_INVALID' });
+  }
+  const cursor = query.get('cursor');
+  if (cursor !== null && (cursor.length === 0 || cursor.length > MAX_CURSOR_LENGTH || cursor.includes('\0'))) {
+    throw Object.assign(new Error('分页 cursor 不合法'), { status: 400, code: 'TARGET_QUERY_INVALID' });
+  }
+  let limit = 50;
+  if (query.get('limit') !== null) {
+    limit = Number(query.get('limit'));
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw Object.assign(new Error('limit 必须是 1-50 的整数'), { status: 400, code: 'TARGET_QUERY_INVALID' });
+  }
+  return { pathname: url.pathname, cursor: cursor || undefined, limit, query };
+}
+
+function larkQueryError(error) {
+  const text = `${error.code || ''} ${error.message || ''}`.toLowerCase();
+  if (/auth|login|unauthorized|token.{0,12}(expired|invalid)|登录|授权/.test(text)) return { status: 503, code: 'LARK_AUTH_REQUIRED', message: '飞书用户未登录或授权已失效' };
+  if (/permission|forbidden|denied|权限/.test(text)) return { status: 403, code: 'LARK_PERMISSION_DENIED', message: '当前飞书用户没有访问该知识库的权限' };
+  return { status: 502, code: 'LARK_REQUEST_FAILED', message: '飞书查询失败，请稍后重试' };
+}
+
 export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console }) {
   const pairing = new PairingStore(config.pairingFile);
   const store = new PersistentJobStore({ filePath: config.jobFile });
@@ -102,6 +130,34 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           return send(response, 200, { ok: true, destination }, origin);
         } catch (error) {
           return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin);
+        }
+      }
+
+      if (request.method === 'GET' && request.url?.startsWith('/v1/targets/spaces')) {
+        const { pathname, cursor, limit } = parseTargetQuery(request, ['cursor', 'limit']);
+        if (pathname !== '/v1/targets/spaces') return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);
+        try {
+          const result = await lark.listSpaces({ pageToken: cursor, pageSize: limit });
+          return send(response, 200, { ok: true, ...result }, origin);
+        } catch (error) {
+          const mapped = larkQueryError(error);
+          return send(response, mapped.status, { ok: false, code: mapped.code, message: mapped.message }, origin);
+        }
+      }
+
+      if (request.method === 'GET' && request.url?.startsWith('/v1/targets/nodes')) {
+        const { pathname, cursor, limit, query } = parseTargetQuery(request, ['spaceId', 'parentNodeToken', 'cursor', 'limit']);
+        if (pathname !== '/v1/targets/nodes') return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);
+        const spaceId = query.get('spaceId');
+        const parentNodeToken = query.get('parentNodeToken');
+        if (!spaceId || !WIKI_TOKEN.test(spaceId)) return send(response, 400, { ok: false, code: 'TARGET_QUERY_INVALID', message: 'spaceId 不合法' }, origin);
+        if (parentNodeToken !== null && !WIKI_TOKEN.test(parentNodeToken)) return send(response, 400, { ok: false, code: 'TARGET_QUERY_INVALID', message: 'parentNodeToken 不合法' }, origin);
+        try {
+          const result = await lark.listNodes({ spaceId, parentNodeToken: parentNodeToken || undefined, pageToken: cursor, pageSize: limit });
+          return send(response, 200, { ok: true, ...result }, origin);
+        } catch (error) {
+          const mapped = larkQueryError(error);
+          return send(response, mapped.status, { ok: false, code: mapped.code, message: mapped.message }, origin);
         }
       }
 

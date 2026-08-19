@@ -41,9 +41,24 @@ async function handle(message) {
     case 'STATUS': return bridge('/v1/status');
     case 'GET_SETTINGS': return localGet(['destination', 'activeAttempt']);
     case 'VALIDATE_DESTINATION': return bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
+    case 'LIST_SPACES': {
+      const params = new URLSearchParams();
+      if (message.cursor) params.set('cursor', message.cursor);
+      if (message.limit) params.set('limit', String(message.limit));
+      const query = params.toString();
+      return bridge(`/v1/targets/spaces${query ? `?${query}` : ''}`);
+    }
+    case 'LIST_NODES': {
+      const params = new URLSearchParams({ spaceId: message.spaceId });
+      if (message.parentNodeToken) params.set('parentNodeToken', message.parentNodeToken);
+      if (message.cursor) params.set('cursor', message.cursor);
+      if (message.limit) params.set('limit', String(message.limit));
+      return bridge(`/v1/targets/nodes?${params}`);
+    }
     case 'SAVE_DESTINATION': {
       const result = await bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
-      await chrome.storage.local.set({ destination: result.destination });
+      const path = Array.isArray(message.destination.path) ? message.destination.path.filter((title) => typeof title === 'string').slice(0, 32) : undefined;
+      await chrome.storage.local.set({ destination: path ? { ...result.destination, path } : result.destination });
       return result;
     }
     case 'CLIP': {

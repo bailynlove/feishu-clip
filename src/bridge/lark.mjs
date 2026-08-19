@@ -49,6 +49,37 @@ export class LarkClient {
     };
   }
 
+  async listSpaces({ pageToken, pageSize = 50 } = {}) {
+    const args = ['wiki', '+space-list', '--as', 'user', '--page-size', String(pageSize), '--format', 'json'];
+    if (pageToken) args.push('--page-token', pageToken);
+    const result = await this.run(args);
+    const data = result.data || {};
+    return {
+      spaces: (data.spaces || []).map((space) => ({ spaceId: space.space_id, name: space.name, spaceType: space.space_type || null })),
+      hasMore: data.has_more === true,
+      nextPageToken: data.has_more === true ? data.page_token || null : null,
+    };
+  }
+
+  async listNodes({ spaceId, parentNodeToken, pageToken, pageSize = 50 } = {}) {
+    const args = ['wiki', '+node-list', '--as', 'user', '--space-id', spaceId, '--page-size', String(pageSize), '--format', 'json'];
+    if (parentNodeToken) args.push('--parent-node-token', parentNodeToken);
+    if (pageToken) args.push('--page-token', pageToken);
+    const result = await this.run(args);
+    const data = result.data || {};
+    return {
+      nodes: (data.nodes || []).map((node) => ({
+        nodeToken: node.node_token,
+        spaceId: node.space_id || spaceId,
+        title: node.title,
+        objType: node.obj_type || null,
+        hasChildren: node.has_child === true,
+      })),
+      hasMore: data.has_more === true,
+      nextPageToken: data.has_more === true ? data.page_token || null : null,
+    };
+  }
+
   async validateDestination({ nodeToken, spaceId }) {
     const args = ['wiki', '+node-get', '--as', 'user', '--node-token', nodeToken, '--format', 'json'];
     if (spaceId) args.push('--space-id', spaceId);

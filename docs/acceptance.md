@@ -56,3 +56,23 @@ or new OAuth login was required.
 This completes the final release-environment check. The LaunchAgent has now
 passed installation, KeepAlive recovery, persisted-plist bootstrap, upgrade,
 uninstall, and a real logout/login cycle.
+
+## Visual default-target picker (#20)
+
+Date: 2026-08-20 (Asia/Shanghai)
+
+## Automated
+
+- `npm test`: 32 tests pass, including `test/targets.test.mjs` (route auth, query validation, pagination passthrough, error-code mapping, `LarkClient` argv and field whitelist) and `test/target-picker.test.mjs` (space list and pagination, breadcrumb navigation and back, node pagination, select-and-save summary, failed save keeps the previous default, manual fallback shares validate-and-save semantics, offline/unpaired/auth/forbidden states with retry).
+- `npm run check`: all Bridge and MV3 scripts, including the new `target-picker.js` module, parse successfully.
+
+## Real Feishu account via production Bridge path
+
+`node scripts/accept-targets.mjs` starts the production Bridge with the real `lark-cli` (v1.0.84), completes dynamic pairing, and exercises the new read-only routes against the real account:
+
+- `/v1/status` reported `larkAuth.ready = true`.
+- `/v1/targets/spaces?limit=3` returned page 1 (`Project`, `Area`) with `hasMore = true`; following `nextPageToken` returned page 2 (3 more spaces) with no overlap.
+- `/v1/targets/nodes?spaceId=<Project>&limit=5` returned root nodes (`Homepage`, `把代码截图丢给大模型 居然可以省 token`, `PiXEL`, `找工作`) with `objType`/`hasChildren` metadata and `hasMore = true`.
+- `/v1/destinations/validate` without a node token correctly fails.
+
+Remaining manual acceptance: the Chrome options-page click-through ("选择默认目标 → 剪藏网页") requires loading the updated unpacked extension (`npm run install:mac` refreshes the installed copy) and is not driven from the CLI.
