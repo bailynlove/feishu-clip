@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/bridge/server.mjs && node --check src/extension/background.js && node --check src/extension/popup.js && node --check src/extension/options.js && node --check src/extension/target-picker.js && node --check src/extension/extractor.js",
+    "check": "node --check src/bridge/server.mjs && node --check src/extension/background.js && node --check src/extension/popup.js && node --check src/extension/options.js && node --check src/extension/target-picker.js && node --check src/extension/picker-view.js && node --check src/extension/popup-picker.js && node --check src/extension/extractor.js",
     "install:mac": "node scripts/install.mjs install",
     "pair:mac": "node scripts/install.mjs pair",
     "status:mac": "node scripts/install.mjs status",
