@@ -94,3 +94,16 @@ Date: 2026-08-20 (Asia/Shanghai)
 - A root-level `wiki +node-list` readback confirmed the document at the space root with the page title preserved as the node title.
 
 Note: `docs +update --command overwrite` promotes the body's first H1 to the document title; the space path therefore uses `--command append` against the empty node (verified with a probe node in the same space).
+
+## In-popup one-off target picker (#21)
+
+Date: 2026-08-20 (Asia/Shanghai)
+
+### Automated
+
+- `npm test`: 41 tests pass, adding `test/popup-picker.test.mjs`: confirm only validates (no persistence path exists by construction), space-root confirm, fresh state on each popup open, invalidated target requires reselection with no silent fallback, and cancel mid-navigation never touches the persisted default.
+- `npm run check` passes with the new `picker-view.js` / `popup-picker.js` modules.
+
+### Manual (pending)
+
+The following remain for a real Chrome pass with the reloaded unpacked extension: picker layout within popup size (breadcrumbs, back, load-more, error states), switching one clip between two different real Feishu parent documents, and reopening the popup reverting to the persisted default target.

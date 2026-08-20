@@ -102,7 +102,6 @@ export class ClipExecutor {
         await this.store.beginCreate(job.attemptId, workerId);
         const contentPath = path.join(scratch, 'content.md');
         await writeFile(contentPath, prepared.markdown, 'utf8');
-        let created;
         try {
           if (job.destination.kind === 'space') {
             // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
@@ -118,7 +117,7 @@ export class ClipExecutor {
               '--content', '@content.md', '--format', 'json',
             ], { cwd: scratch });
           } else {
-            created = await this.lark.run([
+            const created = await this.lark.run([
               'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
               '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
               '--content', '@content.md', '--format', 'json',

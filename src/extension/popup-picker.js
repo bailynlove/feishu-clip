@@ -7,8 +7,8 @@ export function createPopupPicker({ listSpaces, listNodes, validateDestination }
     listSpaces,
     listNodes,
     saveDestination: async (destination) => {
-      const result = await validateDestination(destination);
-      return { destination: { ...result.destination, path: destination.path || [result.destination.title] } };
+      // 只验证，不持久化；路径合并由 target-picker 的 saveManual 统一完成
+      return validateDestination(destination);
     },
   });
 }

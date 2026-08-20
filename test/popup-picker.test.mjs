@@ -85,3 +85,17 @@ test('invalidated target requires reselection instead of silent fallback', async
   const confirmed = await picker.saveSelection();
   assert.equal(confirmed.spaceId, 's2');
 });
+
+test('cancelling mid-navigation leaves the persisted default untouched', async () => {
+  const existing = { kind: 'node', nodeToken: 'default-n', spaceId: 's0', title: '默认目录', path: ['默认'] };
+  const { deps, validated } = fakeDeps();
+  const picker = createPopupPicker(deps);
+  await picker.start();
+  await picker.openSpace(spaces[0]);
+  picker.select({ nodeToken: 'n1', spaceId: 's1', title: '收集箱' });
+
+  // 取消 = 弹窗直接丢弃控制器；此前未确认的任何选择都不应触发验证或修改
+  assert.equal(validated.length, 0, 'navigation and selection alone must not call the bridge');
+  assert.equal(picker.getState().saving, false);
+  assert.equal(existing.title, '默认目录', 'persisted default is storage-side and never enters the picker');
+});

@@ -199,13 +199,14 @@ export function createTargetPicker({ listSpaces, listNodes, saveDestination, ini
       patch({ saving: true, error: null });
       try {
         const result = await saveDestination(destination);
+        const merged = { ...result.destination, path: destination.path || [result.destination.title] };
         patch({
           saving: false,
-          destination: { ...result.destination, path: destination.path || [result.destination.title] },
+          destination: merged,
           savedTick: state.savedTick + 1,
           status: state.status === 'idle' ? 'ready' : state.status,
         });
-        return result.destination;
+        return merged;
       } catch (error) {
         // 保存失败不得覆盖原有默认目标
         patch({ saving: false, error: { kind: classifyPickerError(error), message: error?.message || '保存失败' } });
