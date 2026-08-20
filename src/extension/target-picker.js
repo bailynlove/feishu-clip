@@ -25,6 +25,7 @@ export function createTargetPicker({ listSpaces, listNodes, saveDestination, ini
     nodes: [],
     nodesHasMore: false,
     selectedNodeToken: null,
+    selectedSpaceId: null,
     saving: false,
     savedTick: 0, // 保存成功后递增，供 UI 提示
   };
@@ -92,7 +93,7 @@ export function createTargetPicker({ listSpaces, listNodes, saveDestination, ini
     },
 
     async start() {
-      await run({ view: 'spaces', crumbs: [], spaces: [], selectedNodeToken: null }, async () => {
+      await run({ view: 'spaces', crumbs: [], spaces: [], selectedNodeToken: null, selectedSpaceId: null }, async () => {
         const page = await loadSpacesPage();
         cursors.spaces = page.nextCursor;
         return { spaces: page.spaces, spacesHasMore: page.spacesHasMore };
@@ -132,7 +133,7 @@ export function createTargetPicker({ listSpaces, listNodes, saveDestination, ini
 
     async openSpace(space) {
       const crumbs = [{ spaceId: space.spaceId, title: space.name }];
-      await run({ view: 'nodes', crumbs, nodes: [], selectedNodeToken: null }, async () => {
+      await run({ view: 'nodes', crumbs, nodes: [], selectedNodeToken: null, selectedSpaceId: null }, async () => {
         const page = await loadNodesPage({ spaceId: space.spaceId });
         cursors.nodes = page.nextCursor;
         return { nodes: page.nodes, nodesHasMore: page.nodesHasMore };
@@ -175,11 +176,22 @@ export function createTargetPicker({ listSpaces, listNodes, saveDestination, ini
       patch({ selectedNodeToken: node.nodeToken });
     },
 
+    selectSpace(space) {
+      if (state.view !== 'spaces') return;
+      patch({ selectedSpaceId: space.spaceId });
+    },
+
     async saveSelection() {
+      if (state.saving) return null;
+      if (state.view === 'spaces') {
+        const space = state.spaces.find((candidate) => candidate.spaceId === state.selectedSpaceId);
+        if (!space) return null;
+        return picker.saveManual({ kind: 'space', spaceId: space.spaceId, title: space.name, path: [space.name] });
+      }
       const node = state.nodes.find((candidate) => candidate.nodeToken === state.selectedNodeToken);
-      if (!node || state.saving) return null;
+      if (!node) return null;
       const path = state.crumbs.map((crumb) => crumb.title);
-      return picker.saveManual({ nodeToken: node.nodeToken, spaceId: node.spaceId, title: node.title, path });
+      return picker.saveManual({ kind: 'node', nodeToken: node.nodeToken, spaceId: node.spaceId, title: node.title, path });
     },
 
     async saveManual(destination) {

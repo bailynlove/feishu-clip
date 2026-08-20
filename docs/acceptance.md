@@ -76,3 +76,21 @@ Date: 2026-08-20 (Asia/Shanghai)
 - `/v1/destinations/validate` without a node token correctly fails.
 
 Remaining manual acceptance: the Chrome options-page click-through ("选择默认目标 → 剪藏网页") requires loading the updated unpacked extension (`npm run install:mac` refreshes the installed copy) and is not driven from the CLI.
+
+## Space-root destinations (#22)
+
+Date: 2026-08-20 (Asia/Shanghai)
+
+### Automated
+
+- `npm test`: 36 tests pass, adding space-destination validation, the two-step create path (`wiki +node-create` then `docs +update --command append`), job-route input rules, and picker space selection (visual and manual).
+- `npm run check` passes.
+
+### Real Feishu account
+
+`node scripts/accept-space-target.mjs` paired against the production Bridge path, validated the `Area` space as a destination, and submitted a real clip job with `kind: 'space'`:
+
+- Created document: <<redacted-feishu-doc>>
+- A root-level `wiki +node-list` readback confirmed the document at the space root with the page title preserved as the node title.
+
+Note: `docs +update --command overwrite` promotes the body's first H1 to the document title; the space path therefore uses `--command append` against the empty node (verified with a probe node in the same space).

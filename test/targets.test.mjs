@@ -23,7 +23,7 @@ async function startBridge(fakeLark) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const paired = await (await fetch(`${base}/v1/pair`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })).json();
   assert.equal(paired.ok, true);
-  const call = (url) => fetch(`${base}${url}`, { headers: { Origin: origin, Authorization: `Bearer ${paired.credential}` } });
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, Authorization: `Bearer ${paired.credential}`, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
   return {
     call,
     async close() {
@@ -164,4 +164,62 @@ test('LarkClient builds bounded read-only argv and maps envelope fields', async 
   assert.equal(rootNodes.nodes.length, 1);
   assert.ok(!calls[2].includes('--parent-node-token'), 'root listing omits parent token');
   assert.ok(!calls[2].includes('--page-token'), 'no page token without cursor');
+});
+
+test('LarkClient validates space destinations and keeps node destinations working', async () => {
+  const calls = [];
+  const client = new LarkClient({ cliPath: '/fake' });
+  client.run = async (args) => {
+    calls.push(args);
+    if (args[1] === 'spaces') return { ok: true, data: { space: { space_id: 's1', name: 'Project', space_type: 'team' } } };
+    return { ok: true, data: { node: { node_token: 'n1', space_id: 's1', title: '目录', obj_type: 'docx' } } };
+  };
+
+  const space = await client.validateDestination({ spaceId: 's1' });
+  assert.deepEqual(calls[0], ['wiki', 'spaces', 'get', '--as', 'user', '--space-id', 's1', '--format', 'json']);
+  assert.deepEqual(space, { kind: 'space', spaceId: 's1', title: 'Project', objType: null });
+
+  const node = await client.validateDestination({ nodeToken: 'n1' });
+  assert.equal(node.kind, 'node');
+  assert.equal(node.nodeToken, 'n1');
+});
+
+test('space destination validates and creates the document at the space root', async () => {
+  const calls = [];
+  const lark = fakeLark({
+    validateDestination: async ({ spaceId }) => ({ kind: 'space', spaceId, title: 'Project', objType: null }),
+    run: async (args) => {
+      calls.push(args);
+      if (args[1] === '+node-create') return { ok: true, data: { node: { node_token: 'wn-new', obj_token: 'docx-new', url: 'https://example.feishu.cn/wiki/wn-new' } } };
+      return { ok: true, data: {} };
+    },
+  });
+  const bridge = await startBridge(lark);
+  try {
+    const validated = await (await bridge.call('/v1/destinations/validate', { method: 'POST', body: JSON.stringify({ kind: 'space', spaceId: 's1' }) })).json();
+    assert.equal(validated.ok, true);
+    assert.equal(validated.destination.kind, 'space');
+    assert.equal((await bridge.call('/v1/destinations/validate', { method: 'POST', body: JSON.stringify({}) })).status, 400);
+    assert.equal((await bridge.call('/v1/jobs', { method: 'POST', body: JSON.stringify({ attemptId: '33333333-3333-4333-8333-333333333333', destination: {}, snapshot: { title: 't', sourceUrl: 'https://example.com', markdown: 'x' } }) })).status, 400);
+
+    const attemptId = '22222222-2222-4222-8222-222222222222';
+    const submitted = await bridge.call('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId, destination: { kind: 'space', spaceId: 's1' }, snapshot: { title: '空间根剪藏', sourceUrl: 'https://example.com/article', capturedAt: new Date().toISOString(), markdown: '# 正文' } }),
+    });
+    assert.equal(submitted.status, 202);
+    let job;
+    for (let count = 0; count < 30; count += 1) {
+      job = (await (await bridge.call(`/v1/jobs/${attemptId}`)).json()).job;
+      if (['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention'].includes(job.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(job.status, 'succeeded', `job ended in ${job.status}: ${job.error || ''}`);
+    assert.equal(job.document.url, 'https://example.feishu.cn/wiki/wn-new');
+    assert.deepEqual(calls[0], ['wiki', '+node-create', '--as', 'user', '--space-id', 's1', '--obj-type', 'docx', '--title', '空间根剪藏', '--format', 'json']);
+    assert.deepEqual(calls[1].slice(0, 8), ['docs', '+update', '--as', 'user', '--doc', 'docx-new', '--command', 'append']);
+    assert.ok(calls[1].includes('--content'), 'second step writes the markdown body');
+  } finally {
+    await bridge.close();
+  }
 });

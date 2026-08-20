@@ -80,12 +80,23 @@ export class LarkClient {
     };
   }
 
+  async getSpace({ spaceId }) {
+    const result = await this.run(['wiki', 'spaces', 'get', '--as', 'user', '--space-id', spaceId, '--format', 'json']);
+    const space = result.data?.space || result.data;
+    return { spaceId: space.space_id || spaceId, name: space.name || spaceId, spaceType: space.space_type || null };
+  }
+
   async validateDestination({ nodeToken, spaceId }) {
+    if (!nodeToken) {
+      const space = await this.getSpace({ spaceId });
+      return { kind: 'space', spaceId: space.spaceId, title: space.name, objType: null };
+    }
     const args = ['wiki', '+node-get', '--as', 'user', '--node-token', nodeToken, '--format', 'json'];
     if (spaceId) args.push('--space-id', spaceId);
     const result = await this.run(args);
     const node = result.data?.node || result.data;
     return {
+      kind: 'node',
       nodeToken: node.node_token || nodeToken,
       spaceId: node.space_id || spaceId || null,
       title: node.title || node.name || nodeToken,

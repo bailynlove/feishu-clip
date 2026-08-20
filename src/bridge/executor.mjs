@@ -48,6 +48,14 @@ function parseDocument(envelope) {
   return { documentId, url };
 }
 
+function parseCreatedNode(envelope) {
+  const node = envelope.data?.node || envelope.data;
+  const documentId = node.obj_token || node.document_id;
+  const url = node.url || node.node_url;
+  if (!documentId || !url) throw new Error('LARK_CREATE_MISSING_DOCUMENT');
+  return { documentId, url };
+}
+
 async function imageBytes(image) {
   if (image.bytesBase64) {
     const buffer = Buffer.from(image.bytesBase64, 'base64');
@@ -96,20 +104,36 @@ export class ClipExecutor {
         await writeFile(contentPath, prepared.markdown, 'utf8');
         let created;
         try {
-          created = await this.lark.run([
-            'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
-            '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
-            '--content', '@content.md', '--format', 'json',
-          ], { cwd: scratch });
+          if (job.destination.kind === 'space') {
+            // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
+            const node = await this.lark.run([
+              'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
+              '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
+            ], { cwd: scratch });
+            document = parseCreatedNode(node);
+            // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
+            await this.lark.run([
+              'docs', '+update', '--as', 'user', '--doc', document.documentId,
+              '--command', 'append', '--doc-format', 'markdown',
+              '--content', '@content.md', '--format', 'json',
+            ], { cwd: scratch });
+          } else {
+            created = await this.lark.run([
+              'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
+              '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
+              '--content', '@content.md', '--format', 'json',
+            ], { cwd: scratch });
+            document = parseDocument(created);
+          }
         } catch (error) {
-          if (error.code === 'LARK_TIMEOUT') {
+          if (error.code === 'LARK_TIMEOUT' && !document) {
             await this.store.markCreateAmbiguous(job.attemptId, workerId);
             return;
           }
+          if (document) await this.store.recordDocument(job.attemptId, workerId, document);
           await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.CREATE_DOCUMENT, error: error.message });
           return;
         }
-        document = parseDocument(created);
         await this.store.recordDocument(job.attemptId, workerId, document);
       }
 

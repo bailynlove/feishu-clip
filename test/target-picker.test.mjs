@@ -107,7 +107,7 @@ test('selects a node and saves a full destination summary', async () => {
   picker.select(rootNodes[0]);
   const savedDestination = await picker.saveSelection();
   assert.equal(savedDestination.title, '已验证标题');
-  assert.deepEqual(saved, [{ nodeToken: 'n1', spaceId: 's1', title: '首页', path: ['Project'] }]);
+  assert.deepEqual(saved, [{ kind: 'node', nodeToken: 'n1', spaceId: 's1', title: '首页', path: ['Project'] }]);
   const state = picker.getState();
   assert.deepEqual(state.destination, { nodeToken: 'n1', spaceId: 's1', title: '已验证标题', objType: 'docx', path: ['Project'] });
   assert.equal(state.savedTick, 1);
@@ -164,4 +164,30 @@ test('failure states classify bridge offline, unpaired, auth and forbidden', asy
   await picker.retry();
   assert.equal(picker.getState().status, 'ready');
   assert.equal(picker.getState().spaces.length, 2);
+});
+
+test('selects a space itself and saves it as a space-root destination', async () => {
+  const { deps, saved } = fakeBridge({ spaces });
+  const picker = createTargetPicker({ ...deps });
+  await picker.start();
+
+  assert.equal(await picker.saveSelection(), null, 'nothing to save before selecting');
+  picker.selectSpace(spaces[1]);
+  assert.equal(picker.getState().selectedSpaceId, 's2');
+  const savedDestination = await picker.saveSelection();
+  assert.equal(savedDestination.title, '已验证标题');
+  assert.deepEqual(saved, [{ kind: 'space', spaceId: 's2', title: 'Area', path: ['Area'] }]);
+  assert.deepEqual(picker.getState().destination.path, ['Area']);
+
+  // 进入知识库后空间选择被清除，避免误保存
+  await picker.openSpace(spaces[0]);
+  assert.equal(picker.getState().selectedSpaceId, null);
+});
+
+test('manual space-only input saves a space destination', async () => {
+  const { deps, saved } = fakeBridge({});
+  const picker = createTargetPicker({ ...deps, initialDestination: null });
+  const savedDestination = await picker.saveManual({ kind: 'space', spaceId: 's9' });
+  assert.equal(savedDestination.spaceId, 's9');
+  assert.deepEqual(saved, [{ kind: 'space', spaceId: 's9' }]);
 });

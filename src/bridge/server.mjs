@@ -124,7 +124,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
 
       if (request.method === 'POST' && request.url === '/v1/destinations/validate') {
         const body = await readJson(request);
-        if (!body.nodeToken) return send(response, 400, { ok: false, code: 'NODE_TOKEN_REQUIRED' }, origin);
+        if (!body.nodeToken && !body.spaceId) return send(response, 400, { ok: false, code: 'DESTINATION_REQUIRED' }, origin);
         try {
           const destination = await lark.validateDestination(body);
           return send(response, 200, { ok: true, destination }, origin);
@@ -163,7 +163,8 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
 
       if (request.method === 'POST' && request.url === '/v1/jobs') {
         const body = await readJson(request);
-        if (!body.attemptId || !body.destination?.nodeToken) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
+        const isSpaceTarget = body.destination?.kind === 'space';
+        if (!body.attemptId || !(isSpaceTarget ? body.destination?.spaceId : body.destination?.nodeToken)) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
         validateSnapshot(body.snapshot);
         try { await lark.validateDestination(body.destination); }
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }

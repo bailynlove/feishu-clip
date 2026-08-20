@@ -83,18 +83,25 @@ function render(picker, state) {
   if (state.view === 'spaces') {
     for (const space of state.spaces) {
       const item = document.createElement('li');
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'picker-row';
-      const title = document.createElement('span');
+      const row = document.createElement('div');
+      row.className = `picker-row selectable${space.spaceId === state.selectedSpaceId ? ' selected' : ''}`;
+      const title = document.createElement('button');
+      title.type = 'button';
       title.className = 'row-title';
       title.textContent = space.name;
+      title.addEventListener('click', () => picker.selectSpace(space));
+      row.append(title);
       const hint = document.createElement('span');
       hint.className = 'row-hint';
       hint.textContent = space.spaceType === 'team' ? '团队' : '个人';
-      button.append(title, hint);
-      button.addEventListener('click', () => picker.openSpace(space));
-      item.append(button);
+      row.append(hint);
+      const drill = document.createElement('button');
+      drill.type = 'button';
+      drill.className = 'link row-drill';
+      drill.textContent = '进入 ›';
+      drill.addEventListener('click', () => picker.openSpace(space));
+      row.append(drill);
+      item.append(row);
       list.append(item);
     }
   } else {
@@ -126,9 +133,10 @@ function render(picker, state) {
   }
 
   const saveButton = $('#picker-save');
-  saveButton.classList.toggle('hidden', state.view !== 'nodes');
-  saveButton.disabled = state.saving || !state.selectedNodeToken;
-  saveButton.textContent = state.saving ? '正在验证并保存…' : '设为默认保存目标';
+  const hasSelection = state.view === 'spaces' ? Boolean(state.selectedSpaceId) : Boolean(state.selectedNodeToken);
+  saveButton.classList.remove('hidden');
+  saveButton.disabled = state.saving || !hasSelection;
+  saveButton.textContent = state.saving ? '正在验证并保存…' : state.view === 'spaces' ? '将该知识库根层设为默认目标' : '设为默认保存目标';
 }
 
 async function init() {
@@ -157,7 +165,12 @@ async function init() {
     else show(`保存失败：${picker.getState().error?.message || '请重试'}`, 'error');
   });
   $('#save-target').addEventListener('click', async () => {
-    const saved = await picker.saveManual({ nodeToken: $('#token').value.trim(), spaceId: $('#space').value.trim() || undefined });
+    const nodeToken = $('#token').value.trim();
+    const spaceId = $('#space').value.trim() || undefined;
+    if (!nodeToken && !spaceId) { show('请填写 Wiki 节点 token 或空间 ID。', 'error'); return; }
+    const saved = nodeToken
+      ? await picker.saveManual({ kind: 'node', nodeToken, spaceId })
+      : await picker.saveManual({ kind: 'space', spaceId });
     if (saved) show(`默认目标已保存：${describeDestination(picker.getState().destination)}`, 'success');
     else show(`目标验证失败：${picker.getState().error?.message || '请重试'}`, 'error');
   });
