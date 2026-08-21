@@ -1,6 +1,6 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, resetTitle, isTitleEdited, primaryLabel, overrideDestination } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -153,7 +153,8 @@ $('#save').addEventListener('click', async () => {
   if (currentPreset(presetState).action !== 'feishu') { show('该预设动作暂未支持，请改用保存到飞书。'); return; }
   $('#save').disabled = true; show('正在提取当前页面…');
   try {
-    const result = await message({ type: 'CLIP', destination: presetState.destination, includeImages: $('#images').checked, title: presetState.title });
+    // 语义 B：标题框内容保存时再过一遍模板渲染，清洗与空白回退在 background 完成
+    const result = await message({ type: 'CLIP', destination: presetState.destination, includeImages: $('#images').checked, title: finalTitle(presetState) });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
     $('#open').classList.add('hidden'); $('#save').classList.remove('hidden');

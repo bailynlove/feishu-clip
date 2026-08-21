@@ -10,7 +10,9 @@ import {
   resetTitle,
   isTitleEdited,
   primaryLabel,
+  finalTitle,
 } from '../src/extension/popup-state.js';
+import { sanitizeClipTitle } from '../src/extension/templates.js';
 
 const succeededJob = { status: 'succeeded', warnings: [], document: { url: 'https://example.feishu.cn/wiki/docx-1' } };
 const warningsJob = { status: 'succeeded_with_warnings', warnings: ['图片 1：超时'], document: { url: 'https://example.feishu.cn/wiki/docx-2' } };
@@ -162,4 +164,30 @@ test('switching presets clears a manual 仅本次 override and restarts from the
   state = selectPreset(state, 'p2');
   assert.deepEqual(state.destination, nodeTarget, 'temporary override does not survive a preset switch');
   assert.equal(state.temporary, false);
+});
+
+// ——— 语义 B：保存时标题框内容再过一遍模板渲染 ———
+
+test('finalTitle re-renders template variables typed into the title input', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '【{{host}}】{{title}} @ {{date}}');
+  assert.equal(finalTitle(state), '【blog.example.com】深入理解剪藏 @ 2026-08-21');
+});
+
+test('finalTitle is idempotent for an untouched, already-rendered title', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p2' }, tab, now);
+  assert.equal(finalTitle(state), state.title, 'rendered value contains no {{}}, second pass is a no-op');
+});
+
+test('finalTitle blanks unknown variables', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '{{author}} - 深入理解剪藏');
+  assert.equal(finalTitle(state), ' - 深入理解剪藏');
+});
+
+test('a title rendering to blank falls back to the extractor title via sanitizeClipTitle', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '{{unknown}}');
+  assert.equal(finalTitle(state), '');
+  assert.equal(sanitizeClipTitle(finalTitle(state)), null, 'background must not override snapshot.title with a blank render');
 });

@@ -2,7 +2,7 @@
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
 import { createDefaultPreset } from './presets.js';
-import { buildContext, renderTitle } from './templates.js';
+import { buildContext, renderTemplate, renderTitle } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
@@ -84,6 +84,13 @@ export function editTitle(state, value) {
 
 export function resetTitle(state) {
   return { ...state, title: renderCurrentTitle(state) };
+}
+
+// 语义 B：保存时把标题框当前字符串当作模板，用打开弹窗时的页面上下文再渲一次。
+// 未手改时初始值已是渲染结果、不含 {{}}，二次渲染幂等；渲染出空白由 background 的
+// sanitizeClipTitle 判空，回退 extractor 标题。不用 renderTitle（它会回退 ctx.title）。
+export function finalTitle(state) {
+  return renderTemplate(state.title, state.titleContext);
 }
 
 // 主按钮文字跟随当前预设默认动作；split 按钮与导出动作实现归 #38
