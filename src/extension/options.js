@@ -44,11 +44,14 @@ let confirmDeleteId = null;
 // 报错，修复合法写回成功后清除。内存态即可，重开设置页页面后丢弃。
 const triggerDrafts = new Map();
 
+let saveToastTimer = null;
 async function persist(quiet = false) {
   const saved = await message({ type: 'SAVE_PRESETS', presets: state.presets, defaultPresetId: state.defaultPresetId });
   state = { ...state, ...saved };
-  // 文本框逐键保存不打扰；离散操作（新建/删除/排序/目标保存等）才弹「已保存」
-  if (!quiet) toast('已保存 ✓', 'success');
+  if (!quiet) { toast('已保存 ✓', 'success'); return; }
+  // 文本框逐键保存不逐键打扰：停顿 1 秒后汇总弹一次「已保存」
+  clearTimeout(saveToastTimer);
+  saveToastTimer = setTimeout(() => toast('已保存 ✓', 'success'), 1000);
 }
 
 function editingPreset() {
