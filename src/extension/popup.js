@@ -66,7 +66,12 @@ async function inspect() {
   attemptId = settings.activeAttempt || null;
   recoveredAttempt = Boolean(attemptId);
   try {
-    const status = await message({ type: 'STATUS' });
+    let status = await message({ type: 'STATUS' });
+    // 重载扩展后首次查询可能赶上 lark-cli 冷启动/网络抖动，未就绪时延迟重试一次再下结论
+    if (!status.larkAuth?.ready) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      status = await message({ type: 'STATUS' });
+    }
     $('#bridge').textContent = status.larkAuth?.ready ? `Bridge ${status.version} · 飞书已登录` : `Bridge ${status.version} · 飞书未登录`;
     if (!status.larkAuth?.ready) show('请先在终端完成 lark-cli 用户登录。', 'error');
   } catch (error) {

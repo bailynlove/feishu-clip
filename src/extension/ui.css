@@ -8,7 +8,7 @@
 .popup .hero-top{display:flex;align-items:center;gap:8px}
 .popup .hero .logo{width:26px;height:26px;border-radius:8px;background:rgba(255,255,255,.5);color:var(--brand-ink)}
 .popup .pill{margin-left:auto;font-size:11px;background:rgba(255,255,255,.5);border-radius:999px;padding:3px 10px;white-space:nowrap;max-width:170px;overflow:hidden;text-overflow:ellipsis}
-.popup .hero-gear{border:0;background:rgba(255,255,255,.5);color:var(--brand-ink);border-radius:8px;width:26px;height:26px;cursor:pointer;flex-shrink:0}
+.popup .hero-gear{border:0;background:rgba(255,255,255,.5);color:var(--brand-ink);border-radius:8px;width:26px;height:26px;cursor:pointer;flex-shrink:0;font-size:16px;line-height:1}
 .popup .hero h1{margin:14px 0 0;font-size:19px;font-weight:800;line-height:1.4;color:var(--brand-ink)}
 .popup .hero p{margin:4px 0 0;font-size:11px;color:var(--brand-ink);opacity:.7}
 .popup .popup-body{padding:18px 20px;display:flex;flex-direction:column;gap:14px;flex:1}
@@ -44,5 +44,7 @@
 .popup .sheet .picker-actions{padding:0 12px}
 .popup .sheet .link{color:var(--brand-deep)}
 .popup .sheet #tp-confirm{width:auto;margin:4px 14px 16px}
+.popup .picker-row{padding:0}
+.popup .picker-row .row-title{padding:10px 12px;min-height:38px;display:flex;align-items:center}
 .popup .picker-row:hover{background:var(--brand-soft)}
 .popup .picker-row.selected{background:var(--brand-soft);box-shadow:inset 3px 0 0 var(--brand-deep)}
