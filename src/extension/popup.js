@@ -1,9 +1,10 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
+import { describeJobView } from './popup-state.js';
 
-const terminal = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 let destination = null;
 let attemptId = null;
+let recoveredAttempt = false;
 let pollTimer = null;
 let popupPicker = null;
 
@@ -60,6 +61,7 @@ async function inspect() {
   const settings = await message({ type: 'GET_SETTINGS' });
   setDestination(settings.destination);
   attemptId = settings.activeAttempt || null;
+  recoveredAttempt = Boolean(attemptId);
   try {
     const status = await message({ type: 'STATUS' });
     $('#bridge').textContent = status.larkAuth?.ready ? `Bridge ${status.version} · 飞书已登录` : `Bridge ${status.version} · 飞书未登录`;
@@ -75,13 +77,18 @@ async function poll() {
   clearTimeout(pollTimer);
   try {
     const { job } = await message({ type: 'GET_JOB', attemptId });
-    if (job.status === 'succeeded' || job.status === 'succeeded_with_warnings') {
-      show(job.status === 'succeeded' ? '已保存到飞书。' : `正文已保存；${job.warnings.length} 张图片需要注意。`, job.status === 'succeeded' ? 'success' : 'warning');
-      $('#save').classList.add('hidden'); $('#open').classList.remove('hidden'); $('#open').dataset.url = job.document.url;
-    } else if (terminal.has(job.status)) {
-      show(job.error || '剪藏未完成，请修复后重新发起。', 'error'); $('#save').disabled = false;
+    const view = describeJobView(job, { recovered: recoveredAttempt });
+    if (view.kind === 'success' || view.kind === 'warning') {
+      show(view.message, view.kind);
+      if (view.documentUrl) { $('#open').classList.remove('hidden'); $('#open').dataset.url = view.documentUrl; }
+      // 仅本次会话发起的保存成功才切换主按钮；恢复的旧成功态保留「保存到飞书」以便直接发起新剪藏
+      if (view.swapPrimary) $('#save').classList.add('hidden');
+      recoveredAttempt = false;
+    } else if (view.kind === 'failure') {
+      show(view.message, 'error'); $('#save').disabled = false;
+      recoveredAttempt = false;
     } else {
-      show(job.status === 'queued' ? '已提交，等待本地 Bridge 处理…' : '正在创建飞书文档并处理图片…');
+      show(view.message);
       pollTimer = setTimeout(poll, 900);
     }
   } catch (error) { show(error.message, 'error'); }
@@ -107,7 +114,13 @@ $('#tp-confirm').addEventListener('click', async () => {
 $('#save').addEventListener('click', async () => {
   if (!destination) { show('请先在设置中配置默认保存目标。', 'error'); return; }
   $('#save').disabled = true; show('正在提取当前页面…');
-  try { const result = await message({ type: 'CLIP', destination, includeImages: $('#images').checked }); attemptId = result.job.attemptId; poll(); }
+  try {
+    const result = await message({ type: 'CLIP', destination, includeImages: $('#images').checked });
+    attemptId = result.job.attemptId;
+    recoveredAttempt = false;
+    $('#open').classList.add('hidden'); $('#save').classList.remove('hidden');
+    poll();
+  }
   catch (error) { show(error.code === 'INVALID_TARGET' ? '保存目标已失效，请重新选择。' : error.message, 'error'); $('#save').disabled = false; }
 });
 $('#open').addEventListener('click', () => chrome.tabs.create({ url: $('#open').dataset.url }));
