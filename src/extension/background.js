@@ -1,4 +1,5 @@
 import { ensurePresets, saveDefaultDestination } from './presets.js';
+import { sanitizeClipTitle } from './templates.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 
@@ -79,8 +80,9 @@ async function handle(message) {
     }
     case 'CLIP': {
       const snapshot = await extractActiveTab();
-      // 弹窗可编辑标题（#36）：渲染结果随 CLIP 发来，Bridge 不懂模板语法（#30 决议）
-      if (typeof message.title === 'string' && message.title.trim() !== '') snapshot.title = message.title;
+      // 弹窗可编辑标题（#36）：渲染/手改结果随 CLIP 发来，清洗后覆盖；为空回退 extractor 标题
+      const title = sanitizeClipTitle(message.title);
+      if (title) snapshot.title = title;
       const attemptId = crypto.randomUUID();
       const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages } });
       await chrome.storage.local.set({ activeAttempt: attemptId });

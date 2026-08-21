@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeFilename } from '../src/extension/templates.js';
+import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeFilename, sanitizeClipTitle } from '../src/extension/templates.js';
 
 // 用本地时间分量构造，避免时区影响断言
 const capturedAt = new Date(2026, 0, 5, 9, 7, 3).toISOString(); // 2026-01-05 09:07:03 本地
@@ -85,4 +85,20 @@ test('sanitizeFilename strips unsafe characters, trims and drops trailing dots',
   assert.equal(sanitizeFilename('a\u0001b\u001f'), 'a-b-', '控制字符替换为 -');
   assert.equal(sanitizeFilename('  名称..  '), '名称');
   assert.equal(sanitizeFilename('...'), '');
+});
+
+test('sanitizeClipTitle cleans a manually edited title', () => {
+  assert.equal(sanitizeClipTitle('  我的 标题/草稿.  '), '我的 标题-草稿');
+});
+
+test('sanitizeClipTitle returns null when nothing usable remains, so the caller falls back to the extractor title', () => {
+  assert.equal(sanitizeClipTitle(''), null);
+  assert.equal(sanitizeClipTitle('   '), null);
+  assert.equal(sanitizeClipTitle(undefined), null);
+  assert.equal(sanitizeClipTitle(null), null);
+  assert.equal(sanitizeClipTitle(42), null);
+});
+
+test('sanitizeClipTitle keeps sanitizeFilename semantics for unsafe characters', () => {
+  assert.equal(sanitizeClipTitle('???'), '---', 'unsafe characters are replaced, not dropped');
 });

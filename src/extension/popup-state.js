@@ -42,12 +42,19 @@ function renderCurrentTitle(state) {
   return renderTitle(currentPreset(state).titleTemplate, state.titleContext);
 }
 
-// 打开弹窗：选中默认预设并按其 titleTemplate 渲染标题初值；
+// 预设是顶层单位：自带保存目标与 includeImages（#29）。选中预设即应用其参数；
+// temporary 仅属于用户手动用选择器覆盖的「仅本次」临时目标，预设自带目标不亮徽标
+function applyPresetParams(state) {
+  const preset = currentPreset(state);
+  return { ...state, destination: preset.destination ?? null, temporary: false, includeImages: preset.includeImages !== false };
+}
+
+// 打开弹窗：选中默认预设，应用其目标/图片参数并按其 titleTemplate 渲染标题初值；
 // 无预设时兜底为迁移生成的「默认」预设（正常路径 background 已迁移好，这里防御旧数据）
 export function initPopupPresets({ presets, defaultPresetId } = {}, tab, now) {
   const list = Array.isArray(presets) && presets.length > 0 ? presets : [createDefaultPreset()];
   const selected = list.find((preset) => preset.id === defaultPresetId) ?? list[0];
-  const state = { presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) };
+  const state = applyPresetParams({ presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) });
   return { ...state, title: renderCurrentTitle(state) };
 }
 
@@ -56,12 +63,19 @@ export function isTitleEdited(state) {
   return state.title !== renderCurrentTitle(state);
 }
 
-// 切换预设：未手改时按新预设模板重渲标题；手改过则保留用户内容
+// 切换预设：应用新预设的保存目标与 includeImages，并清除之前的「仅本次」临时目标
+// （三级语义：默认预设 → 选中预设 → 仅本次覆盖，换预设即从该预设重新起算）；
+// 标题未手改时按新预设模板重渲，手改过则保留用户内容
 export function selectPreset(state, presetId) {
   if (presetId === state.presetId || !state.presets.some((preset) => preset.id === presetId)) return state;
-  const next = { ...state, presetId };
+  const next = applyPresetParams({ ...state, presetId });
   if (!isTitleEdited(state)) next.title = renderCurrentTitle(next);
   return next;
+}
+
+// 手动「仅本次」目标覆盖：只影响当前预设会话，不回写预设
+export function overrideDestination(state, destination) {
+  return { ...state, destination: destination ?? null, temporary: true };
 }
 
 export function editTitle(state, value) {

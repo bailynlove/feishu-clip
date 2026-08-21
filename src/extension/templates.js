@@ -92,3 +92,11 @@ export function sanitizeFilename(name) {
     .trim()
     .replace(/\.+$/, '');
 }
+
+// CLIP 携带的手改标题（#36）：非法字符清洗；清洗后为空（空白/纯非法字符/非字符串）
+// 返回 null，调用方回退 extractor 标题，绝不把空标题发给 Bridge
+export function sanitizeClipTitle(title) {
+  if (typeof title !== 'string') return null;
+  const cleaned = sanitizeFilename(title);
+  return cleaned === '' ? null : cleaned;
+}

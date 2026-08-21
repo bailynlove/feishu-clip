@@ -5,6 +5,7 @@ import {
   initPopupPresets,
   currentPreset,
   selectPreset,
+  overrideDestination,
   editTitle,
   resetTitle,
   isTitleEdited,
@@ -52,9 +53,11 @@ test('in-flight jobs keep polling with progress text', () => {
 
 const tab = { title: '深入理解剪藏', url: 'https://blog.example.com/posts/42' };
 const now = new Date('2026-08-21T15:30:45');
+const spaceTarget = { kind: 'space', spaceId: 'sp1', title: '知识库 A' };
+const nodeTarget = { kind: 'node', nodeToken: 'nd2', spaceId: 'sp1', title: '归档目录' };
 const presets = [
-  { id: 'p1', name: '默认', titleTemplate: '{{title}}', action: 'feishu' },
-  { id: 'p2', name: '归档', titleTemplate: '[{{host}}] {{title}} {{date|date:YYYYMMDD}}', action: 'clipboard' },
+  { id: 'p1', name: '默认', titleTemplate: '{{title}}', action: 'feishu', destination: spaceTarget, includeImages: true },
+  { id: 'p2', name: '归档', titleTemplate: '[{{host}}] {{title}} {{date|date:YYYYMMDD}}', action: 'clipboard', destination: nodeTarget, includeImages: false },
 ];
 
 test('init selects the default preset and renders the title from its template', () => {
@@ -123,4 +126,40 @@ test('primary label follows the preset default action', () => {
   assert.equal(primaryLabel('clipboard'), '复制到剪贴板');
   assert.equal(primaryLabel('file'), '保存为文件');
   assert.equal(primaryLabel('mystery'), '⬇ 保存到飞书', 'unknown actions fall back to the feishu label');
+});
+
+test('init applies the default preset destination and includeImages without the temporary badge', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p2' }, tab, now);
+  assert.deepEqual(state.destination, nodeTarget);
+  assert.equal(state.includeImages, false);
+  assert.equal(state.temporary, false, 'preset-owned destination must not wear the 仅本次 badge');
+});
+
+test('switching presets applies the new preset destination and includeImages', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.deepEqual(state.destination, spaceTarget);
+  assert.equal(state.includeImages, true);
+  state = selectPreset(state, 'p2');
+  assert.deepEqual(state.destination, nodeTarget);
+  assert.equal(state.includeImages, false);
+  assert.equal(state.temporary, false);
+});
+
+test('a preset without destination falls back to 尚未设置 and still saves-facing null', () => {
+  const bare = [{ id: 'p1', name: '默认', titleTemplate: '{{title}}', action: 'feishu', destination: null, includeImages: true }];
+  const state = initPopupPresets({ presets: bare, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.destination, null);
+  assert.equal(state.temporary, false);
+  assert.equal(state.includeImages, true, 'missing includeImages defaults to true');
+});
+
+test('switching presets clears a manual 仅本次 override and restarts from the new preset', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  const manual = { kind: 'node', nodeToken: 'manual', spaceId: 'sp9', title: '手动目录' };
+  state = overrideDestination(state, manual);
+  assert.deepEqual(state.destination, manual);
+  assert.equal(state.temporary, true);
+  state = selectPreset(state, 'p2');
+  assert.deepEqual(state.destination, nodeTarget, 'temporary override does not survive a preset switch');
+  assert.equal(state.temporary, false);
 });

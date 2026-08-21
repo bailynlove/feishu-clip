@@ -1,8 +1,7 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, resetTitle, isTitleEdited, primaryLabel } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, resetTitle, isTitleEdited, primaryLabel, overrideDestination } from './popup-state.js';
 
-let destination = null;
 let attemptId = null;
 let recoveredAttempt = false;
 let pollTimer = null;
@@ -12,13 +11,13 @@ let presetState = null;
 const $ = (selector) => document.querySelector(selector);
 function message(payload) { return chrome.runtime.sendMessage(payload).then((response) => { if (!response?.ok) throw Object.assign(new Error(response?.error?.message || '操作失败'), response?.error); return response.result; }); }
 function show(text, kind = 'info') { const node = $('#status'); node.textContent = text; node.className = `status ${kind}`; }
-function setDestination(value, temporary = false) {
-  destination = value;
+// 目标 chip 只反映 presetState：预设目标不亮徽标，「仅本次」徽标只属于手动覆盖的临时目标
+function syncDestinationView() {
+  const value = presetState.destination;
   $('#destination').textContent = value ? describeDestination(value) : '尚未设置';
   // 图标随目标类型切换（知识库 / 文档节点），与原型一致
   $('.chip-icon').textContent = value?.kind === 'node' ? '📁' : '🗂';
-  // 临时目标显示「仅本次」徽标；默认目标不显示，避免干扰
-  $('#destination-temp-badge').classList.toggle('hidden', !temporary);
+  $('#destination-temp-badge').classList.toggle('hidden', !presetState.temporary);
 }
 
 // 预设 chips 与标题输入框的 DOM 同步；归约逻辑全在 popup-state.js
@@ -42,6 +41,8 @@ function syncPresetView() {
   $('#page-title').value = presetState.title;
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
   $('#save').textContent = primaryLabel(currentPreset(presetState).action);
+  $('#images').checked = presetState.includeImages;
+  syncDestinationView();
   renderPresetChips();
 }
 
@@ -86,7 +87,6 @@ async function inspect() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   try { $('#page-host').textContent = new URL(tab.url).host; } catch { $('#page-host').textContent = ''; }
   const settings = await message({ type: 'GET_SETTINGS' });
-  setDestination(settings.destination);
   presetState = initPopupPresets(settings, tab);
   syncPresetView();
   attemptId = settings.activeAttempt || null;
@@ -139,7 +139,8 @@ $('#tp-confirm').addEventListener('click', async () => {
   if (!popupPicker) return;
   const saved = await popupPicker.saveSelection();
   if (saved) {
-    setDestination(saved, true);
+    presetState = overrideDestination(presetState, saved);
+    syncDestinationView();
     closePicker();
     show(`本次将保存到：${describeDestination(saved)}。默认目标不变。`);
   } else {
@@ -147,12 +148,12 @@ $('#tp-confirm').addEventListener('click', async () => {
   }
 });
 $('#save').addEventListener('click', async () => {
-  if (!destination) { show('请先在设置中配置默认保存目标。', 'error'); return; }
+  if (!presetState.destination) { show('请先在设置中配置默认保存目标。', 'error'); return; }
   // 预设默认动作非飞书时本 ticket 只改按钮文字；导出动作实现归 #38
-  if (currentPreset(presetState).action !== 'feishu') { show('该动作将在 #38 提供。'); return; }
+  if (currentPreset(presetState).action !== 'feishu') { show('该预设动作暂未支持，请改用保存到飞书。'); return; }
   $('#save').disabled = true; show('正在提取当前页面…');
   try {
-    const result = await message({ type: 'CLIP', destination, includeImages: $('#images').checked, title: presetState.title });
+    const result = await message({ type: 'CLIP', destination: presetState.destination, includeImages: $('#images').checked, title: presetState.title });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
     $('#open').classList.add('hidden'); $('#save').classList.remove('hidden');
