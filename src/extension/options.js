@@ -23,25 +23,30 @@ function show(text, kind = 'info') {
 }
 
 // ——— 页面状态：presets/defaultPresetId 与存储一致；editingId 是当前打开表单的预设 ———
-let options = { presets: [], defaultPresetId: null };
+let state = { presets: [], defaultPresetId: null };
 let editingId = null;
 let picker = null;
-// triggers 校验失败时阻止保存：暂存未持久化的 textarea 内容，修复前其他字段照常保存
-let triggersDirty = false;
+// triggers 校验失败时阻止保存：非法草稿按预设 id 留在内存里，重开该预设的表单时恢复并继续
+// 报错，修复合法写回成功后清除。内存态即可，重开设置页页面后丢弃。
+const triggerDrafts = new Map();
 
 async function persist() {
-  const saved = await message({ type: 'SAVE_PRESETS', presets: options.presets, defaultPresetId: options.defaultPresetId });
-  options = { ...options, ...saved };
+  const saved = await message({ type: 'SAVE_PRESETS', presets: state.presets, defaultPresetId: state.defaultPresetId });
+  state = { ...state, ...saved };
   show('已保存。', 'success');
 }
 
 function editingPreset() {
-  return options.presets.find((preset) => preset.id === editingId) ?? null;
+  return state.presets.find((preset) => preset.id === editingId) ?? null;
 }
 
 function applyMutation(next) {
   if (!next) return false;
-  options = next;
+  state = next;
+  // 预设被删后其草稿一并丢弃
+  for (const id of triggerDrafts.keys()) {
+    if (!state.presets.some((preset) => preset.id === id)) triggerDrafts.delete(id);
+  }
   if (editingId && !editingPreset()) closeEditor();
   renderList();
   syncCurrentDestination();
@@ -50,7 +55,7 @@ function applyMutation(next) {
 }
 
 function syncCurrentDestination() {
-  const current = options.presets.find((preset) => preset.id === options.defaultPresetId) ?? options.presets[0];
+  const current = state.presets.find((preset) => preset.id === state.defaultPresetId) ?? state.presets[0];
   $('#current-destination').textContent = describeDestination(current?.destination);
 }
 
@@ -58,8 +63,8 @@ function syncCurrentDestination() {
 function renderList() {
   const list = $('#preset-list');
   list.replaceChildren();
-  const lastOne = options.presets.length <= 1;
-  options.presets.forEach((preset, index) => {
+  const lastOne = state.presets.length <= 1;
+  state.presets.forEach((preset, index) => {
     const item = document.createElement('li');
     const row = document.createElement('div');
     row.className = 'preset-row';
@@ -69,7 +74,7 @@ function renderList() {
     name.value = preset.name;
     name.title = '重命名';
     name.addEventListener('change', () => {
-      applyMutation(renamePreset(options, preset.id, name.value.trim() || preset.name));
+      applyMutation(renamePreset(state, preset.id, name.value.trim() || preset.name));
       syncEditor();
     });
     row.append(name);
@@ -79,7 +84,7 @@ function renderList() {
     summary.textContent = describeDestination(preset.destination);
     row.append(summary);
 
-    if (preset.id === options.defaultPresetId) {
+    if (preset.id === state.defaultPresetId) {
       const badge = document.createElement('span');
       badge.className = 'preset-default-badge';
       badge.textContent = '默认';
@@ -99,11 +104,11 @@ function renderList() {
       buttons.append(button);
     };
     addButton('编辑', '编辑该预设', () => openEditor(preset.id));
-    addButton('复制', '复制该预设', () => applyMutation(duplicatePreset(options, preset.id)));
-    addButton('上移', '上移', () => applyMutation(movePreset(options, preset.id, -1)), index === 0);
-    addButton('下移', '下移', () => applyMutation(movePreset(options, preset.id, +1)), index === options.presets.length - 1);
-    addButton('删除', lastOne ? '至少保留一套预设' : '删除该预设', () => applyMutation(removePreset(options, preset.id)), lastOne);
-    addButton('设为默认', '设为默认预设', () => applyMutation(setDefaultPreset(options, preset.id)), preset.id === options.defaultPresetId);
+    addButton('复制', '复制该预设', () => applyMutation(duplicatePreset(state, preset.id)));
+    addButton('上移', '上移', () => applyMutation(movePreset(state, preset.id, -1)), index === 0);
+    addButton('下移', '下移', () => applyMutation(movePreset(state, preset.id, +1)), index === state.presets.length - 1);
+    addButton('删除', lastOne ? '至少保留一套预设' : '删除该预设', () => applyMutation(removePreset(state, preset.id)), lastOne);
+    addButton('设为默认', '设为默认预设', () => applyMutation(setDefaultPreset(state, preset.id)), preset.id === state.defaultPresetId);
     row.append(buttons);
 
     item.append(row);
@@ -139,15 +144,17 @@ function syncEditor() {
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
   for (const radio of document.querySelectorAll('input[name="f-action"]')) radio.checked = radio.value === preset.action;
-  if (!triggersDirty) $('#f-triggers').value = (preset.triggers ?? []).join('\n');
+  // 有非法草稿时恢复草稿（不被已保存的合法值覆盖）
+  $('#f-triggers').value = triggerDrafts.get(editingId) ?? (preset.triggers ?? []).join('\n');
 }
 
 async function openEditor(id) {
   editingId = id;
-  triggersDirty = false;
   $('#preset-editor').classList.remove('hidden');
   syncEditor();
-  clearTriggerErrors();
+  const draft = triggerDrafts.get(id);
+  if (draft !== undefined) showTriggerErrors(validateTriggers(draft));
+  else clearTriggerErrors();
 
   // 每次打开都新建控制器：状态全新，目标初值为该预设当前目标；确认只验证不直接写存储
   picker = createPopupPicker({
@@ -157,7 +164,7 @@ async function openEditor(id) {
     initialDestination: editingPreset()?.destination ?? null,
   });
   const els = pickerElements();
-  picker.subscribe((state) => renderPicker(picker, state, els, EDITOR_LABELS));
+  picker.subscribe((pickerState) => renderPicker(picker, pickerState, els, EDITOR_LABELS));
   wirePicker(picker, els);
   await picker.start();
   $('#preset-editor').scrollIntoView();
@@ -172,11 +179,11 @@ function closeEditor() {
 // 选择器/手动输入验证成功后，目标写入当前编辑的预设并整体持久化
 function applyDestination(destination) {
   if (!editingId || !destination) return;
-  applyMutation(updatePreset(options, editingId, { destination }));
+  applyMutation(updatePreset(state, editingId, { destination }));
   syncEditor();
 }
 
-// ——— triggers 校验：标红非法行 + 提示行号 + 阻止保存 ———
+// ——— triggers 校验：标红非法行 + 提示行号 + 阻止保存（草稿留内存） ———
 function clearTriggerErrors() {
   $('#trigger-errors').replaceChildren();
   $('#trigger-errors').classList.add('hidden');
@@ -200,33 +207,33 @@ $('#f-triggers').addEventListener('input', () => {
   const text = $('#f-triggers').value;
   const errors = validateTriggers(text);
   if (errors.length > 0) {
-    triggersDirty = true;
+    triggerDrafts.set(editingId, text);
     showTriggerErrors(errors);
     show(`Triggers 有 ${errors.length} 条非法规则，已阻止保存。`, 'error');
     return;
   }
-  triggersDirty = false;
+  triggerDrafts.delete(editingId);
   clearTriggerErrors();
-  applyMutation(updatePreset(options, editingId, { triggers: parseTriggers(text) }));
+  applyMutation(updatePreset(state, editingId, { triggers: parseTriggers(text) }));
 });
 
 // ——— 表单字段：改动即保存 ———
 $('#f-name').addEventListener('change', () => {
   const preset = editingPreset();
-  if (preset) applyMutation(renamePreset(options, editingId, $('#f-name').value.trim() || preset.name));
+  if (preset) applyMutation(renamePreset(state, editingId, $('#f-name').value.trim() || preset.name));
 });
 $('#f-images').addEventListener('change', () => {
-  applyMutation(updatePreset(options, editingId, { includeImages: $('#f-images').checked }));
+  applyMutation(updatePreset(state, editingId, { includeImages: $('#f-images').checked }));
 });
 $('#f-title').addEventListener('input', () => {
-  applyMutation(updatePreset(options, editingId, { titleTemplate: $('#f-title').value }));
+  applyMutation(updatePreset(state, editingId, { titleTemplate: $('#f-title').value }));
 });
 $('#f-body').addEventListener('input', () => {
-  applyMutation(updatePreset(options, editingId, { bodyTemplate: $('#f-body').value }));
+  applyMutation(updatePreset(state, editingId, { bodyTemplate: $('#f-body').value }));
 });
 for (const radio of document.querySelectorAll('input[name="f-action"]')) {
   radio.addEventListener('change', () => {
-    if (radio.checked) applyMutation(updatePreset(options, editingId, { action: radio.value }));
+    if (radio.checked) applyMutation(updatePreset(state, editingId, { action: radio.value }));
   });
 }
 $('#editor-done').addEventListener('click', closeEditor);
@@ -273,7 +280,7 @@ $('#save-target').addEventListener('click', async () => {
 
 // ——— 列表操作与初始化 ———
 $('#preset-add').addEventListener('click', () => {
-  if (applyMutation(addPreset(options))) openEditor(options.presets[options.presets.length - 1].id);
+  if (applyMutation(addPreset(state))) openEditor(state.presets[state.presets.length - 1].id);
 });
 
 $('#pair').addEventListener('click', async () => {
@@ -289,7 +296,7 @@ $('#pair').addEventListener('click', async () => {
 
 async function init() {
   const settings = await message({ type: 'GET_SETTINGS' });
-  options = { presets: settings.presets ?? [], defaultPresetId: settings.defaultPresetId ?? null };
+  state = { presets: settings.presets ?? [], defaultPresetId: settings.defaultPresetId ?? null };
   renderList();
   syncCurrentDestination();
 }

@@ -4,8 +4,6 @@
 
 import { createDefaultPreset } from './presets.js';
 
-export const PRESET_ACTIONS = ['feishu', 'clipboard', 'file'];
-
 // 模板变量快捷插入（决议 #30 的 v1 变量集）
 export const TEMPLATE_VARIABLES = ['title', 'url', 'host', 'date', 'time', 'datetime', 'content'];
 

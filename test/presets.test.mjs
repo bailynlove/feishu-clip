@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDefaultPreset, ensurePresets, saveDefaultDestination } from '../src/extension/presets.js';
+import { createDefaultPreset, ensurePresets } from '../src/extension/presets.js';
 
 function createStorage(initial = {}) {
   const data = { ...initial };
@@ -83,21 +83,4 @@ test('ensurePresets repairs a dangling defaultPresetId to the first preset', asy
   const storage = createStorage({ presets: [preset], defaultPresetId: 'gone' });
   const { defaultPresetId } = await ensurePresets(storage);
   assert.equal(defaultPresetId, preset.id);
-});
-
-test('saveDefaultDestination writes only the default preset (legacy key removed)', async () => {
-  const storage = createStorage({ destination: legacyDestination });
-  await ensurePresets(storage);
-
-  const next = { kind: 'space', spaceId: 'space-2' };
-  const { presets } = await saveDefaultDestination(storage, next);
-
-  assert.deepEqual(presets[0].destination, next, '写默认预设');
-  assert.equal('destination' in storage.data, false, '不再写旧 destination 键');
-  assert.deepEqual(storage.data.presets[0].destination, next);
-
-  // 之后的 ensurePresets 不应再产生旧键
-  const again = await ensurePresets(storage);
-  assert.deepEqual(again.presets[0].destination, next);
-  assert.equal('destination' in storage.data, false);
 });

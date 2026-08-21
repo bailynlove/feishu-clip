@@ -34,12 +34,3 @@ export async function ensurePresets(storage) {
   if ('destination' in stored) await storage.remove('destination');
   return { presets, defaultPresetId };
 }
-
-// 保存默认预设的保存目标（只写预设；旧 destination 键已在 #35 移除）。
-// 设置页预设管理上线后不再调用，保留给 SAVE_DESTINATION 消息兼容。
-export async function saveDefaultDestination(storage, destination) {
-  const { presets, defaultPresetId } = await ensurePresets(storage);
-  const updated = presets.map((preset) => (preset.id === defaultPresetId ? { ...preset, destination } : preset));
-  await storage.set({ presets: updated });
-  return { presets: updated, defaultPresetId };
-}

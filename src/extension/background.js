@@ -1,4 +1,4 @@
-import { ensurePresets, saveDefaultDestination } from './presets.js';
+import { ensurePresets } from './presets.js';
 import { sanitizeClipTitle } from './templates.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
@@ -78,14 +78,6 @@ async function handle(message) {
       if (message.cursor) params.set('cursor', message.cursor);
       if (message.limit) params.set('limit', String(message.limit));
       return bridge(`/v1/targets/nodes?${params}`);
-    }
-    case 'SAVE_DESTINATION': {
-      const result = await bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
-      const path = Array.isArray(message.destination.path) ? message.destination.path.filter((title) => typeof title === 'string').slice(0, 32) : undefined;
-      const destination = path ? { ...result.destination, path } : result.destination;
-      // 只写默认预设（旧 destination 键已在 #35 移除）
-      await saveDefaultDestination(chrome.storage.local, destination);
-      return result;
     }
     case 'CLIP': {
       const snapshot = await extractActiveTab();
