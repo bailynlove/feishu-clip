@@ -83,6 +83,27 @@
 .options .pc-form .ps-target{padding:7px 12px;font-size:12px}
 .options .pc-form .ps-switch-row{margin-bottom:4px;padding:2px}
 .options .pc-form .ps-seg-opt{padding:7px;font-size:11.5px;border-radius:9px}
+
+/* 预设反馈条：卡片内 tab 栏下方，自动消失（JS 控制） */
+.options #preset-note{margin:10px 0 0}
+
+/* 设置页目标选择器面板：紧贴 chip 下方展开，行样式换蓝绿新设计语言
+   （hover 天空蓝、选中薄荷绿，与 tab/switch/分段一致）。仅覆盖 .options 作用域，弹窗不动 */
+.options #picker-panel{margin-top:8px}
+.options #picker-panel .crumbs{margin:0 0 6px;font-size:12px}
+.options #picker-panel .picker-status{min-height:16px;margin:2px 0;font-size:11.5px;color:#9aa3b2}
+.options #picker-panel .picker-status.error-text{color:#962932}
+.options #picker-panel .picker-list{border:1.5px solid #e2e7ee;border-radius:12px;background:#fff;box-shadow:0 2px 10px rgba(20,30,50,.04)}
+.options #picker-panel .picker-list li+li{border-top:1px solid #eef1f6}
+.options #picker-panel .picker-row{padding:9px 12px;font-size:12.5px;border-radius:0}
+.options #picker-panel .picker-row:hover{background:var(--blue-soft)}
+.options #picker-panel .picker-row.selected{background:var(--brand);box-shadow:inset 0 1px 2px rgba(255,255,255,.7);color:var(--brand-ink)}
+.options #picker-panel .picker-row.selected .row-hint{color:var(--brand-ink);opacity:.65}
+.options #picker-panel .picker-row .row-title{font-size:12.5px}
+.options #picker-panel .row-drill{font-size:12px}
+.options #picker-panel .picker-actions{margin-top:8px}
+.options #picker-panel details{margin-top:10px}
+.options #picker-panel summary{font-size:12px}
 .current-target{margin:0 0 10px}.crumbs{margin:0 0 8px;font-size:13px}.crumbs .link{padding:0}.picker-status{min-height:18px;margin:4px 0;font-size:12px;color:var(--muted)}.picker-status.error-text{color:#962932}.picker-list{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.picker-list li+li{border-top:1px solid var(--line)}.picker-row{display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;border:0;background:transparent;text-align:left;cursor:pointer;font-size:13px}.picker-row:hover{background:#f0f4ff}.picker-row.selected{background:#e9f0ff;box-shadow:inset 3px 0 0 var(--blue)}.picker-row .row-title{flex:1;border:0;background:transparent;padding:0;text-align:left;font-size:13px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-hint{color:var(--muted);font-size:12px}.row-drill{white-space:nowrap}.picker-actions{display:flex;align-items:center;gap:10px;margin-top:10px}.picker-actions .primary{flex:1}details{margin-top:14px}summary{cursor:pointer;font-size:13px;font-weight:650}
 
 /* ——— 弹窗（#24，C 版原型：动森薄荷绿 hero + 天空蓝果冻主按钮）。全部限定 .popup 作用域，不影响设置页 ——— */

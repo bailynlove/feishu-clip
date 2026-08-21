@@ -24,6 +24,17 @@ function show(text, kind = 'info') {
   node.className = `ps-note ${NOTICE_TONES[kind] ?? 'info'}`;
 }
 
+// 预设管理相关反馈：显示在卡片内 tab 栏下方（紧贴操作位置），4 秒后自动消失；
+// 全局提示（Bridge 配对等）仍走页面底部的 #status
+let noteTimer = null;
+function note(text, kind = 'info') {
+  const node = $('#preset-note');
+  node.textContent = text;
+  node.className = `ps-note ${NOTICE_TONES[kind] ?? 'info'}`;
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => node.classList.add('hidden'), 4000);
+}
+
 // ——— 页面状态：presets/defaultPresetId 与存储一致；editingId 是当前选中 tab 的预设 ———
 let state = { presets: [], defaultPresetId: null };
 let editingId = null;
@@ -36,7 +47,7 @@ const triggerDrafts = new Map();
 async function persist() {
   const saved = await message({ type: 'SAVE_PRESETS', presets: state.presets, defaultPresetId: state.defaultPresetId });
   state = { ...state, ...saved };
-  show('已保存。', 'success');
+  note('已保存。', 'success');
 }
 
 function editingPreset() {
@@ -56,7 +67,7 @@ function applyMutation(next) {
     syncEditor();
   }
   renderTabs();
-  persist().catch((error) => show(`保存失败：${error.message}`, 'error'));
+  persist().catch((error) => note(`保存失败：${error.message}`, 'error'));
   return true;
 }
 
@@ -121,7 +132,7 @@ function renderTabs() {
   add.addEventListener('click', () => {
     if (applyMutation(addPreset(state))) {
       selectTab(state.presets[state.presets.length - 1].id);
-      show('已新建预设，正在编辑 — 记得设置保存目标。', 'success');
+      note('已新建预设，正在编辑 — 记得设置保存目标。', 'success');
     }
   });
   bar.append(add);
@@ -136,7 +147,7 @@ function selectTab(id) {
 
 // ——— 删除确认对话框：✕ 不直接删，先确认（误触代价高） ———
 function askDelete(id) {
-  if (state.presets.length <= 1) { show('至少保留一套预设，无法删除。', 'error'); return; }
+  if (state.presets.length <= 1) { note('至少保留一套预设，无法删除。', 'error'); return; }
   confirmDeleteId = id;
   renderDialog();
 }
@@ -178,7 +189,7 @@ function renderDialog() {
     const id = confirmDeleteId;
     confirmDeleteId = null;
     renderDialog();
-    if (applyMutation(removePreset(state, id))) show(`已删除「${preset.name}」，切换到第一套预设。`);
+    if (applyMutation(removePreset(state, id))) note(`已删除「${preset.name}」，切换到第一套预设。`);
   });
   actions.append(cancel, confirm);
   dialog.append(title, body, actions);
@@ -237,10 +248,10 @@ function syncTriggersField() {
   else clearTriggerErrors();
 }
 
-// 保存目标选择器：点「更改 ›」展开，每次展开新建控制器（状态全新；确认只验证不直接写存储）
+// 保存目标选择器：点「更改 ›」在 chip 下方展开面板（chip 保持可见，两者视觉上连成一组），
+// 每次展开新建控制器（状态全新；确认只验证不直接写存储）
 async function openPicker() {
   $('#picker-panel').classList.remove('hidden');
-  $('#f-target').classList.add('hidden');
   picker = createPopupPicker({
     listSpaces: ({ cursor, limit }) => message({ type: 'LIST_SPACES', cursor, limit }),
     listNodes: ({ spaceId, parentNodeToken, cursor, limit }) => message({ type: 'LIST_NODES', spaceId, parentNodeToken, cursor, limit }),
@@ -255,7 +266,6 @@ async function openPicker() {
 
 function closePicker() {
   $('#picker-panel').classList.add('hidden');
-  $('#f-target').classList.remove('hidden');
   picker = null;
 }
 
@@ -298,7 +308,7 @@ $('#f-triggers').addEventListener('input', () => {
   if (errors.length > 0) {
     triggerDrafts.set(editingId, text);
     showTriggerErrors(errors);
-    show(`Triggers 有 ${errors.length} 条非法规则，已阻止保存。`, 'error');
+    note(`Triggers 有 ${errors.length} 条非法规则，已阻止保存。`, 'error');
     return;
   }
   triggerDrafts.delete(editingId);
@@ -356,20 +366,20 @@ for (const row of document.querySelectorAll('.ps-vars')) {
 $('#picker-save').addEventListener('click', async () => {
   if (!picker) return;
   const saved = await picker.saveSelection();
-  if (saved) show(`目标已保存：${describeDestination(saved)}`, 'success');
-  else show(`保存失败：${picker.getState().error?.message || '请重试'}`, 'error');
+  if (saved) note(`目标已保存：${describeDestination(saved)}`, 'success');
+  else note(`保存失败：${picker.getState().error?.message || '请重试'}`, 'error');
   applyDestination(saved);
 });
 $('#save-target').addEventListener('click', async () => {
   if (!picker) return;
   const nodeToken = $('#token').value.trim();
   const spaceId = $('#space').value.trim() || undefined;
-  if (!nodeToken && !spaceId) { show('请填写 Wiki 节点 token 或空间 ID。', 'error'); return; }
+  if (!nodeToken && !spaceId) { note('请填写 Wiki 节点 token 或空间 ID。', 'error'); return; }
   const saved = nodeToken
     ? await picker.saveManual({ kind: 'node', nodeToken, spaceId })
     : await picker.saveManual({ kind: 'space', spaceId });
-  if (saved) show(`目标已保存：${describeDestination(saved)}`, 'success');
-  else show(`目标验证失败：${picker.getState().error?.message || '请重试'}`, 'error');
+  if (saved) note(`目标已保存：${describeDestination(saved)}`, 'success');
+  else note(`目标验证失败：${picker.getState().error?.message || '请重试'}`, 'error');
   applyDestination(saved);
 });
 
