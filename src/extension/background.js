@@ -52,8 +52,17 @@ async function handle(message) {
     case 'STATUS': return bridge('/v1/status');
     case 'GET_SETTINGS': {
       await migratePresets();
-      // destination/activeAttempt 保留给 options 页与 job 恢复；presets/defaultPresetId 供弹窗（#36）
-      return localGet(['destination', 'activeAttempt', 'presets', 'defaultPresetId']);
+      // activeAttempt 供 job 恢复；presets/defaultPresetId 供弹窗与设置页（#35/#36）
+      return localGet(['activeAttempt', 'presets', 'defaultPresetId']);
+    }
+    case 'SAVE_PRESETS': {
+      // 设置页整体写回预设列表 + 默认预设（#35）；列表为空或默认预设悬空时拒绝/修复
+      if (!Array.isArray(message.presets) || message.presets.length === 0) throw new Error('至少保留一套预设');
+      const defaultPresetId = message.presets.some((preset) => preset.id === message.defaultPresetId)
+        ? message.defaultPresetId
+        : message.presets[0].id;
+      await chrome.storage.local.set({ presets: message.presets, defaultPresetId });
+      return { presets: message.presets, defaultPresetId };
     }
     case 'VALIDATE_DESTINATION': return bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
     case 'LIST_SPACES': {
@@ -74,7 +83,7 @@ async function handle(message) {
       const result = await bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
       const path = Array.isArray(message.destination.path) ? message.destination.path.filter((title) => typeof title === 'string').slice(0, 32) : undefined;
       const destination = path ? { ...result.destination, path } : result.destination;
-      // 双写默认预设 + 旧 destination 键（过渡态，#36 后移除旧键）
+      // 只写默认预设（旧 destination 键已在 #35 移除）
       await saveDefaultDestination(chrome.storage.local, destination);
       return result;
     }

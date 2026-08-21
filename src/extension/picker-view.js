@@ -1,4 +1,4 @@
-// target-picker 控制器的共享 DOM 渲染层。options.js（默认目标）与 popup.js（仅本次目标）
+// target-picker 控制器的共享 DOM 渲染层。options.js（预设目标，#35）与 popup.js（仅本次目标）
 // 各自传入自己的元素引用和操作文案；控制器逻辑见 target-picker.js。
 
 export const PICKER_ERROR_TEXT = {

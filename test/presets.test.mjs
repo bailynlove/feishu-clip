@@ -37,7 +37,7 @@ test('createDefaultPreset applies v1 defaults and lets callers override', () => 
   assert.deepEqual(custom.destination, legacyDestination);
 });
 
-test('ensurePresets migrates a legacy destination into the default preset and keeps the key in sync', async () => {
+test('ensurePresets migrates a legacy destination into the default preset and removes the legacy key', async () => {
   const storage = createStorage({ destination: legacyDestination, activeAttempt: 'keep-me' });
   const { presets, defaultPresetId } = await ensurePresets(storage);
 
@@ -46,8 +46,8 @@ test('ensurePresets migrates a legacy destination into the default preset and ke
   assert.deepEqual(presets[0].destination, legacyDestination);
   assert.equal(presets[0].titleTemplate, '{{title}}');
   assert.equal(defaultPresetId, presets[0].id);
-  // 过渡态双写：旧 destination 键保留并与默认预设同步（#36 后移除）
-  assert.deepEqual(storage.data.destination, legacyDestination);
+  // expand–contract 收尾（#35）：迁移完成后删除旧 destination 键
+  assert.equal('destination' in storage.data, false);
   assert.equal(storage.data.activeAttempt, 'keep-me', '不动其他键');
 });
 
@@ -70,17 +70,12 @@ test('ensurePresets is idempotent across service worker cold starts', async () =
   assert.equal(storage.data.presets.length, 1);
 });
 
-test('ensurePresets re-syncs the legacy destination key from the default preset', async () => {
+test('ensurePresets removes a stale legacy destination key instead of syncing it', async () => {
   const preset = createDefaultPreset({ destination: legacyDestination });
   const storage = createStorage({ presets: [preset], defaultPresetId: preset.id, destination: { kind: 'space', spaceId: 'stale' } });
 
   await ensurePresets(storage);
-  assert.deepEqual(storage.data.destination, legacyDestination, '旧键漂移时按默认预设回写');
-
-  const empty = createDefaultPreset();
-  const storage2 = createStorage({ presets: [empty], defaultPresetId: empty.id, destination: legacyDestination });
-  await ensurePresets(storage2);
-  assert.equal('destination' in storage2.data, false, '默认预设目标为空时移除旧键');
+  assert.equal('destination' in storage.data, false, '旧键一律删除，不再回写');
 });
 
 test('ensurePresets repairs a dangling defaultPresetId to the first preset', async () => {
@@ -90,7 +85,7 @@ test('ensurePresets repairs a dangling defaultPresetId to the first preset', asy
   assert.equal(defaultPresetId, preset.id);
 });
 
-test('saveDefaultDestination dual-writes the default preset and the legacy destination key', async () => {
+test('saveDefaultDestination writes only the default preset (legacy key removed)', async () => {
   const storage = createStorage({ destination: legacyDestination });
   await ensurePresets(storage);
 
@@ -98,10 +93,11 @@ test('saveDefaultDestination dual-writes the default preset and the legacy desti
   const { presets } = await saveDefaultDestination(storage, next);
 
   assert.deepEqual(presets[0].destination, next, '写默认预设');
-  assert.deepEqual(storage.data.destination, next, '同时写旧 destination 键');
+  assert.equal('destination' in storage.data, false, '不再写旧 destination 键');
   assert.deepEqual(storage.data.presets[0].destination, next);
 
-  // 之后的 ensurePresets 不应把旧键写回旧值
+  // 之后的 ensurePresets 不应再产生旧键
   const again = await ensurePresets(storage);
   assert.deepEqual(again.presets[0].destination, next);
+  assert.equal('destination' in storage.data, false);
 });
