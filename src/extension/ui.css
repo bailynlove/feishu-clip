@@ -16,9 +16,18 @@
 .options .ps-dot{width:8px;height:8px;border-radius:50%;background:#29b6d8}
 .options .ps-bridge-re{margin-left:auto;border:0;background:none;color:#0c9464;font-size:12px;cursor:pointer;font-weight:600}
 .options .ps-note{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:10px;font-size:13px;background:#fff;border:1px solid #eef1f6}
+.options .ps-note.hidden{display:none}
 .options .ps-note.ok{background:#e7f7f0;color:#126847;border-color:transparent}
 .options .ps-note.info{background:#fef9c3;color:#8a6400;border-color:transparent}
 .options .ps-note.err{background:#fff0f1;color:#962932;border-color:transparent}
+
+/* 顶部居中浮动 toast：预设管理的瞬时反馈（已保存/无法删除等）。常驻 DOM、opacity 0
+   不占位，加 .show 滑入淡入，3 秒后 JS 移除；position:fixed 不挤占布局 */
+.options .ps-toast{position:fixed;top:18px;left:50%;transform:translate(-50%,-12px);z-index:30;border-radius:999px;padding:10px 22px;font-size:13px;font-weight:700;opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease}
+.options .ps-toast.show{opacity:1;transform:translate(-50%,0)}
+.options .ps-toast.ok{background:linear-gradient(rgba(255,255,255,.55),rgba(255,255,255,.05) 60%),var(--brand);color:var(--brand-ink);box-shadow:inset 0 2px 3px rgba(255,255,255,.7),0 6px 18px rgba(127,227,189,.5)}
+.options .ps-toast.info{background:linear-gradient(rgba(255,255,255,.55),rgba(255,255,255,.05) 60%),var(--brand-2);color:var(--brand-ink);box-shadow:inset 0 2px 3px rgba(255,255,255,.7),0 6px 18px rgba(95,212,236,.5)}
+.options .ps-toast.err{background:linear-gradient(rgba(255,255,255,.55),rgba(255,255,255,.06) 55%),#ec5f67;color:#fff;box-shadow:inset 0 2px 4px rgba(255,255,255,.7),0 6px 18px rgba(236,95,103,.45)}
 .options .ps-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:relative}
 .options .ps-tab{display:flex;align-items:center;gap:6px;border:1.5px solid #e2e7ee;background:#f7f9fc;border-radius:999px;padding:7px 14px;font-size:13px;font-weight:600;color:#1a2233;cursor:pointer;font-family:inherit}
 .options .ps-tab:hover:not(.on){border-color:var(--blue-line);background:var(--blue-soft)}
@@ -84,16 +93,15 @@
 .options .pc-form .ps-switch-row{margin-bottom:4px;padding:2px}
 .options .pc-form .ps-seg-opt{padding:7px;font-size:11.5px;border-radius:9px}
 
-/* 预设反馈条：卡片内 tab 栏下方，自动消失（JS 控制） */
-.options #preset-note{margin:10px 0 0}
-
 /* 设置页目标选择器面板：紧贴 chip 下方展开，行样式换蓝绿新设计语言
    （hover 天空蓝、选中薄荷绿，与 tab/switch/分段一致）。仅覆盖 .options 作用域，弹窗不动 */
 .options #picker-panel{margin-top:8px}
 .options #picker-panel .crumbs{margin:0 0 6px;font-size:12px}
 .options #picker-panel .picker-status{min-height:16px;margin:2px 0;font-size:11.5px;color:#9aa3b2}
+.options #picker-panel .picker-status:empty{display:none}
 .options #picker-panel .picker-status.error-text{color:#962932}
 .options #picker-panel .picker-list{border:1.5px solid #e2e7ee;border-radius:12px;background:#fff;box-shadow:0 2px 10px rgba(20,30,50,.04)}
+.options #picker-panel .picker-list:empty{display:none}
 .options #picker-panel .picker-list li+li{border-top:1px solid #eef1f6}
 .options #picker-panel .picker-row{padding:9px 12px;font-size:12.5px;border-radius:0}
 .options #picker-panel .picker-row:hover{background:var(--blue-soft)}
