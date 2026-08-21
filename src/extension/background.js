@@ -1,6 +1,11 @@
+import { ensurePresets, saveDefaultDestination } from './presets.js';
+
 const BRIDGE = 'http://127.0.0.1:38479';
 
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+
+// service worker 冷启动时幂等迁移预设存储
+ensurePresets(chrome.storage.local);
 
 async function localGet(keys) {
   return chrome.storage.local.get(keys);
@@ -39,7 +44,10 @@ async function handle(message) {
       return result;
     }
     case 'STATUS': return bridge('/v1/status');
-    case 'GET_SETTINGS': return localGet(['destination', 'activeAttempt']);
+    case 'GET_SETTINGS': {
+      await ensurePresets(chrome.storage.local);
+      return localGet(['destination', 'activeAttempt']);
+    }
     case 'VALIDATE_DESTINATION': return bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
     case 'LIST_SPACES': {
       const params = new URLSearchParams();
@@ -58,7 +66,9 @@ async function handle(message) {
     case 'SAVE_DESTINATION': {
       const result = await bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
       const path = Array.isArray(message.destination.path) ? message.destination.path.filter((title) => typeof title === 'string').slice(0, 32) : undefined;
-      await chrome.storage.local.set({ destination: path ? { ...result.destination, path } : result.destination });
+      const destination = path ? { ...result.destination, path } : result.destination;
+      // 双写默认预设 + 旧 destination 键（过渡态，#36 后移除旧键）
+      await saveDefaultDestination(chrome.storage.local, destination);
       return result;
     }
     case 'CLIP': {
