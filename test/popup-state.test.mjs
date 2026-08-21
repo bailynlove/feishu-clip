@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { describeJobView } from '../src/extension/popup-state.js';
+import {
+  describeJobView,
+  initPopupPresets,
+  currentPreset,
+  selectPreset,
+  editTitle,
+  resetTitle,
+  isTitleEdited,
+  primaryLabel,
+} from '../src/extension/popup-state.js';
 
 const succeededJob = { status: 'succeeded', warnings: [], document: { url: 'https://example.feishu.cn/wiki/docx-1' } };
 const warningsJob = { status: 'succeeded_with_warnings', warnings: ['图片 1：超时'], document: { url: 'https://example.feishu.cn/wiki/docx-2' } };
@@ -37,4 +46,81 @@ test('failure never swaps the primary action and reports the error', () => {
 test('in-flight jobs keep polling with progress text', () => {
   assert.deepEqual(describeJobView({ status: 'queued' }, { recovered: true }), { kind: 'progress', message: '已提交，等待本地 Bridge 处理…', swapPrimary: false, documentUrl: null });
   assert.equal(describeJobView({ status: 'running' }, { recovered: false }).kind, 'progress');
+});
+
+// ——— #36：预设选择与可编辑标题 ———
+
+const tab = { title: '深入理解剪藏', url: 'https://blog.example.com/posts/42' };
+const now = new Date('2026-08-21T15:30:45');
+const presets = [
+  { id: 'p1', name: '默认', titleTemplate: '{{title}}', action: 'feishu' },
+  { id: 'p2', name: '归档', titleTemplate: '[{{host}}] {{title}} {{date|date:YYYYMMDD}}', action: 'clipboard' },
+];
+
+test('init selects the default preset and renders the title from its template', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p2' }, tab, now);
+  assert.equal(state.presetId, 'p2');
+  assert.equal(state.title, '[blog.example.com] 深入理解剪藏 20260821');
+  assert.equal(isTitleEdited(state), false);
+});
+
+test('dangling defaultPresetId falls back to the first preset', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'gone' }, tab, now);
+  assert.equal(state.presetId, 'p1');
+  assert.equal(state.title, '深入理解剪藏');
+});
+
+test('missing presets fall back to a migrated-style 默认 preset', () => {
+  for (const settings of [{}, { presets: [] }, { presets: null, defaultPresetId: 'x' }]) {
+    const state = initPopupPresets(settings, tab, now);
+    assert.equal(state.presets.length, 1);
+    assert.equal(currentPreset(state).name, '默认');
+    assert.equal(state.title, '深入理解剪藏');
+  }
+});
+
+test('switching presets re-renders the title with the new template', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = selectPreset(state, 'p2');
+  assert.equal(state.title, '[blog.example.com] 深入理解剪藏 20260821');
+  state = selectPreset(state, 'p1');
+  assert.equal(state.title, '深入理解剪藏');
+});
+
+test('switching presets never overwrites a manually edited title', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '我的手写标题');
+  assert.equal(isTitleEdited(state), true);
+  state = selectPreset(state, 'p2');
+  assert.equal(state.title, '我的手写标题');
+  assert.equal(isTitleEdited(state), true, 'edited marker follows comparison with the new template render');
+});
+
+test('typing the rendered value back clears the edited marker', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '别的');
+  state = editTitle(state, '深入理解剪藏');
+  assert.equal(isTitleEdited(state), false);
+});
+
+test('reset restores the current preset template render', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '我的手写标题');
+  state = selectPreset(state, 'p2');
+  state = resetTitle(state);
+  assert.equal(state.title, '[blog.example.com] 深入理解剪藏 20260821');
+  assert.equal(isTitleEdited(state), false);
+});
+
+test('unknown or same preset id keeps state untouched', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(selectPreset(state, 'p1'), state);
+  assert.equal(selectPreset(state, 'nope'), state);
+});
+
+test('primary label follows the preset default action', () => {
+  assert.equal(primaryLabel('feishu'), '⬇ 保存到飞书');
+  assert.equal(primaryLabel('clipboard'), '复制到剪贴板');
+  assert.equal(primaryLabel('file'), '保存为文件');
+  assert.equal(primaryLabel('mystery'), '⬇ 保存到飞书', 'unknown actions fall back to the feishu label');
 });

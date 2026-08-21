@@ -9,8 +9,15 @@
 .popup .hero .logo{width:26px;height:26px;border-radius:8px;background:rgba(255,255,255,.5);color:var(--brand-ink)}
 .popup .pill{margin-left:auto;font-size:11px;background:rgba(255,255,255,.5);border-radius:999px;padding:3px 10px;white-space:nowrap;max-width:170px;overflow:hidden;text-overflow:ellipsis}
 .popup .hero-gear{border:0;background:rgba(255,255,255,.5);color:var(--brand-ink);border-radius:8px;width:26px;height:26px;cursor:pointer;flex-shrink:0;font-size:16px;line-height:1}
-.popup .hero h1{margin:14px 0 0;font-size:19px;font-weight:800;line-height:1.4;color:var(--brand-ink)}
 .popup .hero p{margin:4px 0 0;font-size:11px;color:var(--brand-ink);opacity:.7}
+.popup .title-wrap{display:flex;align-items:center;gap:6px;margin-top:14px}
+.popup .title-input{flex:1;min-width:0;border:1.5px dashed transparent;background:rgba(255,255,255,.35);border-radius:10px;padding:8px 10px;font-size:17px;font-weight:800;line-height:1.4;color:var(--brand-ink);font-family:inherit;transition:border-color .15s,background .15s}
+.popup .title-input:hover{border-color:rgba(11,59,54,.3)}
+.popup .title-input:focus{outline:none;border-color:var(--brand-ink);background:rgba(255,255,255,.75)}
+.popup .title-reset{border:0;background:rgba(255,255,255,.6);color:var(--brand-ink);border-radius:999px;font-size:12px;padding:5px 10px;cursor:pointer;white-space:nowrap}
+.popup .presets{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.popup .preset-chip{border:1.5px solid var(--brand-line);background:#fff;color:#182030;border-radius:999px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+.popup .preset-chip.on{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);box-shadow:inset 0 1px 2px rgba(255,255,255,.7)}
 .popup .popup-body{padding:18px 20px;display:flex;flex-direction:column;gap:14px;flex:1}
 .popup .chip{display:flex;align-items:center;gap:8px;border:1.5px solid var(--brand-line);background:var(--brand-soft);border-radius:999px;padding:10px 16px;cursor:pointer;font-size:13px;width:100%;color:#182030}
 .popup .chip-text{flex:1;text-align:left;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

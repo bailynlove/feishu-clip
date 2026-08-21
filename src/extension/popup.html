@@ -1,6 +1,7 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>飞书剪藏</title><link rel="stylesheet" href="ui.css"></head><body class="popup"><main>
-  <header class="hero"><div class="hero-top"><div class="logo">飞</div><strong>飞书剪藏</strong><span id="bridge" class="pill">正在连接 Bridge…</span><button id="settings" class="hero-gear" title="设置">⚙</button></div><h1 id="page-title">正在读取…</h1><p id="page-host"></p></header>
+  <header class="hero"><div class="hero-top"><div class="logo">飞</div><strong>飞书剪藏</strong><span id="bridge" class="pill">正在连接 Bridge…</span><button id="settings" class="hero-gear" title="设置">⚙</button></div><div class="title-wrap"><input id="page-title" class="title-input" type="text" value="正在读取…" aria-label="文档标题"><button id="title-reset" class="title-reset hidden" type="button" title="重置为预设模板标题">↺</button></div><p id="page-host"></p></header>
   <div class="popup-body">
+    <div id="presets" class="presets" role="group" aria-label="预设"></div>
     <button id="change" class="chip" type="button" title="仅本次更改，不影响默认目标"><span class="chip-icon">🗂</span><span id="destination" class="chip-text">尚未设置</span><span id="destination-temp-badge" class="chip-temp hidden">仅本次</span><span class="chip-edit">更改 ›</span></button>
     <label class="img-row"><span class="img-text"><strong>包含图片</strong><small>失败时正文仍会保存</small></span><input id="images" type="checkbox" checked><span class="switch"></span></label>
     <div id="status" class="status hidden"></div>

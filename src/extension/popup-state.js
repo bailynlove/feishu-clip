@@ -1,6 +1,9 @@
 // 弹窗 job 状态的纯归约逻辑。recovered 表示该 attempt 是打开弹窗时从存储恢复的旧会话：
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
+import { createDefaultPreset } from './presets.js';
+import { buildContext, renderTitle } from './templates.js';
+
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
 export function describeJobView(job, { recovered = false } = {}) {
@@ -22,4 +25,60 @@ export function describeJobView(job, { recovered = false } = {}) {
     swapPrimary: false,
     documentUrl: null,
   };
+}
+
+// ——— 预设选择与可编辑标题（#36）：纯函数，state 只携带数据，DOM 同步由 popup.js 负责 ———
+
+// 标题模板上下文只需 tab 信息 + 当前时间；content 在标题模板里无意义，不为此跑 extractor
+export function buildTitleContext(tab, now = new Date()) {
+  return buildContext({ title: tab?.title || '当前页面', sourceUrl: tab?.url || '', capturedAt: now });
+}
+
+export function currentPreset(state) {
+  return state.presets.find((preset) => preset.id === state.presetId) ?? state.presets[0];
+}
+
+function renderCurrentTitle(state) {
+  return renderTitle(currentPreset(state).titleTemplate, state.titleContext);
+}
+
+// 打开弹窗：选中默认预设并按其 titleTemplate 渲染标题初值；
+// 无预设时兜底为迁移生成的「默认」预设（正常路径 background 已迁移好，这里防御旧数据）
+export function initPopupPresets({ presets, defaultPresetId } = {}, tab, now) {
+  const list = Array.isArray(presets) && presets.length > 0 ? presets : [createDefaultPreset()];
+  const selected = list.find((preset) => preset.id === defaultPresetId) ?? list[0];
+  const state = { presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) };
+  return { ...state, title: renderCurrentTitle(state) };
+}
+
+// 手改检测：输入框值 ≠ 当前预设模板渲染值即视为手改；初始值与 ↺ 重置值都等于渲染值
+export function isTitleEdited(state) {
+  return state.title !== renderCurrentTitle(state);
+}
+
+// 切换预设：未手改时按新预设模板重渲标题；手改过则保留用户内容
+export function selectPreset(state, presetId) {
+  if (presetId === state.presetId || !state.presets.some((preset) => preset.id === presetId)) return state;
+  const next = { ...state, presetId };
+  if (!isTitleEdited(state)) next.title = renderCurrentTitle(next);
+  return next;
+}
+
+export function editTitle(state, value) {
+  return { ...state, title: String(value ?? '') };
+}
+
+export function resetTitle(state) {
+  return { ...state, title: renderCurrentTitle(state) };
+}
+
+// 主按钮文字跟随当前预设默认动作；split 按钮与导出动作实现归 #38
+const PRIMARY_LABELS = {
+  feishu: '⬇ 保存到飞书',
+  clipboard: '复制到剪贴板',
+  file: '保存为文件',
+};
+
+export function primaryLabel(action) {
+  return PRIMARY_LABELS[action] ?? PRIMARY_LABELS.feishu;
 }

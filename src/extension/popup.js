@@ -1,12 +1,13 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, resetTitle, isTitleEdited, primaryLabel } from './popup-state.js';
 
 let destination = null;
 let attemptId = null;
 let recoveredAttempt = false;
 let pollTimer = null;
 let popupPicker = null;
+let presetState = null;
 
 const $ = (selector) => document.querySelector(selector);
 function message(payload) { return chrome.runtime.sendMessage(payload).then((response) => { if (!response?.ok) throw Object.assign(new Error(response?.error?.message || '操作失败'), response?.error); return response.result; }); }
@@ -18,6 +19,30 @@ function setDestination(value, temporary = false) {
   $('.chip-icon').textContent = value?.kind === 'node' ? '📁' : '🗂';
   // 临时目标显示「仅本次」徽标；默认目标不显示，避免干扰
   $('#destination-temp-badge').classList.toggle('hidden', !temporary);
+}
+
+// 预设 chips 与标题输入框的 DOM 同步；归约逻辑全在 popup-state.js
+function renderPresetChips() {
+  const row = $('#presets');
+  row.innerHTML = '';
+  for (const preset of presetState.presets) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `preset-chip${preset.id === presetState.presetId ? ' on' : ''}`;
+    chip.textContent = preset.name;
+    chip.addEventListener('click', () => {
+      presetState = selectPreset(presetState, preset.id);
+      syncPresetView();
+    });
+    row.appendChild(chip);
+  }
+}
+
+function syncPresetView() {
+  $('#page-title').value = presetState.title;
+  $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
+  $('#save').textContent = primaryLabel(currentPreset(presetState).action);
+  renderPresetChips();
 }
 
 const POPUP_LABELS = {
@@ -59,10 +84,11 @@ function closePicker() {
 
 async function inspect() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  $('#page-title').textContent = tab?.title || '当前页面';
   try { $('#page-host').textContent = new URL(tab.url).host; } catch { $('#page-host').textContent = ''; }
   const settings = await message({ type: 'GET_SETTINGS' });
   setDestination(settings.destination);
+  presetState = initPopupPresets(settings, tab);
+  syncPresetView();
   attemptId = settings.activeAttempt || null;
   recoveredAttempt = Boolean(attemptId);
   try {
@@ -122,9 +148,11 @@ $('#tp-confirm').addEventListener('click', async () => {
 });
 $('#save').addEventListener('click', async () => {
   if (!destination) { show('请先在设置中配置默认保存目标。', 'error'); return; }
+  // 预设默认动作非飞书时本 ticket 只改按钮文字；导出动作实现归 #38
+  if (currentPreset(presetState).action !== 'feishu') { show('该动作将在 #38 提供。'); return; }
   $('#save').disabled = true; show('正在提取当前页面…');
   try {
-    const result = await message({ type: 'CLIP', destination, includeImages: $('#images').checked });
+    const result = await message({ type: 'CLIP', destination, includeImages: $('#images').checked, title: presetState.title });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
     $('#open').classList.add('hidden'); $('#save').classList.remove('hidden');
@@ -133,4 +161,14 @@ $('#save').addEventListener('click', async () => {
   catch (error) { show(error.code === 'INVALID_TARGET' ? '保存目标已失效，请重新选择。' : error.message, 'error'); $('#save').disabled = false; }
 });
 $('#open').addEventListener('click', () => chrome.tabs.create({ url: $('#open').dataset.url }));
+// 手动编辑标题：不立即重写输入框（避免光标跳动），只更新状态与 ↺ 可见性
+$('#page-title').addEventListener('input', (event) => {
+  presetState = editTitle(presetState, event.target.value);
+  $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
+});
+$('#title-reset').addEventListener('click', () => {
+  presetState = resetTitle(presetState);
+  $('#page-title').value = presetState.title;
+  $('#title-reset').classList.add('hidden');
+});
 inspect();

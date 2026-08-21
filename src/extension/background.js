@@ -51,7 +51,8 @@ async function handle(message) {
     case 'STATUS': return bridge('/v1/status');
     case 'GET_SETTINGS': {
       await migratePresets();
-      return localGet(['destination', 'activeAttempt']);
+      // destination/activeAttempt 保留给 options 页与 job 恢复；presets/defaultPresetId 供弹窗（#36）
+      return localGet(['destination', 'activeAttempt', 'presets', 'defaultPresetId']);
     }
     case 'VALIDATE_DESTINATION': return bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });
     case 'LIST_SPACES': {
@@ -78,6 +79,8 @@ async function handle(message) {
     }
     case 'CLIP': {
       const snapshot = await extractActiveTab();
+      // 弹窗可编辑标题（#36）：渲染结果随 CLIP 发来，Bridge 不懂模板语法（#30 决议）
+      if (typeof message.title === 'string' && message.title.trim() !== '') snapshot.title = message.title;
       const attemptId = crypto.randomUUID();
       const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
