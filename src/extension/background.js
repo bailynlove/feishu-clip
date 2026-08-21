@@ -4,8 +4,13 @@ const BRIDGE = 'http://127.0.0.1:38479';
 
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 
-// service worker 冷启动时幂等迁移预设存储
-ensurePresets(chrome.storage.local);
+// service worker 冷启动时幂等迁移预设存储；in-flight 复用防止并发调用各自生成 UUID 的竞态
+let migrating = null;
+function migratePresets() {
+  migrating ??= ensurePresets(chrome.storage.local).finally(() => { migrating = null; });
+  return migrating;
+}
+migratePresets();
 
 async function localGet(keys) {
   return chrome.storage.local.get(keys);
@@ -45,7 +50,7 @@ async function handle(message) {
     }
     case 'STATUS': return bridge('/v1/status');
     case 'GET_SETTINGS': {
-      await ensurePresets(chrome.storage.local);
+      await migratePresets();
       return localGet(['destination', 'activeAttempt']);
     }
     case 'VALIDATE_DESTINATION': return bridge('/v1/destinations/validate', { method: 'POST', body: message.destination });

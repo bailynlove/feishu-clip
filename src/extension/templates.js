@@ -40,14 +40,13 @@ export function buildContext(snapshot) {
   }
   const captured = new Date(snapshot.capturedAt);
   const valid = !Number.isNaN(captured.getTime());
-  const parts = valid ? localParts(captured) : null;
   const context = {
     title: typeof snapshot.title === 'string' ? snapshot.title : '',
     url,
     host,
-    date: parts ? `${parts.YYYY}-${parts.MM}-${parts.DD}` : '',
-    time: parts ? `${parts.HH}:${parts.mm}` : '',
-    datetime: parts ? `${parts.YYYY}-${parts.MM}-${parts.DD} ${parts.HH}:${parts.mm}` : '',
+    date: valid ? formatDate(captured, 'YYYY-MM-DD') : '',
+    time: valid ? formatDate(captured, 'HH:mm') : '',
+    datetime: valid ? formatDate(captured, 'YYYY-MM-DD HH:mm') : '',
     content: typeof snapshot.markdown === 'string' ? snapshot.markdown : '',
   };
   // filter 重排 date/time/datetime 需要原始时间；不可枚举，不影响渲染与断言
@@ -58,10 +57,10 @@ export function buildContext(snapshot) {
 export function renderTemplate(template, ctx) {
   if (typeof template !== 'string') return '';
   return template.replace(PLACEHOLDER, (_match, inner) => {
-    const parts = inner.split('|');
-    if (parts.length > 2) return '';
-    const name = parts[0].trim();
-    const filter = parts[1]?.trim();
+    const segments = inner.split('|');
+    if (segments.length > 2) return '';
+    const name = segments[0].trim();
+    const filter = segments[1]?.trim();
     if (filter === undefined) {
       const value = ctx[name];
       return typeof value === 'string' ? value : '';
