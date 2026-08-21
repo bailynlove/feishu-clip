@@ -44,17 +44,18 @@ let confirmDeleteId = null;
 // 报错，修复合法写回成功后清除。内存态即可，重开设置页页面后丢弃。
 const triggerDrafts = new Map();
 
-async function persist() {
+async function persist(quiet = false) {
   const saved = await message({ type: 'SAVE_PRESETS', presets: state.presets, defaultPresetId: state.defaultPresetId });
   state = { ...state, ...saved };
-  toast('已保存 ✓', 'success');
+  // 文本框逐键保存不打扰；离散操作（新建/删除/排序/目标保存等）才弹「已保存」
+  if (!quiet) toast('已保存 ✓', 'success');
 }
 
 function editingPreset() {
   return state.presets.find((preset) => preset.id === editingId) ?? null;
 }
 
-function applyMutation(next) {
+function applyMutation(next, { quiet = false } = {}) {
   if (!next) return false;
   state = next;
   // 预设被删后其草稿一并丢弃；当前 tab 被删时切到第一套（顺序即优先级）
@@ -67,7 +68,7 @@ function applyMutation(next) {
     syncEditor();
   }
   renderTabs();
-  persist().catch((error) => toast(`保存失败：${error.message}`, 'error'));
+  persist(quiet).catch((error) => toast(`保存失败：${error.message}`, 'error'));
   return true;
 }
 
@@ -313,14 +314,14 @@ $('#f-triggers').addEventListener('input', () => {
   }
   triggerDrafts.delete(editingId);
   clearTriggerErrors();
-  applyMutation(updatePreset(state, editingId, { triggers: parseTriggers(text) }));
+  applyMutation(updatePreset(state, editingId, { triggers: parseTriggers(text) }), { quiet: true });
 });
 
 // ——— 表单字段：改动即保存 ———
 // 名称即时重命名并刷新 tab 标签；失焦时若为空则回退原名
 $('#f-name').addEventListener('input', () => {
   const name = $('#f-name').value.trim();
-  if (name) applyMutation(renamePreset(state, editingId, name));
+  if (name) applyMutation(renamePreset(state, editingId, name), { quiet: true });
 });
 $('#f-name').addEventListener('change', () => {
   if (!$('#f-name').value.trim()) $('#f-name').value = editingPreset()?.name ?? '';
@@ -331,10 +332,10 @@ $('#f-images').addEventListener('click', () => {
   syncEditor();
 });
 $('#f-title').addEventListener('input', () => {
-  applyMutation(updatePreset(state, editingId, { titleTemplate: $('#f-title').value }));
+  applyMutation(updatePreset(state, editingId, { titleTemplate: $('#f-title').value }), { quiet: true });
 });
 $('#f-body').addEventListener('input', () => {
-  applyMutation(updatePreset(state, editingId, { bodyTemplate: $('#f-body').value }));
+  applyMutation(updatePreset(state, editingId, { bodyTemplate: $('#f-body').value }), { quiet: true });
 });
 for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
   option.addEventListener('click', () => {
