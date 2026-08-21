@@ -1,10 +1,11 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>飞书剪藏</title><link rel="stylesheet" href="ui.css"></head><body><main>
-  <header><div class="logo">飞</div><div><strong>飞书剪藏</strong><small id="bridge">正在连接 Bridge…</small></div><button id="settings" class="icon" title="设置">⚙</button></header>
-  <section class="card"><small>当前页面</small><h1 id="page-title">正在读取…</h1><p id="page-host"></p></section>
-  <section class="card destination"><div><small id="destination-kind">默认保存目标</small><strong id="destination">尚未设置</strong></div><button id="change" class="link">仅本次更改</button></section>
-  <section id="picker-panel" class="card hidden"><small>选择本次剪藏目标（不影响默认目标）</small><nav id="tp-crumbs" class="crumbs hidden"></nav><div id="tp-status" class="picker-status"></div><ul id="tp-list" class="picker-list"></ul><button id="tp-more" class="link hidden" type="button">加载更多</button><div class="picker-actions"><button id="tp-back" class="link hidden" type="button">返回上级</button><button id="tp-retry" class="link hidden" type="button">重试</button><span class="spacer"></span><button id="tp-cancel" class="link" type="button">取消</button><button id="tp-confirm" class="primary" type="button" disabled>仅本次使用该目标</button></div></section>
-  <label class="toggle-row"><span><strong>包含图片</strong><small>失败时正文仍会保存</small></span><input id="images" type="checkbox" checked></label>
-  <div id="status" class="status hidden"></div><div class="spacer"></div>
-  <button id="save" class="primary">保存到飞书</button><button id="open" class="primary hidden">打开飞书文档 ↗</button>
-  <small class="fine">每次点击都会创建一篇新文档。关闭弹窗不会中断保存。</small>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>飞书剪藏</title><link rel="stylesheet" href="ui.css"></head><body class="popup"><main>
+  <header class="hero"><div class="hero-top"><div class="logo">飞</div><strong>飞书剪藏</strong><span id="bridge" class="pill">正在连接 Bridge…</span><button id="settings" class="hero-gear" title="设置">⚙</button></div><h1 id="page-title">正在读取…</h1><p id="page-host"></p></header>
+  <div class="popup-body">
+    <button id="change" class="chip" type="button" title="仅本次更改，不影响默认目标"><span class="chip-icon">🗂</span><span id="destination" class="chip-text">尚未设置</span><span id="destination-temp-badge" class="chip-temp hidden">仅本次</span><span class="chip-edit">更改 ›</span></button>
+    <label class="img-row"><span class="img-text"><strong>包含图片</strong><small>失败时正文仍会保存</small></span><input id="images" type="checkbox" checked><span class="switch"></span></label>
+    <div id="status" class="status hidden"></div>
+    <div class="cta"><button id="save" class="primary">⬇ 保存到飞书</button><button id="open" class="primary hidden">打开飞书文档 ↗</button></div>
+    <small class="fine">每次点击都会创建一篇新文档。关闭弹窗不会中断保存。</small>
+  </div>
+  <div id="picker-panel" class="picker-overlay hidden"><div id="picker-mask" class="sheet-mask"></div><section class="sheet"><div class="sheet-handle"></div><div class="sheet-head">选择本次剪藏目标<small>不影响默认目标</small></div><nav id="tp-crumbs" class="crumbs hidden"></nav><div id="tp-status" class="picker-status"></div><ul id="tp-list" class="picker-list"></ul><button id="tp-more" class="link hidden" type="button">加载更多</button><div class="picker-actions"><button id="tp-back" class="link hidden" type="button">返回上级</button><button id="tp-retry" class="link hidden" type="button">重试</button><span class="spacer"></span><button id="tp-cancel" class="link" type="button">取消</button></div><button id="tp-confirm" class="primary" type="button" disabled>仅本次使用该目标</button></section></div>
 </main><script type="module" src="popup.js"></script></body></html>

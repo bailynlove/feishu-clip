@@ -14,7 +14,10 @@ function show(text, kind = 'info') { const node = $('#status'); node.textContent
 function setDestination(value, temporary = false) {
   destination = value;
   $('#destination').textContent = value ? describeDestination(value) : '尚未设置';
-  $('#destination-kind').textContent = temporary ? '仅本次剪藏' : '默认保存目标';
+  // 图标随目标类型切换（知识库 / 文档节点），与原型一致
+  $('.chip-icon').textContent = value?.kind === 'node' ? '📁' : '🗂';
+  // 临时目标显示「仅本次」徽标；默认目标不显示，避免干扰
+  $('#destination-temp-badge').classList.toggle('hidden', !temporary);
 }
 
 const POPUP_LABELS = {
@@ -100,6 +103,7 @@ $('#change').addEventListener('click', () => {
   else closePicker();
 });
 $('#tp-cancel').addEventListener('click', closePicker);
+$('#picker-mask').addEventListener('click', closePicker);
 $('#tp-confirm').addEventListener('click', async () => {
   if (!popupPicker) return;
   const saved = await popupPicker.saveSelection();
