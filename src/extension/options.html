@@ -7,72 +7,78 @@
 <link rel="stylesheet" href="ui.css">
 </head>
 <body class="options">
-<main>
-<header><div class="logo">飞</div><div><strong>飞书剪藏设置</strong><small>Extension ID: <span id="extension-id"></span></small></div></header>
+<main class="ps-root">
+<header class="ps-header"><div class="ps-logo">飞</div><div><strong>飞书剪藏设置</strong><small>Extension ID: <span id="extension-id"></span></small></div></header>
 
-<section class="card">
+<section class="ps-card">
   <h2>1. 配对本地 Bridge</h2>
-  <label>安装器显示的配对码<input id="code" autocomplete="off" placeholder="粘贴一次性配对码"></label>
-  <button id="pair" class="primary">完成配对</button>
+  <div id="bridge-ok" class="ps-bridge-ok hidden"><span class="ps-dot"></span><span id="bridge-ok-text">已配对 · Bridge 运行中</span><button id="re-pair" class="ps-bridge-re" type="button">重新配对</button></div>
+  <div id="pair-form">
+    <label class="ps-field"><span class="ps-label">安装器显示的配对码</span><input id="code" class="ps-input" autocomplete="off" placeholder="粘贴一次性配对码"></label>
+    <button id="pair" class="ps-btn primary pair-submit" type="button">完成配对</button>
+  </div>
 </section>
 
-<section class="card">
+<section class="ps-card pc-card">
   <h2>2. 预设管理</h2>
-  <p>每套预设自带保存目标、模板与 triggers 规则；列表顺序即规则命中优先级与弹窗切换顺序。至少保留一套预设。</p>
-  <p class="current-target">默认预设目标：<strong id="current-destination">尚未设置</strong></p>
-  <ul id="preset-list" class="preset-list"></ul>
-  <button id="preset-add" class="primary" type="button">新建预设</button>
-</section>
+  <p class="ps-desc">每套预设自带保存目标、模板与 triggers 规则；标签顺序即规则命中优先级。至少保留一套预设。</p>
+  <div class="ps-tabs" id="preset-tabs"></div>
+  <div class="pc-form">
+    <label class="ps-field"><span class="ps-label">名称</span><input id="f-name" class="ps-input" autocomplete="off"></label>
 
-<section class="card hidden" id="preset-editor">
-  <h2>3. 编辑预设</h2>
-  <label>名称<input id="f-name" autocomplete="off"></label>
-
-  <label class="field-title">保存目标</label>
-  <p class="current-target">当前目标：<strong id="f-destination">尚未设置</strong></p>
-  <p>在下方浏览你有权访问的知识库：点知识库名称将其根层选为目标，点「进入」浏览并选中具体文档节点。</p>
-  <div id="picker">
-    <nav id="crumbs" class="crumbs hidden"></nav>
-    <div id="picker-status" class="picker-status"></div>
-    <ul id="picker-list" class="picker-list"></ul>
-    <button id="picker-more" class="link hidden" type="button">加载更多</button>
-    <div class="picker-actions">
-      <button id="picker-back" class="link hidden" type="button">返回上级</button>
-      <button id="picker-retry" class="link hidden" type="button">重试</button>
-      <button id="picker-save" class="primary hidden" type="button" disabled>设为该预设的保存目标</button>
+    <div class="ps-field"><span class="ps-label">保存目标</span>
+      <button class="ps-target" id="f-target" type="button">
+        <span id="f-target-icon">🗂</span><span class="ps-target-text" id="f-target-text">尚未设置</span><span class="ps-target-edit">更改 ›</span>
+      </button>
     </div>
+    <div id="picker-panel" class="hidden">
+      <div id="picker">
+        <nav id="crumbs" class="crumbs hidden"></nav>
+        <div id="picker-status" class="picker-status"></div>
+        <ul id="picker-list" class="picker-list"></ul>
+        <button id="picker-more" class="link hidden" type="button">加载更多</button>
+        <div class="picker-actions">
+          <button id="picker-back" class="link hidden" type="button">返回上级</button>
+          <button id="picker-retry" class="link hidden" type="button">重试</button>
+          <button id="picker-save" class="ps-btn primary picker-confirm hidden" type="button" disabled>设为该预设的保存目标</button>
+        </div>
+      </div>
+      <details id="advanced">
+        <summary>高级设置：手动输入节点 token 或空间 ID</summary>
+        <p class="ps-desc">与可视化选择使用同一套 Bridge 验证语义；仅填空间 ID 时保存为该知识库根层目标。</p>
+        <label class="ps-field"><span class="ps-label">Wiki 节点 token</span><input id="token" class="ps-input" placeholder="wikcn…"></label>
+        <label class="ps-field"><span class="ps-label">空间 ID（节点 token 留空时作为空间目标）</span><input id="space" class="ps-input" placeholder="7…"></label>
+        <button id="save-target" class="ps-btn primary pair-submit" type="button">验证并保存</button>
+      </details>
+    </div>
+
+    <button class="ps-switch-row" id="f-images" type="button" aria-pressed="true">
+      <span class="ps-switch-text"><span class="ps-switch-label">包含图片</span><span class="ps-switch-sub">失败时正文仍会保存</span></span>
+      <span class="ps-switch"></span>
+    </button>
+
+    <label class="ps-field"><span class="ps-label">标题模板</span><input id="f-title" class="ps-input mono" autocomplete="off" placeholder="{{title}}"></label>
+    <div class="ps-vars" data-field="f-title"></div>
+
+    <label class="ps-field"><span class="ps-label">追加正文模板</span><textarea id="f-body" class="ps-input mono" rows="3" placeholder="留空则不追加；含 {{content}} 时正文替换占位符"></textarea></label>
+    <div class="ps-vars" data-field="f-body"></div>
+
+    <div class="ps-field"><span class="ps-label">默认动作</span>
+      <div class="ps-seg" id="f-action">
+        <button class="ps-seg-opt" data-value="feishu" type="button">⬇ 保存到飞书</button>
+        <button class="ps-seg-opt" data-value="clipboard" type="button">⧉ 复制到剪贴板</button>
+        <button class="ps-seg-opt" data-value="file" type="button">💾 保存为文件</button>
+      </div>
+    </div>
+
+    <label class="ps-field"><span class="ps-label">Triggers 规则（一行一条）</span><textarea id="f-triggers" class="ps-input mono" rows="3" placeholder="https://example.com/blog&#10;/^https:\/\/.*\.zhihu\.com\//i"></textarea></label>
+    <div id="trigger-errors" class="trigger-errors hidden"></div>
   </div>
-  <details id="advanced">
-    <summary>高级设置：手动输入节点 token 或空间 ID</summary>
-    <p>与可视化选择使用同一套 Bridge 验证语义；仅填空间 ID 时保存为该知识库根层目标。</p>
-    <label>Wiki 节点 token<input id="token" placeholder="wikcn…"></label>
-    <label>空间 ID（节点 token 留空时作为空间目标）<input id="space" placeholder="7…"></label>
-    <button id="save-target" class="primary" type="button">验证并保存</button>
-  </details>
-
-  <label class="check-row"><input type="checkbox" id="f-images"> 包含图片</label>
-
-  <label>标题模板<input id="f-title" autocomplete="off" placeholder="{{title}}"></label>
-  <div class="var-row" data-field="f-title"></div>
-
-  <label>追加正文模板<textarea id="f-body" rows="3" placeholder="留空则不追加；含 {{content}} 时正文替换占位符"></textarea></label>
-  <div class="var-row" data-field="f-body"></div>
-
-  <label class="field-title">默认动作</label>
-  <div class="radio-row">
-    <label><input type="radio" name="f-action" value="feishu"> 保存到飞书</label>
-    <label><input type="radio" name="f-action" value="clipboard"> 复制到剪贴板</label>
-    <label><input type="radio" name="f-action" value="file"> 保存为文件</label>
-  </div>
-
-  <label>Triggers 规则（一行一条）<textarea id="f-triggers" rows="4" placeholder="https://example.com/blog&#10;/^https:\/\/.*\.zhihu\.com\//i"></textarea></label>
-  <div id="trigger-errors" class="trigger-errors hidden"></div>
-
-  <button id="editor-done" class="primary" type="button">完成</button>
 </section>
 
-<div id="status" class="status hidden"></div>
+<div id="status" class="ps-note hidden"></div>
 </main>
+<div id="dialog-root"></div>
 <script type="module" src="options.js"></script>
 </body>
 </html>
