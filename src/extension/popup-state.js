@@ -120,6 +120,47 @@ export function overrideDestination(state, destination) {
   return { ...state, destination: destination ?? null, temporary: true };
 }
 
+// ——— 保存为新预设（#40）———
+
+function sameDestination(a, b) {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+// 「本次设置与所选预设不一致」的判定口径：仅比较预设字段中弹窗可改的两项——
+// 保存目标（按值比较，手动覆盖成相同目标不算修改）与包含图片。
+// 标题框（逐篇渲染，语义 B）与追加正文（逐篇内容）不是预设字段，不参与判定。
+export function isSessionModified(state) {
+  const preset = currentPreset(state);
+  return !sameDestination(state.destination, preset.destination ?? null) || state.includeImages !== (preset.includeImages !== false);
+}
+
+// 包含图片 switch 的仅本次改动：写回 state 以便 diff 判定与保存时读取
+export function setIncludeImages(state, includeImages) {
+  return { ...state, includeImages: includeImages !== false };
+}
+
+// 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖 destination/includeImages；
+// triggers 拷贝继承（与设置页 duplicatePreset 的副本语义一致），重名允许（以 id 区分）。
+// 空名返回 null 由调用方拦截。选中不走 selectPreset——新预设的目标就是当前目标，
+// 不能按「换预设清仅本次」的路径把它清掉。
+export function saveAsNewPreset(state, name) {
+  const trimmed = String(name ?? '').trim();
+  if (trimmed === '') return null;
+  const source = currentPreset(state);
+  const preset = {
+    ...source,
+    id: crypto.randomUUID(),
+    name: trimmed,
+    destination: state.destination,
+    includeImages: state.includeImages,
+    triggers: [...(source.triggers ?? [])],
+  };
+  const next = { ...state, presets: [...state.presets, preset], presetId: preset.id, temporary: false, viaTrigger: false };
+  // 标题模板继承自源预设，渲染值通常不变；仅在未手改时形式上重渲，语义与 selectPreset 一致
+  if (!isTitleEdited(state)) next.title = renderCurrentTitle(next);
+  return { state: next, preset };
+}
+
 export function editTitle(state, value) {
   return { ...state, title: String(value ?? '') };
 }

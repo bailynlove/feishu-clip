@@ -16,6 +16,9 @@ import {
   previewBody,
   shouldScrollPreviewToEnd,
   matchTrigger,
+  isSessionModified,
+  setIncludeImages,
+  saveAsNewPreset,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -307,4 +310,65 @@ test('init applies the matched preset and marks viaTrigger; a manual switch clea
   assert.equal(state.viaTrigger, true);
   state = selectPreset(state, 't1');
   assert.equal(state.viaTrigger, false, 'manual override leaves trigger mode for this session');
+});
+
+// ——— #40：保存为新预设 ———
+
+test('isSessionModified only compares the two preset fields editable in the popup', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(isSessionModified(state), false, 'fresh session matches the preset');
+  // 标题与追加正文不是预设字段，不参与判定
+  state = editAppend(editTitle(state, '别的标题'), '临时批注');
+  assert.equal(isSessionModified(state), false);
+  // 仅本次目标不同 → 修改
+  const overridden = overrideDestination(state, nodeTarget);
+  assert.equal(isSessionModified(overridden), true);
+  // 手动覆盖成相同目标（按值比较）不算修改
+  assert.equal(isSessionModified(overrideDestination(state, { ...spaceTarget })), false);
+  // 包含图片不同 → 修改
+  assert.equal(isSessionModified(setIncludeImages(state, false)), true);
+});
+
+test('setIncludeImages stores the per-session switch state', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p2' }, tab, now);
+  assert.equal(state.includeImages, false);
+  assert.equal(setIncludeImages(state, true).includeImages, true);
+  assert.equal(setIncludeImages(state, true).includeImages, true);
+});
+
+test('saveAsNewPreset inherits the source preset and overrides the two session fields', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = setIncludeImages(overrideDestination(state, nodeTarget), false);
+  const result = saveAsNewPreset(state, '  我的归档  ');
+  assert.equal(result.state.presets.length, presets.length + 1);
+  const created = result.preset;
+  assert.notEqual(created.id, 'p1');
+  assert.equal(created.name, '我的归档', 'name is trimmed');
+  assert.deepEqual(created.destination, nodeTarget);
+  assert.equal(created.includeImages, false);
+  assert.equal(created.titleTemplate, presets[0].titleTemplate, '其余字段继承所选预设');
+  assert.equal(created.action, 'feishu');
+  created.triggers.push('x');
+  assert.equal((presets[0].triggers ?? []).length, 0, 'triggers are copied, not shared');
+  // 选中新预设，且不触发「换预设清仅本次」：目标保留、徽标态清除
+  assert.equal(result.state.presetId, created.id);
+  assert.equal(result.state.temporary, false);
+  assert.deepEqual(result.state.destination, nodeTarget);
+  assert.equal(isSessionModified(result.state), false, 'current settings now equal the new preset, button hides');
+});
+
+test('saveAsNewPreset keeps a manually edited title and clears the trigger hint', () => {
+  let state = initPopupPresets({ presets: triggerPresets, defaultPresetId: 't1' }, triggerTab, now);
+  assert.equal(state.viaTrigger, true);
+  state = editTitle(state, '手改标题');
+  const { state: next } = saveAsNewPreset(state, 'x');
+  assert.equal(next.title, '手改标题');
+  assert.equal(next.viaTrigger, false);
+});
+
+test('saveAsNewPreset rejects blank names', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(saveAsNewPreset(state, ''), null);
+  assert.equal(saveAsNewPreset(state, '   '), null);
+  assert.equal(saveAsNewPreset(state, null), null);
 });

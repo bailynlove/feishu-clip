@@ -128,11 +128,21 @@
 .popup .title-input:hover{border-color:rgba(11,59,54,.3)}
 .popup .title-input:focus{outline:none;border-color:var(--brand-ink);background:rgba(255,255,255,.75)}
 .popup .title-reset{border:0;background:rgba(255,255,255,.6);color:var(--brand-ink);border-radius:999px;font-size:12px;padding:5px 10px;cursor:pointer;white-space:nowrap}
-.popup .presets{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.popup .preset-chip{border:1.5px solid var(--brand-line);background:#fff;color:#182030;border-radius:999px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+/* #40：chips 栏横向滚动（超出宽度时），「存为新预设」按钮钉在行尾，visibility 隐藏保留占位 */
+.popup .presets-row{display:flex;align-items:center;gap:8px}
+.popup .presets{flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow-x:auto;scrollbar-width:none}
+.popup .preset-chip{flex-shrink:0;border:1.5px solid var(--brand-line);background:#fff;color:#182030;border-radius:999px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
 .popup .preset-chip.on{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);box-shadow:inset 0 1px 2px rgba(255,255,255,.7)}
 /* trigger 命中提示（#39）：chips 旁的低调徽标，手动切换预设后消失 */
 .popup .trigger-hint{font-size:10px;background:var(--brand-soft);color:var(--brand-deep);border-radius:999px;padding:3px 9px;white-space:nowrap}
+/* 「存为新预设」按钮与命名条（#40）：jelly 风格，沿用动森蓝绿 */
+.popup .save-as-preset{flex-shrink:0;border:1.5px dashed var(--brand-deep);background:transparent;color:var(--brand-deep);border-radius:999px;padding:5px 12px;font-size:11.5px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap}
+.popup .save-as-bar{display:flex;align-items:center;gap:6px;background:var(--brand-soft);border:1.5px solid var(--brand-line);border-radius:12px;padding:8px 10px}
+.popup .save-as-input{flex:1;min-width:0;border:1.5px solid #dfe4ec;border-radius:8px;padding:7px 10px;font-size:12.5px;font-family:inherit;color:#182030}
+.popup .save-as-input:focus{outline:none;border-color:var(--brand-2)}
+.popup .save-as-confirm{border:0;border-radius:999px;padding:7px 14px;background:linear-gradient(rgba(255,255,255,.5),rgba(255,255,255,.05) 60%),var(--brand);color:var(--brand-ink);font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:inset 0 1px 3px rgba(255,255,255,.75)}
+.popup .save-as-confirm:disabled{background:#d4d9e2;color:#fff;box-shadow:none;cursor:default}
+.popup .save-as-cancel{border:0;background:none;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit}
 /* ——— 本次设置 / 预览折叠区（#37，A 版原型）：两个折叠区状态独立 ——— */
 .popup .fold{border:1.5px solid var(--brand-line);border-radius:12px;overflow:hidden;background:#fff}
 .popup .fold-head{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;border:0;background:var(--brand-soft);padding:10px 14px;font-size:12.5px;font-weight:600;color:#182030;cursor:pointer;font-family:inherit;text-align:left}

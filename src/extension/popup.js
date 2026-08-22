@@ -1,12 +1,13 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editAppend, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, shouldScrollPreviewToEnd } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editAppend, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, shouldScrollPreviewToEnd, isSessionModified, setIncludeImages, saveAsNewPreset } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
 let pollTimer = null;
 let popupPicker = null;
 let presetState = null;
+let defaultPresetId = null; // SAVE_PRESETS 整体写回时须带上（#40 不改变默认预设）
 // 预览懒提取（#37）：首次展开预览才跑 extractor，缓存快照供实时重渲
 let previewSnapshot = null;
 let previewLoading = false;
@@ -52,7 +53,17 @@ function syncPresetView() {
   $('#preview-title').textContent = presetState.title;
   syncDestinationView();
   renderPresetChips();
+  syncSaveAsButton();
   refreshPreview();
+}
+
+// ——— 保存为新预设（#40）：按钮用 visibility 隐藏保留占位，布局不跳动 ———
+function syncSaveAsButton() {
+  $('#save-as-preset').style.visibility = isSessionModified(presetState) ? 'visible' : 'hidden';
+}
+
+function hideSaveAsBar() {
+  $('#save-as-bar').classList.add('hidden');
 }
 
 // ——— 本次设置 / 预览折叠区（#37）：两个折叠区状态独立 ———
@@ -130,6 +141,7 @@ async function inspect() {
   try { $('#page-host').textContent = new URL(tab.url).host; } catch { $('#page-host').textContent = ''; }
   const settings = await message({ type: 'GET_SETTINGS' });
   presetState = initPopupPresets(settings, tab);
+  defaultPresetId = settings.defaultPresetId ?? null;
   syncPresetView();
   attemptId = settings.activeAttempt || null;
   recoveredAttempt = Boolean(attemptId);
@@ -198,10 +210,49 @@ $('#tp-confirm').addEventListener('click', async () => {
   if (saved) {
     presetState = overrideDestination(presetState, saved);
     syncDestinationView();
+    syncSaveAsButton();
     closePicker();
     show(`本次将保存到：${describeDestination(saved)}。默认目标不变。`);
   } else {
     show(`目标验证失败：${popupPicker.getState().error?.message || '请重新选择'}`, 'error');
+  }
+});
+// 包含图片 switch 的仅本次改动进 state，参与「存为新预设」的 diff 判定
+$('#images').addEventListener('change', (event) => {
+  presetState = setIncludeImages(presetState, event.target.checked);
+  syncSaveAsButton();
+});
+// ——— 保存为新预设（#40）：内联命名条，空名不允许（确认键禁用），重名允许（以 id 区分）———
+function syncSaveAsConfirm() {
+  $('#save-as-confirm').disabled = $('#save-as-name').value.trim() === '';
+}
+$('#save-as-preset').addEventListener('click', () => {
+  if (!isSessionModified(presetState)) return;
+  $('#save-as-bar').classList.remove('hidden');
+  const input = $('#save-as-name');
+  input.value = `${currentPreset(presetState).name} 副本`;
+  syncSaveAsConfirm();
+  input.focus();
+});
+$('#save-as-name').addEventListener('input', syncSaveAsConfirm);
+$('#save-as-name').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !$('#save-as-confirm').disabled) $('#save-as-confirm').click();
+  if (event.key === 'Escape') hideSaveAsBar();
+});
+$('#save-as-cancel').addEventListener('click', hideSaveAsBar);
+$('#save-as-confirm').addEventListener('click', async () => {
+  const result = saveAsNewPreset(presetState, $('#save-as-name').value);
+  if (!result) return;
+  $('#save-as-confirm').disabled = true;
+  try {
+    await message({ type: 'SAVE_PRESETS', presets: result.state.presets, defaultPresetId });
+    presetState = result.state;
+    hideSaveAsBar();
+    syncPresetView();
+    show(`已保存为新预设「${result.preset.name}」。`, 'success');
+  } catch (error) {
+    show(`保存预设失败：${error.message}`, 'error');
+    syncSaveAsConfirm();
   }
 });
 $('#save').addEventListener('click', async () => {
