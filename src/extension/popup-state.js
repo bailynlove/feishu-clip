@@ -2,7 +2,7 @@
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
 import { createDefaultPreset } from './presets.js';
-import { buildContext, renderBody, renderTemplate, renderTitle } from './templates.js';
+import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
@@ -103,8 +103,8 @@ export function initPopupPresets({ presets, defaultPresetId } = {}, tab, now) {
   const matchedId = matchTrigger(list, tab?.url);
   const selected = (matchedId ? list.find((preset) => preset.id === matchedId) : null) ?? list.find((preset) => preset.id === defaultPresetId) ?? list[0];
   const state = applyPresetParams({ presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) });
-  // 两个折叠区是仅本次会话状态：#36 起弹窗一律不回写预设；customBody 由 applyPresetParams 预填
-  return { ...state, title: renderCurrentTitle(state), settingsOpen: false, previewOpen: false, viaTrigger: Boolean(matchedId) };
+  // 两个折叠区与动作菜单是仅本次会话状态：#36 起弹窗一律不回写预设；customBody 由 applyPresetParams 预填
+  return { ...state, title: renderCurrentTitle(state), settingsOpen: false, previewOpen: false, menuOpen: false, viaTrigger: Boolean(matchedId) };
 }
 
 // 手改检测：输入框值 ≠ 当前预设模板渲染值即视为手改；初始值与 ↺ 重置值都等于渲染值
@@ -212,15 +212,41 @@ export function toggleSection(state, section) {
   return { ...state, [key]: !state[key] };
 }
 
-// 预览上下文：与 background 保存路径一致——标题用 finalTitle（保存时的最终标题），
-// content/url/host/capturedAt 来自懒提取的 extractor 快照
-export function buildPreviewContext(snapshot, state) {
-  return buildContext({ ...snapshot, title: finalTitle(state) });
+// 预览文本 = 最终保存正文 = 导出内容（composeClip 的 body）
+export function previewBody(state, snapshot) {
+  return composeClip(state, snapshot).body;
 }
 
-// 预览文本 = 最终保存正文：有效模板 = 自定义正文框内容，与 background CLIP 同调 renderBody
-export function previewBody(state, snapshot) {
-  return renderBody(state.customBody, buildPreviewContext(snapshot, state));
+// ——— 导出动作（#38）：复制到剪贴板 / 保存为文件 ———
+
+// 导出内容合成：与 background CLIP 同一规则——标题走语义 B 渲染 + sanitizeClipTitle
+// 清洗、空白回退 extractor 标题；正文 = renderBody(自定义正文框内容)。
+// 保存/复制/文件/预览四处共用此路径，保证内容一致。
+export function composeClip(state, snapshot) {
+  const title = sanitizeClipTitle(finalTitle(state)) ?? (typeof snapshot?.title === 'string' ? snapshot.title : '');
+  return { title, body: renderBody(state.customBody, buildContext({ ...snapshot, title })) };
+}
+
+// 导出文件名：渲染标题做文件系统安全清洗，空则回退 clip
+export function clipFilename(title) {
+  const base = sanitizeFilename(title);
+  return `${base === '' ? 'clip' : base}.md`;
+}
+
+// ▾ 动作菜单开关（一次性执行菜单，不改变预设 action）
+export function setMenuOpen(state, open) {
+  return { ...state, menuOpen: Boolean(open) };
+}
+
+// 主按钮文字跟随当前预设默认动作；图标与设置页分段控件（#35）保持一致
+const PRIMARY_LABELS = {
+  feishu: '⬇ 保存到飞书',
+  clipboard: '⧉ 复制到剪贴板',
+  file: '💾 保存为文件',
+};
+
+export function primaryLabel(action) {
+  return PRIMARY_LABELS[action] ?? PRIMARY_LABELS.feishu;
 }
 
 // 预览滚动决策（#37 验收 bug 修复，#40 改自定义正文后调为三向锚点）：
@@ -244,15 +270,4 @@ export function previewScrollTarget(trigger, state) {
   if (trigger === 'body') return customBodyAnchor(state);
   if (trigger === 'open') return isCustomBodyEdited(state) ? customBodyAnchor(state) : null;
   return null;
-}
-
-// 主按钮文字跟随当前预设默认动作；split 按钮与导出动作实现归 #38
-const PRIMARY_LABELS = {
-  feishu: '⬇ 保存到飞书',
-  clipboard: '复制到剪贴板',
-  file: '保存为文件',
-};
-
-export function primaryLabel(action) {
-  return PRIMARY_LABELS[action] ?? PRIMARY_LABELS.feishu;
 }

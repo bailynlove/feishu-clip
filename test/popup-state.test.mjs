@@ -20,6 +20,9 @@ import {
   isSessionModified,
   setIncludeImages,
   saveAsNewPreset,
+  composeClip,
+  clipFilename,
+  setMenuOpen,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -134,8 +137,8 @@ test('unknown or same preset id keeps state untouched', () => {
 
 test('primary label follows the preset default action', () => {
   assert.equal(primaryLabel('feishu'), '⬇ 保存到飞书');
-  assert.equal(primaryLabel('clipboard'), '复制到剪贴板');
-  assert.equal(primaryLabel('file'), '保存为文件');
+  assert.equal(primaryLabel('clipboard'), '⧉ 复制到剪贴板');
+  assert.equal(primaryLabel('file'), '💾 保存为文件');
   assert.equal(primaryLabel('mystery'), '⬇ 保存到飞书', 'unknown actions fall back to the feishu label');
 });
 
@@ -421,4 +424,38 @@ test('saveAsNewPreset captures an edited title as the new template and the curre
   assert.equal(created.titleTemplate, '我的固定标题', 'edited title freezes into the new preset template');
   assert.equal(created.bodyTemplate, '{{content}}\n\n批注');
   assert.equal(isSessionModified(next), false, 'plain-text title renders to itself, so the new preset matches the session');
+});
+
+// ——— #38：导出动作 ———
+
+test('composeClip shares the save/preview render path: semantic-B title with sanitize, renderBody for the body', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editCustomBody(editTitle(state, '我的 标题/收藏'), '{{content}}\n\n批注 {{host}}');
+  const clip = composeClip(state, clipSnapshot);
+  assert.equal(clip.title, '我的 标题-收藏', 'title re-rendered then filename-sanitized');
+  assert.equal(clip.body, '# 正文\n\n内容\n\n批注 blog.example.com');
+  assert.equal(previewBody(state, clipSnapshot), clip.body, 'preview === export body');
+});
+
+test('composeClip falls back to the extractor title when the rendered title is blank', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '{{unknown}}');
+  assert.equal(composeClip(state, clipSnapshot).title, '深入理解剪藏');
+});
+
+test('clipFilename sanitizes filesystem-unsafe characters and falls back to clip', () => {
+  assert.equal(clipFilename('我的 标题/收藏?'), '我的 标题-收藏-.md');
+  assert.equal(clipFilename('  正常标题  '), '正常标题.md');
+  assert.equal(clipFilename(''), 'clip.md');
+  assert.equal(clipFilename('???'), '---.md');
+  assert.equal(clipFilename('...'), 'clip.md', 'trailing dots are stripped, empty falls back');
+});
+
+test('action menu state is session-only and toggles independently', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.menuOpen, false);
+  state = setMenuOpen(state, true);
+  assert.equal(state.menuOpen, true);
+  assert.equal(currentPreset(state).action, 'feishu', 'opening the menu never touches the preset action');
+  assert.equal(setMenuOpen(state, false).menuOpen, false);
 });

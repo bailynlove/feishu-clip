@@ -192,3 +192,12 @@
 /* 修复 #40 验收 bug：.hidden{display:none}（0,1,0）压不过 .popup 作用域组件的 display 规则
    （0,2,0），导致命名条/命中提示/折叠区常驻显示。popup 内统一加 important 兜底 */
 .popup .hidden{display:none!important}
+/* split 主按钮（#38）：主动作跟随预设默认动作 + ▾ 一次性动作菜单（向上弹出，按钮在底部） */
+.popup .split{position:relative;display:flex;gap:6px}
+.popup .split-main{flex:1}
+.popup .split-arrow{width:46px;flex-shrink:0;border:0;border-radius:18px;background:linear-gradient(rgba(255,255,255,.6),rgba(255,255,255,.05) 55%),#4cc0d9;color:var(--brand-ink);font-size:14px;cursor:pointer;box-shadow:inset 0 2px 4px rgba(255,255,255,.7),inset 0 -3px 6px rgba(8,80,100,.14);transition:transform .12s}
+.popup .split-arrow:active{transform:translateY(2px)}
+.popup .action-menu{position:absolute;bottom:calc(100% + 8px);left:0;right:0;z-index:5;background:#fff;border-radius:14px;box-shadow:0 10px 34px rgba(20,30,50,.28);padding:6px;display:flex;flex-direction:column}
+.popup .action-menu-row{display:flex;align-items:center;gap:8px;border:0;background:none;border-radius:9px;padding:10px 12px;font-size:13px;font-weight:600;color:#182030;cursor:pointer;text-align:left;font-family:inherit}
+.popup .action-menu-row:hover{background:var(--brand-soft)}
+.popup .action-check{margin-left:auto;font-size:10.5px;color:var(--brand-deep);font-weight:600}

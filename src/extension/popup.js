@@ -1,6 +1,6 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, composeClip, clipFilename, setMenuOpen } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -51,6 +51,10 @@ function syncPresetView() {
   $('#images').checked = presetState.includeImages;
   $('#custom-body').value = presetState.customBody;
   $('#preview-title').textContent = presetState.title;
+  // ▾ 菜单的「默认 ✓」标记跟随当前预设 action（仅标识，不影响一次性执行）
+  document.querySelectorAll('.action-menu-row').forEach((row) => {
+    row.querySelector('.action-check').classList.toggle('hidden', row.dataset.action !== currentPreset(presetState).action);
+  });
   syncDestinationView();
   renderPresetChips();
   syncSaveAsButton();
@@ -88,6 +92,13 @@ function refreshPreview(trigger = 'refresh') {
   const target = previewScrollTarget(trigger, presetState);
   if (target === 'end') body.scrollTop = body.scrollHeight;
   else if (target === 'top') body.scrollTop = 0;
+}
+
+// 快照缓存（#37 预览懒提取，#38 导出动作复用）：预览提取过的快照导出直接用，不重复提取
+async function ensureSnapshot() {
+  if (previewSnapshot) return previewSnapshot;
+  previewSnapshot = await message({ type: 'EXTRACT' });
+  return previewSnapshot;
 }
 
 async function ensurePreviewSnapshot() {
@@ -175,7 +186,7 @@ async function poll() {
       show(view.message, view.kind);
       if (view.documentUrl) { $('#open').classList.remove('hidden'); $('#open').dataset.url = view.documentUrl; }
       // 仅本次会话发起的保存成功才切换主按钮；恢复的旧成功态保留「保存到飞书」以便直接发起新剪藏
-      if (view.swapPrimary) $('#save').classList.add('hidden');
+      if (view.swapPrimary) setSaveVisible(false);
       recoveredAttempt = false;
     } else if (view.kind === 'failure') {
       show(view.message, 'error'); $('#save').disabled = false;
@@ -262,10 +273,9 @@ $('#save-as-confirm').addEventListener('click', async () => {
     syncSaveAsConfirm();
   }
 });
-$('#save').addEventListener('click', async () => {
+// 保存到飞书：走 background CLIP（内部提取 + 建 job），job 恢复逻辑不变
+async function clipToFeishu() {
   if (!presetState.destination) { show('请先在设置中配置默认保存目标。', 'error'); return; }
-  // 预设默认动作非飞书时本 ticket 只改按钮文字；导出动作实现归 #38
-  if (currentPreset(presetState).action !== 'feishu') { show('该预设动作暂未支持，请改用保存到飞书。'); return; }
   $('#save').disabled = true; show('正在提取当前页面…');
   try {
     // 语义 B：标题框内容保存时再过一遍模板渲染，清洗与空白回退在 background 完成；
@@ -279,10 +289,82 @@ $('#save').addEventListener('click', async () => {
     });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
-    $('#open').classList.add('hidden'); $('#save').classList.remove('hidden');
+    $('#open').classList.add('hidden'); setSaveVisible(true);
     poll();
   }
   catch (error) { show(error.code === 'INVALID_TARGET' ? '保存目标已失效，请重新选择。' : error.message, 'error'); $('#save').disabled = false; }
+}
+
+// 导出动作（#38）：复制到剪贴板 / 保存为文件。完全在扩展侧完成——不过 Bridge、
+// 不创建 job、不影响 job 恢复；内容与保存/预览共用 composeClip 路径
+async function exportClip(action) {
+  $('#save').disabled = true; show('正在提取当前页面…');
+  try {
+    const snapshot = await ensureSnapshot();
+    const { title, body } = composeClip(presetState, snapshot);
+    if (action === 'clipboard') {
+      await navigator.clipboard.writeText(body);
+      show('已复制到剪贴板。', 'success');
+    } else {
+      // popup 是扩展页面，Blob/URL.createObjectURL 可用（service worker 里不可用）
+      const url = URL.createObjectURL(new Blob([body], { type: 'text/markdown' }));
+      try {
+        await chrome.downloads.download({ url, filename: clipFilename(title), saveAs: true });
+        show('已保存为文件。', 'success');
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+  } catch (error) {
+    show(error.code === 'UNSUPPORTED_PAGE' ? '当前页面不支持剪藏' : error.message, 'error');
+  } finally {
+    $('#save').disabled = false;
+  }
+}
+
+// 一次性执行菜单：选中即执行并收起，不改变主动作文字、不回写预设 action
+function runAction(action) {
+  presetState = setMenuOpen(presetState, false);
+  syncMenu();
+  if (action === 'feishu') clipToFeishu();
+  else exportClip(action);
+}
+
+function syncMenu() {
+  $('#action-menu').classList.toggle('hidden', !presetState.menuOpen);
+  $('#action-menu-toggle').setAttribute('aria-expanded', String(presetState.menuOpen));
+}
+
+// 保存成功切换主按钮时，split 的左右两半一起隐藏/恢复
+function setSaveVisible(visible) {
+  $('#save').classList.toggle('hidden', !visible);
+  $('#action-menu-toggle').classList.toggle('hidden', !visible);
+}
+
+$('#save').addEventListener('click', () => runAction(currentPreset(presetState).action));
+$('#action-menu-toggle').addEventListener('click', (event) => {
+  event.stopPropagation();
+  presetState = setMenuOpen(presetState, !presetState.menuOpen);
+  syncMenu();
+});
+document.querySelectorAll('.action-menu-row').forEach((row) => {
+  row.addEventListener('click', (event) => {
+    event.stopPropagation();
+    runAction(row.dataset.action);
+  });
+});
+// 点外部 / Esc 收起菜单
+document.addEventListener('click', (event) => {
+  if (presetState?.menuOpen && !event.target.closest('.split')) {
+    presetState = setMenuOpen(presetState, false);
+    syncMenu();
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && presetState?.menuOpen) {
+    presetState = setMenuOpen(presetState, false);
+    syncMenu();
+  }
 });
 $('#open').addEventListener('click', () => chrome.tabs.create({ url: $('#open').dataset.url }));
 // 手动编辑标题：不立即重写输入框（避免光标跳动），只更新状态与 ↺ 可见性
