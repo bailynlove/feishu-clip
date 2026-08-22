@@ -15,6 +15,7 @@ import {
   toggleSection,
   previewBody,
   shouldScrollPreviewToEnd,
+  matchTrigger,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -244,4 +245,66 @@ test('append-note edits pin the preview scroll to the end where the note is comp
   assert.equal(shouldScrollPreviewToEnd('open', state), false, 'opening preview without a note starts at the top');
   state = editAppend(state, '已有批注');
   assert.equal(shouldScrollPreviewToEnd('open', state), true, 'opening preview with an existing note jumps to it');
+});
+
+// ——— #39：triggers 自动命中预设 ———
+
+const triggerPresets = [
+  { id: 't1', name: '博客', titleTemplate: '{{title}}', action: 'feishu', destination: null, includeImages: true, triggers: ['https://blog.example.com'] },
+  { id: 't2', name: '博客长前缀', titleTemplate: '{{title}}', action: 'feishu', destination: null, includeImages: true, triggers: ['https://blog.example.com/posts'] },
+  { id: 't3', name: '正则', titleTemplate: '{{title}}', action: 'feishu', destination: null, includeImages: true, triggers: ['/example\\.com\\/posts\\/\\d+/'] },
+];
+const triggerTab = { title: 'T', url: 'https://blog.example.com/posts/42' };
+
+test('matchTrigger: longest prefix wins', () => {
+  assert.equal(matchTrigger(triggerPresets, triggerTab.url), 't2');
+});
+
+test('matchTrigger: equal-length prefixes resolve by preset list order', () => {
+  const tied = [
+    { id: 'a', triggers: ['https://blog.example.com'] },
+    { id: 'b', triggers: ['https://blog.example.com'] },
+  ];
+  assert.equal(matchTrigger(tied, triggerTab.url), 'a');
+});
+
+test('matchTrigger: a matching prefix beats any matching regex', () => {
+  const regexFirst = [
+    { id: 'rx', triggers: ['/example\\.com/'] },
+    { id: 'px', triggers: ['https://blog.example.com'] },
+  ];
+  assert.equal(matchTrigger(regexFirst, triggerTab.url), 'px', 'prefix wins even when the regex preset comes first');
+});
+
+test('matchTrigger: matching regexes resolve by preset list order, and /…/i is case-insensitive', () => {
+  const regexes = [
+    { id: 'r1', triggers: ['/BLOG\\.EXAMPLE\\.COM/i'] },
+    { id: 'r2', triggers: ['/example/'] },
+  ];
+  assert.equal(matchTrigger(regexes, triggerTab.url), 'r1');
+});
+
+test('matchTrigger: no hit returns null and init falls back to the default preset', () => {
+  assert.equal(matchTrigger(triggerPresets, 'https://unrelated.org/x'), null);
+  const state = initPopupPresets({ presets: triggerPresets, defaultPresetId: 't1' }, { title: 'T', url: 'https://unrelated.org/x' }, now);
+  assert.equal(state.presetId, 't1');
+  assert.equal(state.viaTrigger, false, 'no hit means no auto-select hint');
+});
+
+test('matchTrigger skips malformed input defensively', () => {
+  const bad = [
+    { id: 'bad', triggers: ['/unclosed[/', '', null, 42] },
+    { id: 'good', triggers: ['https://blog.example.com'] },
+  ];
+  assert.equal(matchTrigger(bad, triggerTab.url), 'good');
+  assert.equal(matchTrigger(null, triggerTab.url), null);
+  assert.equal(matchTrigger(bad, ''), null);
+});
+
+test('init applies the matched preset and marks viaTrigger; a manual switch clears the hint', () => {
+  let state = initPopupPresets({ presets: triggerPresets, defaultPresetId: 't1' }, triggerTab, now);
+  assert.equal(state.presetId, 't2', 'longest-prefix preset is auto-selected');
+  assert.equal(state.viaTrigger, true);
+  state = selectPreset(state, 't1');
+  assert.equal(state.viaTrigger, false, 'manual override leaves trigger mode for this session');
 });

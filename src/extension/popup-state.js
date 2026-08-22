@@ -49,14 +49,54 @@ function applyPresetParams(state) {
   return { ...state, destination: preset.destination ?? null, temporary: false, includeImages: preset.includeImages !== false };
 }
 
-// 打开弹窗：选中默认预设，应用其目标/图片参数并按其 titleTemplate 渲染标题初值；
+// ——— triggers 自动命中（#39）：规则语法与设置页校验一致（#35，决议 #32）———
+// 普通字符串 = 前缀匹配；/pattern/ = 正则（仅支持 i 标志）。
+// 优先级：前缀 > 正则；前缀取最长，等长按预设列表顺序；正则同为命中按预设列表顺序。
+// 规则在设置页保存时已校验，这里对非法输入仅防御性跳过。
+
+const REGEX_TRIGGER = /^\/(.+)\/([a-z]*)$/;
+
+function parseRegexTrigger(trigger) {
+  const match = REGEX_TRIGGER.exec(trigger);
+  if (!match || !/^i*$/.test(match[2])) return null;
+  try {
+    return new RegExp(match[1], match[2]);
+  } catch {
+    return null;
+  }
+}
+
+// 返回命中的预设 id，无命中返回 null
+export function matchTrigger(presets, url) {
+  if (!Array.isArray(presets) || typeof url !== 'string' || url === '') return null;
+  let bestPrefix = null; // { presetId, length, index }
+  let firstRegex = null; // { presetId, index }
+  presets.forEach((preset, index) => {
+    for (const trigger of preset.triggers ?? []) {
+      if (typeof trigger !== 'string' || trigger === '') continue;
+      const regex = parseRegexTrigger(trigger);
+      if (regex) {
+        if (!firstRegex && regex.test(url)) firstRegex = { presetId: preset.id, index };
+      } else if (url.startsWith(trigger)) {
+        if (!bestPrefix || trigger.length > bestPrefix.length || (trigger.length === bestPrefix.length && index < bestPrefix.index)) {
+          bestPrefix = { presetId: preset.id, length: trigger.length, index };
+        }
+      }
+    }
+  });
+  return (bestPrefix ?? firstRegex)?.presetId ?? null;
+}
+
+// 打开弹窗：先用当前页 URL 跑 trigger 匹配，命中则选中命中预设并亮 viaTrigger 提示；
+// 无命中选默认预设。应用选中预设的目标/图片参数并按其 titleTemplate 渲染标题初值；
 // 无预设时兜底为迁移生成的「默认」预设（正常路径 background 已迁移好，这里防御旧数据）
 export function initPopupPresets({ presets, defaultPresetId } = {}, tab, now) {
   const list = Array.isArray(presets) && presets.length > 0 ? presets : [createDefaultPreset()];
-  const selected = list.find((preset) => preset.id === defaultPresetId) ?? list[0];
+  const matchedId = matchTrigger(list, tab?.url);
+  const selected = (matchedId ? list.find((preset) => preset.id === matchedId) : null) ?? list.find((preset) => preset.id === defaultPresetId) ?? list[0];
   const state = applyPresetParams({ presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) });
   // 追加正文与两个折叠区都是仅本次会话状态：#36 起弹窗一律不回写预设
-  return { ...state, title: renderCurrentTitle(state), appendNote: '', settingsOpen: false, previewOpen: false };
+  return { ...state, title: renderCurrentTitle(state), appendNote: '', settingsOpen: false, previewOpen: false, viaTrigger: Boolean(matchedId) };
 }
 
 // 手改检测：输入框值 ≠ 当前预设模板渲染值即视为手改；初始值与 ↺ 重置值都等于渲染值
@@ -66,10 +106,11 @@ export function isTitleEdited(state) {
 
 // 切换预设：应用新预设的保存目标与 includeImages，并清除之前的「仅本次」临时目标
 // （三级语义：默认预设 → 选中预设 → 仅本次覆盖，换预设即从该预设重新起算）；
-// 标题未手改时按新预设模板重渲，手改过则保留用户内容
+// 标题未手改时按新预设模板重渲，手改过则保留用户内容；
+// 手动切换即脱离 trigger 命中态：提示消失，当次会话不再跑 trigger（重开弹窗重新匹配）
 export function selectPreset(state, presetId) {
   if (presetId === state.presetId || !state.presets.some((preset) => preset.id === presetId)) return state;
-  const next = applyPresetParams({ ...state, presetId });
+  const next = applyPresetParams({ ...state, presetId, viaTrigger: false });
   if (!isTitleEdited(state)) next.title = renderCurrentTitle(next);
   return next;
 }

@@ -26,7 +26,9 @@ function syncDestinationView() {
 // 预设 chips 与标题输入框的 DOM 同步；归约逻辑全在 popup-state.js
 function renderPresetChips() {
   const row = $('#presets');
-  row.innerHTML = '';
+  const hint = $('#trigger-hint');
+  // 只重建 chip，常驻的 trigger 命中提示徽标保留在行尾
+  row.querySelectorAll('.preset-chip').forEach((chip) => chip.remove());
   for (const preset of presetState.presets) {
     const chip = document.createElement('button');
     chip.type = 'button';
@@ -36,8 +38,10 @@ function renderPresetChips() {
       presetState = selectPreset(presetState, preset.id);
       syncPresetView();
     });
-    row.appendChild(chip);
+    row.insertBefore(chip, hint);
   }
+  // 命中提示只在 viaTrigger 时显示；手动切换预设（selectPreset 清除 viaTrigger）后消失
+  hint.classList.toggle('hidden', !presetState.viaTrigger);
 }
 
 function syncPresetView() {
