@@ -189,3 +189,6 @@
 .popup .picker-row .row-title{padding:10px 12px;min-height:38px;display:flex;align-items:center}
 .popup .picker-row:hover{background:var(--brand-soft)}
 .popup .picker-row.selected{background:var(--brand-soft);box-shadow:inset 3px 0 0 var(--brand-deep)}
+/* 修复 #40 验收 bug：.hidden{display:none}（0,1,0）压不过 .popup 作用域组件的 display 规则
+   （0,2,0），导致命名条/命中提示/折叠区常驻显示。popup 内统一加 important 兜底 */
+.popup .hidden{display:none!important}

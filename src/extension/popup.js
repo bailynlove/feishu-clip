@@ -203,6 +203,7 @@ $('#preview-toggle').addEventListener('click', async () => {
 $('#custom-body').addEventListener('input', (event) => {
   presetState = editCustomBody(presetState, event.target.value);
   refreshPreview('body');
+  syncSaveAsButton();
 });
 $('#change').addEventListener('click', () => {
   if ($('#picker-panel').classList.contains('hidden')) openPicker();
@@ -290,6 +291,7 @@ $('#page-title').addEventListener('input', (event) => {
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
   $('#preview-title').textContent = presetState.title;
   refreshPreview();
+  syncSaveAsButton();
 });
 $('#title-reset').addEventListener('click', () => {
   presetState = resetTitle(presetState);
@@ -297,5 +299,6 @@ $('#title-reset').addEventListener('click', () => {
   $('#title-reset').classList.add('hidden');
   $('#preview-title').textContent = presetState.title;
   refreshPreview();
+  syncSaveAsButton();
 });
 inspect();

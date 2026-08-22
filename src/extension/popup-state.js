@@ -134,12 +134,16 @@ function sameDestination(a, b) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
-// 「本次设置与所选预设不一致」的判定口径：仅比较预设字段中弹窗可改的两项——
-// 保存目标（按值比较，手动覆盖成相同目标不算修改）与包含图片。
-// 标题框（逐篇渲染，语义 B）与自定义正文（逐篇内容）不是预设字段，不参与判定。
+// 「本次设置与所选预设不一致」的判定口径：弹窗可改的四项——保存目标（按值比较，
+// 手动覆盖成相同目标不算修改）、包含图片、标题框、自定义正文框。
+// 标题/正文的基线是「预填进框的值」而非模板原始串：标题基线 = 预设 titleTemplate 的
+// 渲染结果（isTitleEdited 本就是这个比较），自定义正文基线 = 预设 bodyTemplate（预填值）。
 export function isSessionModified(state) {
   const preset = currentPreset(state);
-  return !sameDestination(state.destination, preset.destination ?? null) || state.includeImages !== (preset.includeImages !== false);
+  return !sameDestination(state.destination, preset.destination ?? null)
+    || state.includeImages !== (preset.includeImages !== false)
+    || isTitleEdited(state)
+    || isCustomBodyEdited(state);
 }
 
 // 包含图片 switch 的仅本次改动：写回 state 以便 diff 判定与保存时读取
@@ -147,10 +151,12 @@ export function setIncludeImages(state, includeImages) {
   return { ...state, includeImages: includeImages !== false };
 }
 
-// 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖 destination/includeImages；
-// triggers 拷贝继承（与设置页 duplicatePreset 的副本语义一致），重名允许（以 id 区分）。
-// 空名返回 null 由调用方拦截。选中不走 selectPreset——新预设的目标就是当前目标，
-// 不能按「换预设清仅本次」的路径把它清掉。
+// 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖四项——
+// destination/includeImages 用当前值；titleTemplate 在用户改过标题时固化为当前框内容
+// （框里是渲染后的标题，固化成模板是用户自己的选择），没改则沿用源预设；
+// bodyTemplate 恒取当前自定义正文框内容。triggers 拷贝继承（与设置页 duplicatePreset
+// 的副本语义一致），重名允许（以 id 区分）。空名返回 null 由调用方拦截。
+// 选中不走 selectPreset——新预设的目标就是当前目标，不能按「换预设清仅本次」清掉。
 export function saveAsNewPreset(state, name) {
   const trimmed = String(name ?? '').trim();
   if (trimmed === '') return null;
@@ -159,6 +165,8 @@ export function saveAsNewPreset(state, name) {
     ...source,
     id: crypto.randomUUID(),
     name: trimmed,
+    titleTemplate: isTitleEdited(state) ? state.title : source.titleTemplate,
+    bodyTemplate: state.customBody,
     destination: state.destination,
     includeImages: state.includeImages,
     triggers: [...(source.triggers ?? [])],

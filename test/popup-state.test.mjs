@@ -352,19 +352,20 @@ test('init applies the matched preset and marks viaTrigger; a manual switch clea
 
 // ——— #40：保存为新预设 ———
 
-test('isSessionModified only compares the two preset fields editable in the popup', () => {
+test('isSessionModified compares the four popup-editable fields against their baselines', () => {
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   assert.equal(isSessionModified(state), false, 'fresh session matches the preset');
-  // 标题与自定义正文不是预设字段，不参与判定
-  state = editCustomBody(editTitle(state, '别的标题'), '临时自定义');
-  assert.equal(isSessionModified(state), false);
-  // 仅本次目标不同 → 修改
-  const overridden = overrideDestination(state, nodeTarget);
-  assert.equal(isSessionModified(overridden), true);
-  // 手动覆盖成相同目标（按值比较）不算修改
+  // 仅本次目标不同 → 修改；手动覆盖成相同目标（按值比较）不算修改
+  assert.equal(isSessionModified(overrideDestination(state, nodeTarget)), true);
   assert.equal(isSessionModified(overrideDestination(state, { ...spaceTarget })), false);
   // 包含图片不同 → 修改
   assert.equal(isSessionModified(setIncludeImages(state, false)), true);
+  // 标题编辑 → 修改；基线是渲染后的预填值而非模板原始串（{{title}} 永不误报）
+  assert.equal(isSessionModified(editTitle(state, '别的标题')), true);
+  assert.equal(isSessionModified(editTitle(state, '深入理解剪藏')), false, 'typing back the rendered baseline is not a modification');
+  // 自定义正文编辑 → 修改；基线是预填的预设 bodyTemplate
+  assert.equal(isSessionModified(editCustomBody(state, '临时自定义')), true);
+  assert.equal(isSessionModified(editCustomBody(state, '')), false, 'fixture bodyTemplate is empty, so empty box matches the baseline');
 });
 
 test('setIncludeImages stores the per-session switch state', () => {
@@ -384,8 +385,9 @@ test('saveAsNewPreset inherits the source preset and overrides the two session f
   assert.equal(created.name, '我的归档', 'name is trimmed');
   assert.deepEqual(created.destination, nodeTarget);
   assert.equal(created.includeImages, false);
-  assert.equal(created.titleTemplate, presets[0].titleTemplate, '其余字段继承所选预设');
-  assert.equal(created.action, 'feishu');
+  assert.equal(created.titleTemplate, presets[0].titleTemplate, '标题未改时沿用源预设模板');
+  assert.equal(created.bodyTemplate, '', 'bodyTemplate 恒取当前自定义正文框内容');
+  assert.equal(created.action, 'feishu', '其余字段继承所选预设');
   created.triggers.push('x');
   assert.equal((presets[0].triggers ?? []).length, 0, 'triggers are copied, not shared');
   // 选中新预设，且不触发「换预设清仅本次」：目标保留、徽标态清除
@@ -409,4 +411,14 @@ test('saveAsNewPreset rejects blank names', () => {
   assert.equal(saveAsNewPreset(state, ''), null);
   assert.equal(saveAsNewPreset(state, '   '), null);
   assert.equal(saveAsNewPreset(state, null), null);
+});
+
+test('saveAsNewPreset captures an edited title as the new template and the current custom body', () => {
+  const withBody = [{ ...presets[0], bodyTemplate: '来源：{{host}}' }];
+  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
+  state = editCustomBody(editTitle(state, '我的固定标题'), '{{content}}\n\n批注');
+  const { preset: created, state: next } = saveAsNewPreset(state, '捕获');
+  assert.equal(created.titleTemplate, '我的固定标题', 'edited title freezes into the new preset template');
+  assert.equal(created.bodyTemplate, '{{content}}\n\n批注');
+  assert.equal(isSessionModified(next), false, 'plain-text title renders to itself, so the new preset matches the session');
 });
