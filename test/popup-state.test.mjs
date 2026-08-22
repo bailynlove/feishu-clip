@@ -14,6 +14,7 @@ import {
   finalTitle,
   toggleSection,
   previewBody,
+  shouldScrollPreviewToEnd,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -232,4 +233,15 @@ test('previewBody title variable resolves to the final (edited, re-rendered) tit
   let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
   state = editTitle(state, '改过的 {{date|date:YYYY}} 标题');
   assert.equal(previewBody(state, clipSnapshot), '改过的 2026 标题：# 正文\n\n内容');
+});
+
+// ——— #37 验收 bug 回归：追加正文在合成文本末尾，预览内滚区必须滚动到底部才可见 ———
+
+test('append-note edits pin the preview scroll to the end where the note is composed', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(shouldScrollPreviewToEnd('append', state), true, 'typing in the append box must scroll the note into view');
+  assert.equal(shouldScrollPreviewToEnd('refresh', state), false, 'title/preset refreshes keep the scroll position');
+  assert.equal(shouldScrollPreviewToEnd('open', state), false, 'opening preview without a note starts at the top');
+  state = editAppend(state, '已有批注');
+  assert.equal(shouldScrollPreviewToEnd('open', state), true, 'opening preview with an existing note jumps to it');
 });

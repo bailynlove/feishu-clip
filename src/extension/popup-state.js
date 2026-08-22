@@ -119,6 +119,15 @@ export function previewBody(state, snapshot) {
   return composeClipBody(currentPreset(state).bodyTemplate, state.appendNote, buildPreviewContext(snapshot, state));
 }
 
+// 预览滚动决策（#37 验收 bug 修复）：追加正文合成在正文末尾，而预览是 180px 内滚区，
+// 视口停在顶部时用户看不到刚输入的追加内容。trigger 为 'append'（追加正文输入）时
+// 滚到底；'open'（展开预览）时仅当已有追加正文才滚到底；其余重渲保持滚动位置。
+export function shouldScrollPreviewToEnd(trigger, state) {
+  if (trigger === 'append') return true;
+  if (trigger === 'open') return state.appendNote.trim() !== '';
+  return false;
+}
+
 // 主按钮文字跟随当前预设默认动作；split 按钮与导出动作实现归 #38
 const PRIMARY_LABELS = {
   feishu: '⬇ 保存到飞书',

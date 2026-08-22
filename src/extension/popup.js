@@ -1,6 +1,6 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editAppend, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editAppend, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, shouldScrollPreviewToEnd } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -61,10 +61,13 @@ function syncFolds() {
   $('#preview-toggle').setAttribute('aria-expanded', String(presetState.previewOpen));
 }
 
-// 预览文本 = 最终保存正文（同一 composeClipBody 路径）；快照未就绪时不动
-function refreshPreview() {
+// 预览文本 = 最终保存正文（同一 composeClipBody 路径）；快照未就绪时不动。
+// 追加正文在合成文本末尾，输入后须把内滚区带到底部（见 shouldScrollPreviewToEnd）
+function refreshPreview(trigger = 'refresh') {
   if (!presetState.previewOpen || !previewSnapshot) return;
-  $('#preview-body').textContent = previewBody(presetState, previewSnapshot);
+  const body = $('#preview-body');
+  body.textContent = previewBody(presetState, previewSnapshot);
+  if (shouldScrollPreviewToEnd(trigger, presetState)) body.scrollTop = body.scrollHeight;
 }
 
 async function ensurePreviewSnapshot() {
@@ -73,7 +76,7 @@ async function ensurePreviewSnapshot() {
   $('#preview-body').textContent = '正在提取页面…';
   try {
     previewSnapshot = await message({ type: 'EXTRACT' });
-    refreshPreview();
+    refreshPreview('open');
   } catch (error) {
     $('#preview-body').textContent = `预览提取失败：${error.message}`;
   } finally {
@@ -174,10 +177,10 @@ $('#preview-toggle').addEventListener('click', async () => {
   syncFolds();
   if (presetState.previewOpen) await ensurePreviewSnapshot();
 });
-// 追加正文（仅本次）：仅当次会话生效，不回写预设；预览开着时实时重渲
+// 追加正文（仅本次）：仅当次会话生效，不回写预设；预览开着时实时重渲并滚到末尾的追加内容
 $('#append').addEventListener('input', (event) => {
   presetState = editAppend(presetState, event.target.value);
-  refreshPreview();
+  refreshPreview('append');
 });
 $('#change').addEventListener('click', () => {
   if ($('#picker-panel').classList.contains('hidden')) openPicker();
