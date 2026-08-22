@@ -133,8 +133,8 @@
 .popup .presets{flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow-x:auto;scrollbar-width:none}
 .popup .preset-chip{flex-shrink:0;border:1.5px solid var(--brand-line);background:#fff;color:#182030;border-radius:999px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
 .popup .preset-chip.on{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);box-shadow:inset 0 1px 2px rgba(255,255,255,.7)}
-/* trigger 命中提示（#39）：chips 旁的低调徽标，手动切换预设后消失 */
-.popup .trigger-hint{font-size:10px;background:var(--brand-soft);color:var(--brand-deep);border-radius:999px;padding:3px 9px;white-space:nowrap}
+/* trigger 命中提示（#39）：chips 行下方独立一行，完整显示不截断（#40 移出滚动容器） */
+.popup .trigger-hint{display:inline-block;font-size:10px;background:var(--brand-soft);color:var(--brand-deep);border-radius:999px;padding:3px 9px;white-space:nowrap}
 /* 「存为新预设」按钮与命名条（#40）：jelly 风格，沿用动森蓝绿 */
 .popup .save-as-preset{flex-shrink:0;border:1.5px dashed var(--brand-deep);background:transparent;color:var(--brand-deep);border-radius:999px;padding:5px 12px;font-size:11.5px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap}
 .popup .save-as-bar{display:flex;align-items:center;gap:6px;background:var(--brand-soft);border:1.5px solid var(--brand-line);border-radius:12px;padding:8px 10px}
@@ -149,8 +149,8 @@
 .popup .fold-head em{font-style:normal;font-weight:400;font-size:11px;color:#9aa3b2;margin-left:4px}
 .popup .fold-caret{color:var(--brand-deep);font-size:11.5px;white-space:nowrap}
 .popup .fold-body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:10px;border-top:1px solid #eef1f6}
-.popup .append{width:100%;border:1.5px solid #dfe4ec;border-radius:10px;padding:9px 12px;font-size:12.5px;font-family:inherit;color:#182030}
-.popup .append:focus{outline:none;border-color:var(--brand-2)}
+.popup .custom-body{width:100%;border:1.5px solid #dfe4ec;border-radius:10px;padding:9px 12px;font-size:12.5px;font-family:inherit;color:#182030;resize:vertical;min-height:56px;line-height:1.5}
+.popup .custom-body:focus{outline:none;border-color:var(--brand-2)}
 .popup .preview-scroll{max-height:180px;overflow-y:auto;padding:12px 14px;font-size:12.5px;line-height:1.65;color:#2a3242;white-space:pre-wrap;word-break:break-word;border-top:1px solid #eef1f6}
 .popup .popup-body{padding:18px 20px;display:flex;flex-direction:column;gap:14px;flex:1}
 .popup .chip{display:flex;align-items:center;gap:8px;border:1.5px solid var(--brand-line);background:var(--brand-soft);border-radius:999px;padding:10px 16px;cursor:pointer;font-size:13px;width:100%;color:#182030}

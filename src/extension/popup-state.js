@@ -2,7 +2,7 @@
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
 import { createDefaultPreset } from './presets.js';
-import { buildContext, composeClipBody, renderTemplate, renderTitle } from './templates.js';
+import { buildContext, renderBody, renderTemplate, renderTitle } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
@@ -42,11 +42,19 @@ function renderCurrentTitle(state) {
   return renderTitle(currentPreset(state).titleTemplate, state.titleContext);
 }
 
-// 预设是顶层单位：自带保存目标与 includeImages（#29）。选中预设即应用其参数；
-// temporary 仅属于用户手动用选择器覆盖的「仅本次」临时目标，预设自带目标不亮徽标
+// 预设是顶层单位：自带保存目标、includeImages 与 bodyTemplate（#29）。选中预设即应用
+// 其参数；temporary 仅属于用户手动用选择器覆盖的「仅本次」临时目标，预设自带目标不亮徽标
 function applyPresetParams(state) {
   const preset = currentPreset(state);
-  return { ...state, destination: preset.destination ?? null, temporary: false, includeImages: preset.includeImages !== false };
+  return {
+    ...state,
+    destination: preset.destination ?? null,
+    temporary: false,
+    includeImages: preset.includeImages !== false,
+    // 自定义正文框预填所选预设的 bodyTemplate：切预设即应用新预设模板，
+    // 清除上一次的一次性修改（与目标/图片的切预设语义一致）
+    customBody: preset.bodyTemplate ?? '',
+  };
 }
 
 // ——— triggers 自动命中（#39）：规则语法与设置页校验一致（#35，决议 #32）———
@@ -95,8 +103,8 @@ export function initPopupPresets({ presets, defaultPresetId } = {}, tab, now) {
   const matchedId = matchTrigger(list, tab?.url);
   const selected = (matchedId ? list.find((preset) => preset.id === matchedId) : null) ?? list.find((preset) => preset.id === defaultPresetId) ?? list[0];
   const state = applyPresetParams({ presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) });
-  // 追加正文与两个折叠区都是仅本次会话状态：#36 起弹窗一律不回写预设
-  return { ...state, title: renderCurrentTitle(state), appendNote: '', settingsOpen: false, previewOpen: false, viaTrigger: Boolean(matchedId) };
+  // 两个折叠区是仅本次会话状态：#36 起弹窗一律不回写预设；customBody 由 applyPresetParams 预填
+  return { ...state, title: renderCurrentTitle(state), settingsOpen: false, previewOpen: false, viaTrigger: Boolean(matchedId) };
 }
 
 // 手改检测：输入框值 ≠ 当前预设模板渲染值即视为手改；初始值与 ↺ 重置值都等于渲染值
@@ -128,7 +136,7 @@ function sameDestination(a, b) {
 
 // 「本次设置与所选预设不一致」的判定口径：仅比较预设字段中弹窗可改的两项——
 // 保存目标（按值比较，手动覆盖成相同目标不算修改）与包含图片。
-// 标题框（逐篇渲染，语义 B）与追加正文（逐篇内容）不是预设字段，不参与判定。
+// 标题框（逐篇渲染，语义 B）与自定义正文（逐篇内容）不是预设字段，不参与判定。
 export function isSessionModified(state) {
   const preset = currentPreset(state);
   return !sameDestination(state.destination, preset.destination ?? null) || state.includeImages !== (preset.includeImages !== false);
@@ -176,11 +184,17 @@ export function finalTitle(state) {
   return renderTemplate(state.title, state.titleContext);
 }
 
-// ——— 本次设置折叠区 + 预览（#37）———
+// ——— 本次设置折叠区 + 预览（#37；#40 起追加正文改为自定义正文模板）———
 
-// 追加正文（仅本次）：原样存放，合成时按语义 B 走同一 renderTemplate 路径
-export function editAppend(state, value) {
-  return { ...state, appendNote: String(value ?? '') };
+// 自定义正文（仅本次）：一次性正文模板，原样存放（支持换行与 {{content}} 占位）。
+// 预填所选预设的 bodyTemplate（见 applyPresetParams），用户编辑只影响本次，不回写预设。
+export function editCustomBody(state, value) {
+  return { ...state, customBody: String(value ?? '') };
+}
+
+// 用户是否改过自定义正文（相对所选预设的 bodyTemplate）；用于展开预览时的滚动锚点
+export function isCustomBodyEdited(state) {
+  return state.customBody !== (currentPreset(state).bodyTemplate ?? '');
 }
 
 // 两个折叠区（settings / preview）状态独立，互不影响（#33 原型决议）
@@ -196,18 +210,32 @@ export function buildPreviewContext(snapshot, state) {
   return buildContext({ ...snapshot, title: finalTitle(state) });
 }
 
-// 预览文本 = 最终保存正文：与 background CLIP 走同一个 composeClipBody
+// 预览文本 = 最终保存正文：有效模板 = 自定义正文框内容，与 background CLIP 同调 renderBody
 export function previewBody(state, snapshot) {
-  return composeClipBody(currentPreset(state).bodyTemplate, state.appendNote, buildPreviewContext(snapshot, state));
+  return renderBody(state.customBody, buildPreviewContext(snapshot, state));
 }
 
-// 预览滚动决策（#37 验收 bug 修复）：追加正文合成在正文末尾，而预览是 180px 内滚区，
-// 视口停在顶部时用户看不到刚输入的追加内容。trigger 为 'append'（追加正文输入）时
-// 滚到底；'open'（展开预览）时仅当已有追加正文才滚到底；其余重渲保持滚动位置。
-export function shouldScrollPreviewToEnd(trigger, state) {
-  if (trigger === 'append') return true;
-  if (trigger === 'open') return state.appendNote.trim() !== '';
-  return false;
+// 预览滚动决策（#37 验收 bug 修复，#40 改自定义正文后调为三向锚点）：
+// 预览是 180px 内滚区，自定义文本的位置由 {{content}} 占位符决定——
+// 无占位符（整段追加在正文后）或占位符后有内容 → 滚到底才能看到自定义文本；
+// 占位符在末尾（自定义文本全在正文前）→ 滚到顶；模板空白 → 无需滚动。
+const CONTENT_PLACEHOLDER = /\{\{\s*content\s*\}\}/;
+
+function customBodyAnchor(state) {
+  const template = state.customBody;
+  if (typeof template !== 'string' || template.trim() === '') return null;
+  const match = CONTENT_PLACEHOLDER.exec(template);
+  if (!match) return 'end';
+  return template.slice(match.index + match[0].length).trim() === '' ? 'top' : 'end';
+}
+
+// 返回预览重渲后的滚动目标：'end' | 'top' | null（保持原位）。
+// trigger 为 'body'（自定义正文输入）时滚到自定义文本所在端；'open'（展开预览）时
+// 仅当用户改过自定义正文才滚动；其余重渲（标题/预设切换）保持滚动位置。
+export function previewScrollTarget(trigger, state) {
+  if (trigger === 'body') return customBodyAnchor(state);
+  if (trigger === 'open') return isCustomBodyEdited(state) ? customBodyAnchor(state) : null;
+  return null;
 }
 
 // 主按钮文字跟随当前预设默认动作；split 按钮与导出动作实现归 #38

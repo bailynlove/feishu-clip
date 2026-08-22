@@ -1,6 +1,6 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editAppend, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, shouldScrollPreviewToEnd, isSessionModified, setIncludeImages, saveAsNewPreset } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -27,9 +27,7 @@ function syncDestinationView() {
 // 预设 chips 与标题输入框的 DOM 同步；归约逻辑全在 popup-state.js
 function renderPresetChips() {
   const row = $('#presets');
-  const hint = $('#trigger-hint');
-  // 只重建 chip，常驻的 trigger 命中提示徽标保留在行尾
-  row.querySelectorAll('.preset-chip').forEach((chip) => chip.remove());
+  row.innerHTML = '';
   for (const preset of presetState.presets) {
     const chip = document.createElement('button');
     chip.type = 'button';
@@ -39,10 +37,11 @@ function renderPresetChips() {
       presetState = selectPreset(presetState, preset.id);
       syncPresetView();
     });
-    row.insertBefore(chip, hint);
+    row.appendChild(chip);
   }
-  // 命中提示只在 viaTrigger 时显示；手动切换预设（selectPreset 清除 viaTrigger）后消失
-  hint.classList.toggle('hidden', !presetState.viaTrigger);
+  // 命中提示在 chips 行下方独立一行（#40 移出滚动容器）；只在 viaTrigger 时显示，
+  // 手动切换预设（selectPreset 清除 viaTrigger）后消失
+  $('#trigger-hint').classList.toggle('hidden', !presetState.viaTrigger);
 }
 
 function syncPresetView() {
@@ -50,6 +49,7 @@ function syncPresetView() {
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
   $('#save').textContent = primaryLabel(currentPreset(presetState).action);
   $('#images').checked = presetState.includeImages;
+  $('#custom-body').value = presetState.customBody;
   $('#preview-title').textContent = presetState.title;
   syncDestinationView();
   renderPresetChips();
@@ -57,9 +57,12 @@ function syncPresetView() {
   refreshPreview();
 }
 
-// ——— 保存为新预设（#40）：按钮用 visibility 隐藏保留占位，布局不跳动 ———
+// ——— 保存为新预设（#40）：按钮用 visibility 隐藏保留占位，布局不跳动；
+// 命名条只能由点击该按钮触发，按钮回到隐藏态时命名条一并收起 ———
 function syncSaveAsButton() {
-  $('#save-as-preset').style.visibility = isSessionModified(presetState) ? 'visible' : 'hidden';
+  const modified = isSessionModified(presetState);
+  $('#save-as-preset').style.visibility = modified ? 'visible' : 'hidden';
+  if (!modified) hideSaveAsBar();
 }
 
 function hideSaveAsBar() {
@@ -76,13 +79,15 @@ function syncFolds() {
   $('#preview-toggle').setAttribute('aria-expanded', String(presetState.previewOpen));
 }
 
-// 预览文本 = 最终保存正文（同一 composeClipBody 路径）；快照未就绪时不动。
-// 追加正文在合成文本末尾，输入后须把内滚区带到底部（见 shouldScrollPreviewToEnd）
+// 预览文本 = 最终保存正文（同一 renderBody 路径）；快照未就绪时不动。
+// 重渲后按 previewScrollTarget 滚动到自定义文本所在端（见 popup-state.js 注释）
 function refreshPreview(trigger = 'refresh') {
   if (!presetState.previewOpen || !previewSnapshot) return;
   const body = $('#preview-body');
   body.textContent = previewBody(presetState, previewSnapshot);
-  if (shouldScrollPreviewToEnd(trigger, presetState)) body.scrollTop = body.scrollHeight;
+  const target = previewScrollTarget(trigger, presetState);
+  if (target === 'end') body.scrollTop = body.scrollHeight;
+  else if (target === 'top') body.scrollTop = 0;
 }
 
 async function ensurePreviewSnapshot() {
@@ -193,10 +198,11 @@ $('#preview-toggle').addEventListener('click', async () => {
   syncFolds();
   if (presetState.previewOpen) await ensurePreviewSnapshot();
 });
-// 追加正文（仅本次）：仅当次会话生效，不回写预设；预览开着时实时重渲并滚到末尾的追加内容
-$('#append').addEventListener('input', (event) => {
-  presetState = editAppend(presetState, event.target.value);
-  refreshPreview('append');
+// 自定义正文（仅本次）：预填所选预设的 bodyTemplate，编辑只影响本次，不回写预设；
+// 预览开着时实时重渲并滚到自定义文本所在端
+$('#custom-body').addEventListener('input', (event) => {
+  presetState = editCustomBody(presetState, event.target.value);
+  refreshPreview('body');
 });
 $('#change').addEventListener('click', () => {
   if ($('#picker-panel').classList.contains('hidden')) openPicker();
@@ -262,14 +268,13 @@ $('#save').addEventListener('click', async () => {
   $('#save').disabled = true; show('正在提取当前页面…');
   try {
     // 语义 B：标题框内容保存时再过一遍模板渲染，清洗与空白回退在 background 完成；
-    // 正文合成（bodyTemplate + 追加正文）也在 background 用同一 composeClipBody 完成
+    // 正文合成也在 background 用同一 renderBody 完成，有效模板 = 自定义正文框内容
     const result = await message({
       type: 'CLIP',
       destination: presetState.destination,
       includeImages: $('#images').checked,
       title: finalTitle(presetState),
-      bodyTemplate: currentPreset(presetState).bodyTemplate,
-      appendNote: presetState.appendNote,
+      customBody: presetState.customBody,
     });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;

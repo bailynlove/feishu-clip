@@ -1,5 +1,5 @@
 import { ensurePresets } from './presets.js';
-import { buildContext, composeClipBody, sanitizeClipTitle } from './templates.js';
+import { buildContext, renderBody, sanitizeClipTitle } from './templates.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 
@@ -84,9 +84,9 @@ async function handle(message) {
       // 弹窗可编辑标题（#36）：渲染/手改结果随 CLIP 发来，清洗后覆盖；为空回退 extractor 标题
       const title = sanitizeClipTitle(message.title);
       if (title) snapshot.title = title;
-      // 正文合成（#37）：预设 bodyTemplate（#30 语义）+ 追加正文（仅本次，末尾追加）。
-      // 与弹窗预览共用 composeClipBody；ctx 在标题覆盖之后构建，正文模板看到的即最终标题
-      snapshot.markdown = composeClipBody(message.bodyTemplate, message.appendNote, buildContext(snapshot));
+      // 正文合成（#37，#40 起有效模板 = 弹窗自定义正文框内容）：与弹窗预览同调 renderBody；
+      // ctx 在标题覆盖之后构建，正文模板看到的即最终标题
+      snapshot.markdown = renderBody(message.customBody, buildContext(snapshot));
       const attemptId = crypto.randomUUID();
       const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages } });
       await chrome.storage.local.set({ activeAttempt: attemptId });

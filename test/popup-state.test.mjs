@@ -7,14 +7,15 @@ import {
   selectPreset,
   overrideDestination,
   editTitle,
-  editAppend,
+  editCustomBody,
+  isCustomBodyEdited,
   resetTitle,
   isTitleEdited,
   primaryLabel,
   finalTitle,
   toggleSection,
   previewBody,
-  shouldScrollPreviewToEnd,
+  previewScrollTarget,
   matchTrigger,
   isSessionModified,
   setIncludeImages,
@@ -204,12 +205,28 @@ test('a title rendering to blank falls back to the extractor title via sanitizeC
 
 const clipSnapshot = { title: '深入理解剪藏', sourceUrl: tab.url, capturedAt: now.toISOString(), markdown: '# 正文\n\n内容', images: [] };
 
-test('append note starts empty and editAppend stores the raw input for this session only', () => {
-  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
-  assert.equal(state.appendNote, '');
-  state = editAppend(state, '临时批注 {{host}}');
-  assert.equal(state.appendNote, '临时批注 {{host}}');
-  assert.equal(currentPreset(state).bodyTemplate, undefined, 'session edits never touch the preset itself');
+test('customBody is prefilled from the selected preset bodyTemplate and edits stay session-only', () => {
+  const withBody = [{ ...presets[0], bodyTemplate: '来源：{{host}}' }];
+  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.customBody, '来源：{{host}}', 'prefill = preset bodyTemplate');
+  assert.equal(isCustomBodyEdited(state), false);
+  state = editCustomBody(state, '临时批注\n多行 {{host}}');
+  assert.equal(state.customBody, '临时批注\n多行 {{host}}', 'raw multiline input is stored verbatim');
+  assert.equal(isCustomBodyEdited(state), true);
+  assert.equal(currentPreset(state).bodyTemplate, '来源：{{host}}', 'session edits never touch the preset itself');
+});
+
+test('switching presets applies the new preset bodyTemplate and clears the previous session edit', () => {
+  const withBody = [
+    { ...presets[0], bodyTemplate: '来源：{{host}}' },
+    { ...presets[1], bodyTemplate: '' },
+  ];
+  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
+  state = editCustomBody(state, '我改过的');
+  state = selectPreset(state, 'p2');
+  assert.equal(state.customBody, '', 'p2 has an empty bodyTemplate');
+  state = selectPreset(state, 'p1');
+  assert.equal(state.customBody, '来源：{{host}}');
 });
 
 test('the settings and preview folds toggle independently', () => {
@@ -225,11 +242,20 @@ test('the settings and preview folds toggle independently', () => {
   assert.equal(toggleSection(state, 'bogus'), state);
 });
 
-test('previewBody composes preset bodyTemplate + clip content + append note, in prototype order', () => {
-  const withBody = [{ ...presets[0], bodyTemplate: '来源：{{host}}' }];
-  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
-  state = editAppend(state, '注 {{date|date:YYYYMMDD}}');
-  assert.equal(previewBody(state, clipSnapshot), '# 正文\n\n内容\n\n来源：blog.example.com\n\n注 20260821');
+test('previewBody uses the custom body as the effective template: {{content}} before/after/wrapped/multiline', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  const content = '# 正文\n\n内容';
+  assert.equal(previewBody(editCustomBody(state, 'xxxx {{content}}'), clipSnapshot), `xxxx ${content}`);
+  assert.equal(previewBody(editCustomBody(state, '{{content}} xxxx'), clipSnapshot), `${content} xxxx`);
+  assert.equal(previewBody(editCustomBody(state, 'xxxx\n{{content}}'), clipSnapshot), `xxxx\n${content}`);
+  assert.equal(previewBody(editCustomBody(state, '前 {{content}} 后'), clipSnapshot), `前 ${content} 后`);
+});
+
+test('previewBody with an empty custom body renders only the clip content', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.customBody, '', 'fixture presets have no bodyTemplate, so the box starts empty');
+  assert.equal(previewBody(state, clipSnapshot), '# 正文\n\n内容');
+  assert.equal(previewBody(editCustomBody(state, '   '), clipSnapshot), '# 正文\n\n内容', 'blank template still falls back to content only');
 });
 
 test('previewBody title variable resolves to the final (edited, re-rendered) title', () => {
@@ -239,15 +265,27 @@ test('previewBody title variable resolves to the final (edited, re-rendered) tit
   assert.equal(previewBody(state, clipSnapshot), '改过的 2026 标题：# 正文\n\n内容');
 });
 
-// ——— #37 验收 bug 回归：追加正文在合成文本末尾，预览内滚区必须滚动到底部才可见 ———
+// ——— #37 验收 bug 回归（#40 改自定义正文后调为三向锚点）：预览内滚区要滚到自定义文本所在端 ———
 
-test('append-note edits pin the preview scroll to the end where the note is composed', () => {
+test('previewScrollTarget follows where the custom text lands in the composed body', () => {
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
-  assert.equal(shouldScrollPreviewToEnd('append', state), true, 'typing in the append box must scroll the note into view');
-  assert.equal(shouldScrollPreviewToEnd('refresh', state), false, 'title/preset refreshes keep the scroll position');
-  assert.equal(shouldScrollPreviewToEnd('open', state), false, 'opening preview without a note starts at the top');
-  state = editAppend(state, '已有批注');
-  assert.equal(shouldScrollPreviewToEnd('open', state), true, 'opening preview with an existing note jumps to it');
+  assert.equal(previewScrollTarget('refresh', editCustomBody(state, '追加在后')), null, 'title/preset refreshes keep the scroll position');
+  // 无占位符：整段追加在正文后 → 滚到底
+  assert.equal(previewScrollTarget('body', editCustomBody(state, '追加在后')), 'end');
+  // 占位符后有内容（{{content}} xxxx）：自定义文本在末尾 → 滚到底
+  assert.equal(previewScrollTarget('body', editCustomBody(state, '{{content}} xxxx')), 'end');
+  // 占位符在末尾（xxxx {{content}}）：自定义文本全在正文前 → 滚到顶
+  assert.equal(previewScrollTarget('body', editCustomBody(state, 'xxxx {{content}}')), 'top');
+  // 模板清空（只要正文）：无需滚动
+  assert.equal(previewScrollTarget('body', editCustomBody(state, '')), null);
+});
+
+test('previewScrollTarget on open jumps to the custom text only when the user edited it', () => {
+  const withBody = [{ ...presets[0], bodyTemplate: '来源：{{host}}' }];
+  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(previewScrollTarget('open', state), null, 'unmodified prefill opens at the top');
+  state = editCustomBody(state, '已有自定义');
+  assert.equal(previewScrollTarget('open', state), 'end', 'edited custom body jumps into view on open');
 });
 
 // ——— #39：triggers 自动命中预设 ———
@@ -317,8 +355,8 @@ test('init applies the matched preset and marks viaTrigger; a manual switch clea
 test('isSessionModified only compares the two preset fields editable in the popup', () => {
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   assert.equal(isSessionModified(state), false, 'fresh session matches the preset');
-  // 标题与追加正文不是预设字段，不参与判定
-  state = editAppend(editTitle(state, '别的标题'), '临时批注');
+  // 标题与自定义正文不是预设字段，不参与判定
+  state = editCustomBody(editTitle(state, '别的标题'), '临时自定义');
   assert.equal(isSessionModified(state), false);
   // 仅本次目标不同 → 修改
   const overridden = overrideDestination(state, nodeTarget);
