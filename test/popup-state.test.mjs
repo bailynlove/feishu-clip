@@ -7,10 +7,13 @@ import {
   selectPreset,
   overrideDestination,
   editTitle,
+  editAppend,
   resetTitle,
   isTitleEdited,
   primaryLabel,
   finalTitle,
+  toggleSection,
+  previewBody,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -190,4 +193,43 @@ test('a title rendering to blank falls back to the extractor title via sanitizeC
   state = editTitle(state, '{{unknown}}');
   assert.equal(finalTitle(state), '');
   assert.equal(sanitizeClipTitle(finalTitle(state)), null, 'background must not override snapshot.title with a blank render');
+});
+
+// ——— #37：本次设置折叠区 + 预览 ———
+
+const clipSnapshot = { title: '深入理解剪藏', sourceUrl: tab.url, capturedAt: now.toISOString(), markdown: '# 正文\n\n内容', images: [] };
+
+test('append note starts empty and editAppend stores the raw input for this session only', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.appendNote, '');
+  state = editAppend(state, '临时批注 {{host}}');
+  assert.equal(state.appendNote, '临时批注 {{host}}');
+  assert.equal(currentPreset(state).bodyTemplate, undefined, 'session edits never touch the preset itself');
+});
+
+test('the settings and preview folds toggle independently', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.settingsOpen, false);
+  assert.equal(state.previewOpen, false);
+  state = toggleSection(state, 'settings');
+  assert.deepEqual([state.settingsOpen, state.previewOpen], [true, false]);
+  state = toggleSection(state, 'preview');
+  assert.deepEqual([state.settingsOpen, state.previewOpen], [true, true], 'opening preview must not close settings');
+  state = toggleSection(state, 'settings');
+  assert.deepEqual([state.settingsOpen, state.previewOpen], [false, true], 'closing settings must not close preview');
+  assert.equal(toggleSection(state, 'bogus'), state);
+});
+
+test('previewBody composes preset bodyTemplate + clip content + append note, in prototype order', () => {
+  const withBody = [{ ...presets[0], bodyTemplate: '来源：{{host}}' }];
+  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
+  state = editAppend(state, '注 {{date|date:YYYYMMDD}}');
+  assert.equal(previewBody(state, clipSnapshot), '# 正文\n\n内容\n\n来源：blog.example.com\n\n注 20260821');
+});
+
+test('previewBody title variable resolves to the final (edited, re-rendered) title', () => {
+  const withBody = [{ ...presets[0], bodyTemplate: '{{title}}：{{content}}' }];
+  let state = initPopupPresets({ presets: withBody, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '改过的 {{date|date:YYYY}} 标题');
+  assert.equal(previewBody(state, clipSnapshot), '改过的 2026 标题：# 正文\n\n内容');
 });

@@ -1,5 +1,5 @@
 import { ensurePresets } from './presets.js';
-import { sanitizeClipTitle } from './templates.js';
+import { buildContext, composeClipBody, sanitizeClipTitle } from './templates.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 
@@ -84,11 +84,16 @@ async function handle(message) {
       // 弹窗可编辑标题（#36）：渲染/手改结果随 CLIP 发来，清洗后覆盖；为空回退 extractor 标题
       const title = sanitizeClipTitle(message.title);
       if (title) snapshot.title = title;
+      // 正文合成（#37）：预设 bodyTemplate（#30 语义）+ 追加正文（仅本次，末尾追加）。
+      // 与弹窗预览共用 composeClipBody；ctx 在标题覆盖之后构建，正文模板看到的即最终标题
+      snapshot.markdown = composeClipBody(message.bodyTemplate, message.appendNote, buildContext(snapshot));
       const attemptId = crypto.randomUUID();
       const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }
+    // 预览懒提取（#37）：只抓快照、不建 job；弹窗首次展开预览时调用
+    case 'EXTRACT': return extractActiveTab();
     case 'GET_JOB': {
       const result = await bridge(`/v1/jobs/${message.attemptId}`);
       if (['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document'].includes(result.job.status)) {

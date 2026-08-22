@@ -100,3 +100,13 @@ export function sanitizeClipTitle(title) {
   const cleaned = sanitizeFilename(title);
   return cleaned === '' ? null : cleaned;
 }
+
+// 最终正文合成（#37）：预设 bodyTemplate 按 #30 语义（含 {{content}} 则替换占位符，
+// 否则整段追加在剪藏正文之后）与 ctx.content 合成；追加正文（仅本次）渲染后追加在末尾
+// ——合成顺序依原型 A 版：正文模板 → 剪藏正文 → 追加正文。
+// 弹窗预览与 background 保存共用此函数，保证预览 === 最终保存内容。
+export function composeClipBody(bodyTemplate, appendNote, ctx) {
+  const body = renderBody(bodyTemplate, ctx);
+  const note = renderTemplate(appendNote, ctx).trim();
+  return note === '' ? body : `${body}\n\n${note}`;
+}

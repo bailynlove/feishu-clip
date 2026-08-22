@@ -2,7 +2,7 @@
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
 import { createDefaultPreset } from './presets.js';
-import { buildContext, renderTemplate, renderTitle } from './templates.js';
+import { buildContext, composeClipBody, renderTemplate, renderTitle } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
@@ -55,7 +55,8 @@ export function initPopupPresets({ presets, defaultPresetId } = {}, tab, now) {
   const list = Array.isArray(presets) && presets.length > 0 ? presets : [createDefaultPreset()];
   const selected = list.find((preset) => preset.id === defaultPresetId) ?? list[0];
   const state = applyPresetParams({ presets: list, presetId: selected.id, titleContext: buildTitleContext(tab, now) });
-  return { ...state, title: renderCurrentTitle(state) };
+  // 追加正文与两个折叠区都是仅本次会话状态：#36 起弹窗一律不回写预设
+  return { ...state, title: renderCurrentTitle(state), appendNote: '', settingsOpen: false, previewOpen: false };
 }
 
 // 手改检测：输入框值 ≠ 当前预设模板渲染值即视为手改；初始值与 ↺ 重置值都等于渲染值
@@ -91,6 +92,31 @@ export function resetTitle(state) {
 // sanitizeClipTitle 判空，回退 extractor 标题。不用 renderTitle（它会回退 ctx.title）。
 export function finalTitle(state) {
   return renderTemplate(state.title, state.titleContext);
+}
+
+// ——— 本次设置折叠区 + 预览（#37）———
+
+// 追加正文（仅本次）：原样存放，合成时按语义 B 走同一 renderTemplate 路径
+export function editAppend(state, value) {
+  return { ...state, appendNote: String(value ?? '') };
+}
+
+// 两个折叠区（settings / preview）状态独立，互不影响（#33 原型决议）
+export function toggleSection(state, section) {
+  const key = section === 'settings' ? 'settingsOpen' : section === 'preview' ? 'previewOpen' : null;
+  if (!key) return state;
+  return { ...state, [key]: !state[key] };
+}
+
+// 预览上下文：与 background 保存路径一致——标题用 finalTitle（保存时的最终标题），
+// content/url/host/capturedAt 来自懒提取的 extractor 快照
+export function buildPreviewContext(snapshot, state) {
+  return buildContext({ ...snapshot, title: finalTitle(state) });
+}
+
+// 预览文本 = 最终保存正文：与 background CLIP 走同一个 composeClipBody
+export function previewBody(state, snapshot) {
+  return composeClipBody(currentPreset(state).bodyTemplate, state.appendNote, buildPreviewContext(snapshot, state));
 }
 
 // 主按钮文字跟随当前预设默认动作；split 按钮与导出动作实现归 #38

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeFilename, sanitizeClipTitle } from '../src/extension/templates.js';
+import { buildContext, composeClipBody, renderBody, renderTemplate, renderTitle, sanitizeFilename, sanitizeClipTitle } from '../src/extension/templates.js';
 
 // 用本地时间分量构造，避免时区影响断言
 const capturedAt = new Date(2026, 0, 5, 9, 7, 3).toISOString(); // 2026-01-05 09:07:03 本地
@@ -101,4 +101,32 @@ test('sanitizeClipTitle returns null when nothing usable remains, so the caller 
 
 test('sanitizeClipTitle keeps sanitizeFilename semantics for unsafe characters', () => {
   assert.equal(sanitizeClipTitle('???'), '---', 'unsafe characters are replaced, not dropped');
+});
+
+// ——— composeClipBody（#37）：预设 bodyTemplate + 追加正文（仅本次）与剪藏正文的最终合成 ———
+
+test('composeClipBody with empty template and no note returns the content unchanged', () => {
+  assert.equal(composeClipBody('', '', ctx), ctx.content);
+  assert.equal(composeClipBody(undefined, null, ctx), ctx.content);
+});
+
+test('composeClipBody applies the body template per #30 semantics', () => {
+  assert.equal(composeClipBody('来源：{{url}}\n\n{{content}}', '', ctx), `来源：${ctx.url}\n\n${ctx.content}`);
+  assert.equal(composeClipBody('来源：{{host}}', '', ctx), `${ctx.content}\n\n来源：blog.example.com`);
+});
+
+test('composeClipBody renders the append note and puts it last (prototype order: template → content → note)', () => {
+  const body = composeClipBody('来源：{{host}}', '批注 {{date|date:YYYYMMDD}}', ctx);
+  assert.equal(body, `${ctx.content}\n\n来源：blog.example.com\n\n批注 20260105`);
+});
+
+test('composeClipBody drops a note that renders to blank and blanks unknown variables', () => {
+  assert.equal(composeClipBody('', '{{unknown}}', ctx), ctx.content);
+  assert.equal(composeClipBody('', '  ', ctx), ctx.content);
+  assert.equal(composeClipBody('', 'by {{author}}', ctx), `${ctx.content}\n\nby`);
+});
+
+test('composeClipBody is the single path for preview and save: same inputs give identical output', () => {
+  const args = ['lead {{title}}', 'note {{host}}'];
+  assert.equal(composeClipBody(...args, ctx), composeClipBody(...args, ctx));
 });

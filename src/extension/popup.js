@@ -1,12 +1,15 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editAppend, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
 let pollTimer = null;
 let popupPicker = null;
 let presetState = null;
+// 预览懒提取（#37）：首次展开预览才跑 extractor，缓存快照供实时重渲
+let previewSnapshot = null;
+let previewLoading = false;
 
 const $ = (selector) => document.querySelector(selector);
 function message(payload) { return chrome.runtime.sendMessage(payload).then((response) => { if (!response?.ok) throw Object.assign(new Error(response?.error?.message || '操作失败'), response?.error); return response.result; }); }
@@ -42,8 +45,40 @@ function syncPresetView() {
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
   $('#save').textContent = primaryLabel(currentPreset(presetState).action);
   $('#images').checked = presetState.includeImages;
+  $('#preview-title').textContent = presetState.title;
   syncDestinationView();
   renderPresetChips();
+  refreshPreview();
+}
+
+// ——— 本次设置 / 预览折叠区（#37）：两个折叠区状态独立 ———
+function syncFolds() {
+  $('#settings-body').classList.toggle('hidden', !presetState.settingsOpen);
+  $('#settings-caret').textContent = presetState.settingsOpen ? '⌃' : '⌄';
+  $('#settings-toggle').setAttribute('aria-expanded', String(presetState.settingsOpen));
+  $('#preview-body').classList.toggle('hidden', !presetState.previewOpen);
+  $('#preview-caret').textContent = presetState.previewOpen ? '收起 ⌃' : '展开 ⌄';
+  $('#preview-toggle').setAttribute('aria-expanded', String(presetState.previewOpen));
+}
+
+// 预览文本 = 最终保存正文（同一 composeClipBody 路径）；快照未就绪时不动
+function refreshPreview() {
+  if (!presetState.previewOpen || !previewSnapshot) return;
+  $('#preview-body').textContent = previewBody(presetState, previewSnapshot);
+}
+
+async function ensurePreviewSnapshot() {
+  if (previewSnapshot || previewLoading) return;
+  previewLoading = true;
+  $('#preview-body').textContent = '正在提取页面…';
+  try {
+    previewSnapshot = await message({ type: 'EXTRACT' });
+    refreshPreview();
+  } catch (error) {
+    $('#preview-body').textContent = `预览提取失败：${error.message}`;
+  } finally {
+    previewLoading = false;
+  }
 }
 
 const POPUP_LABELS = {
@@ -129,6 +164,21 @@ async function poll() {
 }
 
 $('#settings').addEventListener('click', () => chrome.runtime.openOptionsPage());
+// 两个折叠区各自独立开关
+$('#settings-toggle').addEventListener('click', () => {
+  presetState = toggleSection(presetState, 'settings');
+  syncFolds();
+});
+$('#preview-toggle').addEventListener('click', async () => {
+  presetState = toggleSection(presetState, 'preview');
+  syncFolds();
+  if (presetState.previewOpen) await ensurePreviewSnapshot();
+});
+// 追加正文（仅本次）：仅当次会话生效，不回写预设；预览开着时实时重渲
+$('#append').addEventListener('input', (event) => {
+  presetState = editAppend(presetState, event.target.value);
+  refreshPreview();
+});
 $('#change').addEventListener('click', () => {
   if ($('#picker-panel').classList.contains('hidden')) openPicker();
   else closePicker();
@@ -153,8 +203,16 @@ $('#save').addEventListener('click', async () => {
   if (currentPreset(presetState).action !== 'feishu') { show('该预设动作暂未支持，请改用保存到飞书。'); return; }
   $('#save').disabled = true; show('正在提取当前页面…');
   try {
-    // 语义 B：标题框内容保存时再过一遍模板渲染，清洗与空白回退在 background 完成
-    const result = await message({ type: 'CLIP', destination: presetState.destination, includeImages: $('#images').checked, title: finalTitle(presetState) });
+    // 语义 B：标题框内容保存时再过一遍模板渲染，清洗与空白回退在 background 完成；
+    // 正文合成（bodyTemplate + 追加正文）也在 background 用同一 composeClipBody 完成
+    const result = await message({
+      type: 'CLIP',
+      destination: presetState.destination,
+      includeImages: $('#images').checked,
+      title: finalTitle(presetState),
+      bodyTemplate: currentPreset(presetState).bodyTemplate,
+      appendNote: presetState.appendNote,
+    });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
     $('#open').classList.add('hidden'); $('#save').classList.remove('hidden');
@@ -167,10 +225,14 @@ $('#open').addEventListener('click', () => chrome.tabs.create({ url: $('#open').
 $('#page-title').addEventListener('input', (event) => {
   presetState = editTitle(presetState, event.target.value);
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
+  $('#preview-title').textContent = presetState.title;
+  refreshPreview();
 });
 $('#title-reset').addEventListener('click', () => {
   presetState = resetTitle(presetState);
   $('#page-title').value = presetState.title;
   $('#title-reset').classList.add('hidden');
+  $('#preview-title').textContent = presetState.title;
+  refreshPreview();
 });
 inspect();
