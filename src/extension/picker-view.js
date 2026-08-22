@@ -69,11 +69,12 @@ export function renderPicker(picker, state, els, labels) {
       const item = document.createElement('li');
       const row = document.createElement('div');
       row.className = `picker-row selectable${space.spaceId === state.selectedSpaceId ? ' selected' : ''}`;
+      // 整行可点（不只文字），下钻按钮阻止冒泡以免误选中
+      row.addEventListener('click', () => picker.selectSpace(space));
       const title = document.createElement('button');
       title.type = 'button';
       title.className = 'row-title';
       title.textContent = space.name;
-      title.addEventListener('click', () => picker.selectSpace(space));
       row.append(title);
       const hint = document.createElement('span');
       hint.className = 'row-hint';
@@ -83,7 +84,7 @@ export function renderPicker(picker, state, els, labels) {
       drill.type = 'button';
       drill.className = 'link row-drill';
       drill.textContent = '进入 ›';
-      drill.addEventListener('click', () => picker.openSpace(space));
+      drill.addEventListener('click', (event) => { event.stopPropagation(); picker.openSpace(space); });
       row.append(drill);
       item.append(row);
       list.append(item);
@@ -93,11 +94,12 @@ export function renderPicker(picker, state, els, labels) {
       const item = document.createElement('li');
       const row = document.createElement('div');
       row.className = `picker-row selectable${node.nodeToken === state.selectedNodeToken ? ' selected' : ''}`;
+      // 整行可点（不只文字），下钻按钮阻止冒泡以免误选中
+      row.addEventListener('click', () => picker.select(node));
       const title = document.createElement('button');
       title.type = 'button';
       title.className = 'row-title';
       title.textContent = node.title || node.nodeToken;
-      title.addEventListener('click', () => picker.select(node));
       row.append(title);
       const type = document.createElement('span');
       type.className = 'row-hint';
@@ -108,7 +110,7 @@ export function renderPicker(picker, state, els, labels) {
         drill.type = 'button';
         drill.className = 'link row-drill';
         drill.textContent = '进入 ›';
-        drill.addEventListener('click', () => picker.openNode(node));
+        drill.addEventListener('click', (event) => { event.stopPropagation(); picker.openNode(node); });
         row.append(drill);
       }
       item.append(row);
