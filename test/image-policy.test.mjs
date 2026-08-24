@@ -33,3 +33,16 @@ test('image byte policy accepts a small PNG and rejects unsupported or oversized
   assert.throws(() => validateImageBytes(png, 'image/svg+xml'), /IMAGE_TYPE_REJECTED/);
   assert.throws(() => validateImageBytes(Buffer.alloc(9 * 1024 * 1024), 'image/png'), /IMAGE_SIZE_REJECTED/);
 });
+
+test('magic bytes win over a lying extension/Content-Type (.png URL serving JPEG)', () => {
+  // 真实案例：cs.cmu.edu/~hovy/bio-image-hovy.png 实为 6000x4000 JPEG，
+  // 按 PNG 偏移读尺寸会读出垃圾值触发 DIMENSIONS 误杀
+  const jpeg = Buffer.alloc(16);
+  jpeg.writeUInt16BE(0xffd8, 0); // SOI
+  jpeg.writeUInt16BE(0xffc0, 2); // SOF0
+  jpeg.writeUInt16BE(0x0011, 4); // 段长
+  jpeg.writeUInt8(0x08, 6); // 精度
+  jpeg.writeUInt16BE(4000, 7); // 高
+  jpeg.writeUInt16BE(6000, 9); // 宽
+  assert.deepEqual(validateImageBytes(jpeg, 'image/png'), { mimeType: 'image/jpeg', extension: 'jpg', width: 6000, height: 4000 });
+});

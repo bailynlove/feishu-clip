@@ -20,16 +20,18 @@ function escapeMarkdown(value) {
   return String(value || '').replace(/[\\[\]]/g, '\\$&').replace(/[\r\n]+/g, ' ').slice(0, 300);
 }
 
-export function prepareMarkdown(snapshot, attemptId) {
+export function prepareMarkdown(snapshot, attemptId, { includeImages = false } = {}) {
   const images = Array.isArray(snapshot.images) ? snapshot.images.slice(0, IMAGE_LIMITS.maxImages) : [];
   let body = String(snapshot.markdown || '').slice(0, 1_500_000);
-  for (const [index, image] of images.entries()) {
-    const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
-    const source = safeHttpUrl(image.source);
-    const trace = source ? `\n\n[原图链接：${label}](${source})` : '';
-    body = body.replaceAll(`[[FEISHU_CLIP_IMAGE:${index}]]`, `图片：${label}${trace}`);
+  if (!includeImages) {
+    // 不处理图片时锚点直接落成可读文本（含原图链接）；处理时保留锚点供 media-insert 定位
+    for (const [index, image] of images.entries()) {
+      const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
+      const source = safeHttpUrl(image.source);
+      body = body.replaceAll(`[[FEISHU_CLIP_IMAGE:${index}]]`, source ? `图片：${label}（[原图链接](${source})）` : `图片：${label}`);
+    }
+    body = body.replace(/\[\[FEISHU_CLIP_IMAGE:\d+\]\]/g, '图片：未能处理');
   }
-  body = body.replace(/\[\[FEISHU_CLIP_IMAGE:\d+\]\]/g, '图片：未能处理');
   const source = safeHttpUrl(snapshot.sourceUrl);
   const metadata = [
     source ? `> 来源：[${escapeMarkdown(source)}](${source})` : '> 来源：不可用',
@@ -97,7 +99,7 @@ export class ClipExecutor {
     const scratch = await mkdtemp(path.join(tmpdir(), 'feishu-clip-'));
     let document = job.document;
     try {
-      const prepared = prepareMarkdown(job.snapshot, job.attemptId);
+      const prepared = prepareMarkdown(job.snapshot, job.attemptId, { includeImages: job.includeImages });
       if (!document) {
         await this.store.beginCreate(job.attemptId, workerId);
         const contentPath = path.join(scratch, 'content.md');
@@ -140,6 +142,15 @@ export class ClipExecutor {
       let totalBytes = 0;
       if (job.includeImages) {
         const deadline = Date.now() + 90_000;
+        // media-insert 只会在锚点旁插入、不会删掉锚点本身，成功后用 str_replace 抹掉；
+        // 失败的图片把锚点换成可读的链接文本，正文不留占位符
+        const replaceAnchor = async (index, replacement) => {
+          await this.lark.run([
+            'docs', '+update', '--as', 'user', '--doc', document.documentId,
+            '--command', 'str_replace', '--doc-format', 'markdown',
+            '--pattern', `[[FEISHU_CLIP_IMAGE:${index}]]`, '--content', replacement, '--format', 'json',
+          ], { timeoutMs: 15_000 });
+        };
         for (let start = 0; start < prepared.images.length; start += 3) {
           const batch = prepared.images.slice(start, start + 3);
           const results = await Promise.allSettled(batch.map(async (image, offset) => {
@@ -150,16 +161,28 @@ export class ClipExecutor {
             if (totalBytes > IMAGE_LIMITS.maxTotalBytes) throw new Error('图片总量超过 40 MiB');
             const filePath = path.join(scratch, `image-${index + 1}.${fetched.metadata.extension}`);
             await writeFile(filePath, fetched.buffer);
-            const label = String(image.label || `图片 ${index + 1}`).replace(/[\r\n]+/g, ' ').slice(0, 120);
             await this.lark.run([
               'docs', '+media-insert', '--as', 'user', '--doc', document.documentId,
-              '--file', path.basename(filePath), '--type', 'image', '--selection-with-ellipsis', `图片：${label}`,
-              '--caption', label, '--format', 'json',
+              '--file', path.basename(filePath), '--type', 'image',
+              '--selection-with-ellipsis', `[[FEISHU_CLIP_IMAGE:${index}]]`, '--format', 'json',
             ], { cwd: scratch, timeoutMs: 30_000 });
+            await replaceAnchor(index, '');
           }));
-          results.forEach((result, offset) => {
-            if (result.status === 'rejected') warnings.push(`图片 ${start + offset + 1}：${result.reason?.message || '处理失败'}`);
-          });
+          for (const [offset, result] of results.entries()) {
+            if (result.status === 'rejected') {
+              const index = start + offset;
+              warnings.push(`图片 ${index + 1}：${result.reason?.message || '处理失败'}`);
+              const image = batch[offset];
+              const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
+              const source = safeHttpUrl(image.source);
+              const fallback = source ? `图片：${label}（[原图链接](${source})）` : `图片：${label}`;
+              try {
+                await replaceAnchor(index, fallback);
+              } catch (fallbackError) {
+                this.logger.warn('图片锚点回退失败，文档残留占位符', { attemptId: job.attemptId, index, error: fallbackError.message });
+              }
+            }
+          }
         }
       }
       await this.store.complete(job.attemptId, workerId, { warnings });

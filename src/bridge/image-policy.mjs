@@ -83,8 +83,20 @@ function dimensions(buffer, mimeType) {
   return null;
 }
 
+function sniffType(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 8 && buffer.readUInt32BE(0) === 0x89504e47 && buffer.readUInt32BE(4) === 0x0d0a1a0a) return 'image/png';
+  if (buffer.length >= 6 && buffer.toString('latin1', 0, 3) === 'GIF') return 'image/gif';
+  if (buffer.length >= 12 && buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
 export function validateImageBytes(buffer, mimeType, limits = IMAGE_LIMITS) {
-  const normalized = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  // 以魔数为准：野站常见扩展名/Content-Type 与实际字节不符（如 .png URL 发 JPEG），
+  // 按声明类型解析尺寸会读出垃圾数值导致 DIMENSIONS 误杀
+  const declared = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  const sniffed = sniffType(buffer);
+  const normalized = sniffed ?? declared;
   if (!ALLOWED_IMAGE_TYPES.has(normalized)) throw Object.assign(new Error('IMAGE_TYPE_REJECTED'), { code: 'IMAGE_TYPE_REJECTED' });
   if (!buffer.length || buffer.length > limits.maxImageBytes) throw Object.assign(new Error('IMAGE_SIZE_REJECTED'), { code: 'IMAGE_SIZE_REJECTED' });
   const size = dimensions(buffer, normalized);
