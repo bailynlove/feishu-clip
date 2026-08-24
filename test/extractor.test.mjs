@@ -47,6 +47,22 @@ test('frameset 页面：从同源子 frame 提取正文', async () => {
   assert.ok(!result.markdown.includes('菜单'));
 });
 
+test('frameset 页面：FRAMESET 里被注入第三方浮层（≥20 字符）也跳过主文档直接走 frame', async () => {
+  // 真实案例：Timeline 扩展的 changelog 弹窗 append 到 document.body（即 FRAMESET），
+  // 若把 FRAMESET 当正文渲染，注入物超过 20 字符阈值就永远不会回退到 frame
+  const junk = element('div', [element('h2', [textNode('Panel')]), element('p', [textNode('Flash Notes 更新日志，这是一段足够长的注入内容。')])]);
+  const doc = {
+    title: 'frameset 页面',
+    body: element('frameset', [junk]), // 真实浏览器 frameset 文档的 body 是 FRAMESET 元素
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === 'frame' ? [{ getAttribute: () => 'bio.html', contentDocument: frameDoc(LONG) }] : []),
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(result.markdown.includes('足够长的正文内容'));
+  assert.ok(!result.markdown.includes('Flash Notes'));
+});
+
 test('frameset 页面：跨域/不可读 frame 跳过，全部不可读时报「页面没有可读取正文」', async () => {
   const doc = framesetDoc([{ getAttribute: () => 'x.html', contentDocument: null }]);
   const result = await runExtractor(doc);

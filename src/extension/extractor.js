@@ -94,7 +94,10 @@
       return bodies;
     }
 
-    const primary = document.querySelector('article, main, [role="main"]') || document.body;
+    // frameset 文档：body 即 FRAMESET 元素。它本身没有正文（且第三方扩展的注入物会 append 到它上面，
+    // 可能超过下方 20 字符阈值导致永不回退），所以 frameset 永远跳过主文档、直接走 frame 回退
+    const body = document.body?.tagName === 'FRAMESET' ? null : document.body;
+    const primary = document.querySelector('article, main, [role="main"]') || body;
     let markdown = primary ? await extractFrom(primary) : '';
     if (markdown.length < 20) {
       const bodies = frameBodies();
