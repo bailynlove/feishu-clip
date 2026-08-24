@@ -279,8 +279,11 @@ $('#save-as-confirm').addEventListener('click', async () => {
 // 持久化成功后 session 不再 dirty，按钮随 syncModifiedButtons 消失 ———
 async function writeBackPreset() {
   if (!isSessionModified(presetState)) return;
+  const button = $('#update-preset');
+  if (button.dataset.busy) return; // 防连点并发写回（save-as 路径有 disabled 守卫，这里对齐）
   const result = updateCurrentPreset(presetState);
   if (!result) return;
+  button.dataset.busy = '1';
   try {
     await message({ type: 'SAVE_PRESETS', presets: result.state.presets, defaultPresetId });
     presetState = result.state;
@@ -288,6 +291,8 @@ async function writeBackPreset() {
     show(`已写回预设「${result.preset.name}」。`, 'success');
   } catch (error) {
     show(`写回预设失败：${error.message}`, 'error');
+  } finally {
+    delete button.dataset.busy;
   }
 }
 // 按钮嵌在折叠头里（span 模拟，button 不能套 button）：写回不触发折叠开关
