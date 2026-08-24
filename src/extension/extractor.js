@@ -1,12 +1,5 @@
 (async () => {
   try {
-    const sourceRoot = document.querySelector('article, main, [role="main"]') || document.body;
-    if (!sourceRoot) throw new Error('页面没有可读取正文');
-    const root = sourceRoot.cloneNode(true);
-    root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe').forEach((node) => node.remove());
-
-    const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
-    const clonedImages = [...root.querySelectorAll('img')];
     const images = [];
     let browserBytes = 0;
 
@@ -33,17 +26,6 @@
       let binary = '';
       for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
       return { mimeType, bytesBase64: btoa(binary) };
-    }
-
-    for (let index = 0; index < clonedImages.length; index += 1) {
-      const clone = clonedImages[index];
-      if (index >= 30) { clone.remove(); continue; }
-      const original = originalImages[index] || clone;
-      const source = candidate(original);
-      const image = { label: original.alt?.trim() || `图片 ${index + 1}`, source };
-      try { Object.assign(image, await readableBytes(source)); } catch (error) { image.browserWarning = error.message; }
-      images.push(image);
-      clone.replaceWith(document.createTextNode(`\n\n[[FEISHU_CLIP_IMAGE:${index}]]\n\n`));
     }
 
     const inline = new Set(['A', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'CODE', 'SMALL', 'MARK', 'DEL', 'S', 'SUP', 'SUB']);
@@ -80,7 +62,49 @@
       return children();
     }
 
-    const markdown = render(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    // 单根提取：清理 + 图片管线 + 渲染。images/browserBytes 跨根共享（占位符索引连续、流量预算合并）
+    async function extractFrom(sourceRoot) {
+      const root = sourceRoot.cloneNode(true);
+      root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe').forEach((node) => node.remove());
+
+      const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
+      const clonedImages = [...root.querySelectorAll('img')];
+      for (const [cloneIndex, clone] of clonedImages.entries()) {
+        if (cloneIndex >= 30) { clone.remove(); continue; }
+        const index = images.length;
+        const original = originalImages[cloneIndex] || clone;
+        const source = candidate(original);
+        const image = { label: original.alt?.trim() || `图片 ${index + 1}`, source };
+        try { Object.assign(image, await readableBytes(source)); } catch (error) { image.browserWarning = error.message; }
+        images.push(image);
+        clone.replaceWith(document.createTextNode(`\n\n[[FEISHU_CLIP_IMAGE:${index}]]\n\n`));
+      }
+
+      return render(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    // frameset 页面（90 年代老站常见）：主文档 document.body 为空/null，正文在同源子 frame 里
+    function frameBodies() {
+      const bodies = [];
+      for (const frame of document.querySelectorAll('frame')) {
+        let body = null;
+        try { body = frame.contentDocument?.body ?? null; } catch { body = null; } // 跨域 frame 不可读，跳过
+        if (body && (body.textContent || '').replace(/\s+/g, '').length >= 20) bodies.push(body);
+      }
+      return bodies;
+    }
+
+    const primary = document.querySelector('article, main, [role="main"]') || document.body;
+    let markdown = primary ? await extractFrom(primary) : '';
+    if (markdown.length < 20) {
+      const bodies = frameBodies();
+      if (!primary && bodies.length === 0) throw new Error('页面没有可读取正文');
+      if (bodies.length > 0) {
+        const parts = [];
+        for (const body of bodies) parts.push(await extractFrom(body));
+        markdown = parts.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+      }
+    }
     if (markdown.length < 20) throw new Error('未提取到足够的正文内容');
     return { title: document.title.trim() || '网页剪藏', sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images };
   } catch (error) { return { error: error.message }; }
