@@ -1,6 +1,6 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, composeClip, clipFilename, setMenuOpen } from './popup-state.js';
+import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -57,15 +57,17 @@ function syncPresetView() {
   });
   syncDestinationView();
   renderPresetChips();
-  syncSaveAsButton();
+  syncModifiedButtons();
   refreshPreview();
 }
 
-// ——— 保存为新预设（#40）：按钮用 visibility 隐藏保留占位，布局不跳动；
-// 命名条只能由点击该按钮触发，按钮回到隐藏态时命名条一并收起 ———
-function syncSaveAsButton() {
+// ——— dirty 按钮显隐（#40 保存为新预设 / #41 修改预设）：两个按钮共用 isSessionModified
+// 同一 dirty 判定，可同时出现、互不影响；visibility 隐藏保留占位，布局不跳动；
+// 命名条只能由点击「保存为新预设」触发，按钮回到隐藏态时命名条一并收起 ———
+function syncModifiedButtons() {
   const modified = isSessionModified(presetState);
   $('#save-as-preset').style.visibility = modified ? 'visible' : 'hidden';
+  $('#update-preset').style.visibility = modified ? 'visible' : 'hidden';
   if (!modified) hideSaveAsBar();
 }
 
@@ -214,7 +216,7 @@ $('#preview-toggle').addEventListener('click', async () => {
 $('#custom-body').addEventListener('input', (event) => {
   presetState = editCustomBody(presetState, event.target.value);
   refreshPreview('body');
-  syncSaveAsButton();
+  syncModifiedButtons();
 });
 $('#change').addEventListener('click', () => {
   if ($('#picker-panel').classList.contains('hidden')) openPicker();
@@ -228,7 +230,7 @@ $('#tp-confirm').addEventListener('click', async () => {
   if (saved) {
     presetState = overrideDestination(presetState, saved);
     syncDestinationView();
-    syncSaveAsButton();
+    syncModifiedButtons();
     closePicker();
     show(`本次将保存到：${describeDestination(saved)}。默认目标不变。`);
   } else {
@@ -238,7 +240,7 @@ $('#tp-confirm').addEventListener('click', async () => {
 // 包含图片 switch 的仅本次改动进 state，参与「存为新预设」的 diff 判定
 $('#images').addEventListener('change', (event) => {
   presetState = setIncludeImages(presetState, event.target.checked);
-  syncSaveAsButton();
+  syncModifiedButtons();
 });
 // ——— 保存为新预设（#40）：内联命名条，空名不允许（确认键禁用），重名允许（以 id 区分）———
 function syncSaveAsConfirm() {
@@ -272,6 +274,32 @@ $('#save-as-confirm').addEventListener('click', async () => {
     show(`保存预设失败：${error.message}`, 'error');
     syncSaveAsConfirm();
   }
+});
+// ——— 修改预设（#41）：把本次改动写回当前选中预设，不新建、无需命名条；
+// 持久化成功后 session 不再 dirty，按钮随 syncModifiedButtons 消失 ———
+async function writeBackPreset() {
+  if (!isSessionModified(presetState)) return;
+  const result = updateCurrentPreset(presetState);
+  if (!result) return;
+  try {
+    await message({ type: 'SAVE_PRESETS', presets: result.state.presets, defaultPresetId });
+    presetState = result.state;
+    syncPresetView();
+    show(`已写回预设「${result.preset.name}」。`, 'success');
+  } catch (error) {
+    show(`写回预设失败：${error.message}`, 'error');
+  }
+}
+// 按钮嵌在折叠头里（span 模拟，button 不能套 button）：写回不触发折叠开关
+$('#update-preset').addEventListener('click', (event) => {
+  event.stopPropagation();
+  writeBackPreset();
+});
+$('#update-preset').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  event.stopPropagation();
+  writeBackPreset();
 });
 // 保存到飞书：走 background CLIP（内部提取 + 建 job），job 恢复逻辑不变
 async function clipToFeishu() {
@@ -373,7 +401,7 @@ $('#page-title').addEventListener('input', (event) => {
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
   $('#preview-title').textContent = presetState.title;
   refreshPreview();
-  syncSaveAsButton();
+  syncModifiedButtons();
 });
 $('#title-reset').addEventListener('click', () => {
   presetState = resetTitle(presetState);
@@ -381,6 +409,6 @@ $('#title-reset').addEventListener('click', () => {
   $('#title-reset').classList.add('hidden');
   $('#preview-title').textContent = presetState.title;
   refreshPreview();
-  syncSaveAsButton();
+  syncModifiedButtons();
 });
 inspect();

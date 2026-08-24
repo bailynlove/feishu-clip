@@ -177,6 +177,27 @@ export function saveAsNewPreset(state, name) {
   return { state: next, preset };
 }
 
+// ——— 修改预设（#41）：把本次改动写回当前选中预设 ———
+
+// 与 saveAsNewPreset 同一口径覆盖四项：destination/includeImages 用当前值；
+// titleTemplate 仅在标题手改过时固化为当前框内容；bodyTemplate 恒取当前自定义正文框。
+// 区别在写回原位（id/name/triggers/action 等保留），不新建、不切换选中。
+// 写回后 session 与预设一致（isSessionModified 变 false），按钮随之消失；
+// temporary 清除——目标已归预设，不再挂「仅本次」徽标。未修改时返回 null 由调用方拦截。
+export function updateCurrentPreset(state) {
+  if (!isSessionModified(state)) return null;
+  const source = currentPreset(state);
+  const updated = {
+    ...source,
+    titleTemplate: isTitleEdited(state) ? state.title : source.titleTemplate,
+    bodyTemplate: state.customBody,
+    destination: state.destination,
+    includeImages: state.includeImages,
+  };
+  const presets = state.presets.map((preset) => (preset.id === source.id ? updated : preset));
+  return { state: { ...state, presets, temporary: false }, preset: updated };
+}
+
 export function editTitle(state, value) {
   return { ...state, title: String(value ?? '') };
 }

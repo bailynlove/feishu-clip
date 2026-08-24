@@ -148,6 +148,9 @@
 .popup .fold-head{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;border:0;background:var(--brand-soft);padding:10px 14px;font-size:12.5px;font-weight:600;color:#182030;cursor:pointer;font-family:inherit;text-align:left}
 .popup .fold-head em{font-style:normal;font-weight:400;font-size:11px;color:#9aa3b2;margin-left:4px}
 .popup .fold-caret{color:var(--brand-deep);font-size:11.5px;white-space:nowrap}
+/* 「修改预设」按钮（#41）：本次设置标题栏右侧、收起箭头左边；与 #40 同一 jelly 小药丸，
+   visibility 隐藏保留占位，折叠头布局不跳动；margin-left:auto 把它钉到右侧 */
+.popup .update-preset{margin-left:auto;flex-shrink:0;border:1.5px dashed var(--brand-deep);background:transparent;color:var(--brand-deep);border-radius:999px;padding:3px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap}
 .popup .fold-body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:10px;border-top:1px solid #eef1f6}
 .popup .custom-body{width:100%;border:1.5px solid #dfe4ec;border-radius:10px;padding:9px 12px;font-size:12.5px;font-family:inherit;color:#182030;resize:vertical;min-height:56px;line-height:1.5}
 .popup .custom-body:focus{outline:none;border-color:var(--brand-2)}

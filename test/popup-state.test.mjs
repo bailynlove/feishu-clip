@@ -20,6 +20,7 @@ import {
   isSessionModified,
   setIncludeImages,
   saveAsNewPreset,
+  updateCurrentPreset,
   composeClip,
   clipFilename,
   setMenuOpen,
@@ -424,6 +425,68 @@ test('saveAsNewPreset captures an edited title as the new template and the curre
   assert.equal(created.titleTemplate, '我的固定标题', 'edited title freezes into the new preset template');
   assert.equal(created.bodyTemplate, '{{content}}\n\n批注');
   assert.equal(isSessionModified(next), false, 'plain-text title renders to itself, so the new preset matches the session');
+});
+
+// ——— #41：修改预设（把本次改动写回当前预设）———
+
+test('updateCurrentPreset returns null when the session is unmodified', () => {
+  const state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(updateCurrentPreset(state), null, 'nothing to write back without a dirty session');
+});
+
+test('updateCurrentPreset writes the four session fields back to the selected preset in place', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editCustomBody(setIncludeImages(overrideDestination(state, nodeTarget), false), '批注 {{content}}');
+  const result = updateCurrentPreset(state);
+  assert.equal(result.state.presets.length, presets.length, 'no preset is created');
+  const updated = result.preset;
+  assert.equal(updated.id, 'p1', 'same preset id, not a copy');
+  assert.equal(updated.name, '默认');
+  assert.deepEqual(updated.destination, nodeTarget);
+  assert.equal(updated.includeImages, false);
+  assert.equal(updated.bodyTemplate, '批注 {{content}}');
+  assert.equal(updated.titleTemplate, '{{title}}', '标题未改时沿用原模板');
+  assert.equal(updated.action, 'feishu', '其余字段不动');
+  assert.equal(result.state.presets[1], presets[1], 'other presets untouched');
+  assert.equal(result.state.presetId, 'p1');
+  assert.equal(result.state.temporary, false, '目标已归预设，仅本次徽标清除');
+  assert.equal(isSessionModified(result.state), false, 'write-back makes the session match the preset again');
+});
+
+test('updateCurrentPreset freezes an edited title into the preset template', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editTitle(state, '我的固定标题');
+  const { preset: updated, state: next } = updateCurrentPreset(state);
+  assert.equal(updated.titleTemplate, '我的固定标题');
+  assert.equal(isTitleEdited(next), false, 'plain-text title renders to itself, session is clean');
+});
+
+test('updateCurrentPreset only writes the fields that diverge, keeping the preset name and triggers', () => {
+  const withTriggers = [{ ...presets[0], triggers: ['https://blog.example.com'] }];
+  let state = initPopupPresets({ presets: withTriggers, defaultPresetId: 'p1' }, tab, now);
+  state = setIncludeImages(state, false);
+  const { preset: updated } = updateCurrentPreset(state);
+  assert.deepEqual(updated.triggers, ['https://blog.example.com']);
+  assert.equal(updated.includeImages, false);
+  assert.deepEqual(updated.destination, spaceTarget, 'unchanged destination stays as-is');
+});
+
+test('after write-back, reopening the same URL hits the updated preset values', () => {
+  const triggered = [
+    { id: 't1', name: '博客', titleTemplate: '{{title}}', action: 'feishu', destination: null, includeImages: true, triggers: ['https://blog.example.com'] },
+  ];
+  const postTab = { title: 'T', url: 'https://blog.example.com/posts/42' };
+  let state = initPopupPresets({ presets: triggered, defaultPresetId: 't1' }, postTab, now);
+  assert.equal(state.viaTrigger, true);
+  state = setIncludeImages(editCustomBody(state, '固定前缀 {{content}}'), false);
+  const { state: saved } = updateCurrentPreset(state);
+  // 模拟重开同 URL 弹窗：持久化后的 presets 重新 init，trigger 命中修改后的预设
+  const reopened = initPopupPresets({ presets: saved.presets, defaultPresetId: 't1' }, postTab, now);
+  assert.equal(reopened.presetId, 't1');
+  assert.equal(reopened.viaTrigger, true);
+  assert.equal(reopened.includeImages, false);
+  assert.equal(reopened.customBody, '固定前缀 {{content}}');
+  assert.equal(isSessionModified(reopened), false);
 });
 
 // ——— #38：导出动作 ———
