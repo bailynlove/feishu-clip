@@ -17,6 +17,8 @@ test('Bridge enforces Origin+credential, validates target, queues and completes 
     authStatus: async () => ({ ready: true, identity: 'tester' }),
     validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
     run: async (args) => {
+      // +fetch 返回不含锚点的内容，锚点定位不到则走 media-insert 顶层插入路径
+      if (args[0] === 'docs' && args[1] === '+fetch') return { ok: true, data: { document: { content: '' } } };
       assert.equal(args[0], 'docs');
       if (args.includes('--file')) assert.equal(path.isAbsolute(args[args.indexOf('--file') + 1]), false);
       return { ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } };
