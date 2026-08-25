@@ -43,3 +43,16 @@ npm run uninstall:mac
 - 图片限 JPEG/PNG/GIF/WebP；单图 8 MiB、每篇 30 张、总计 40 MiB。浏览器传递可读取的 `blob:`、`data:` 与同源图片字节；Bridge 对页面快照声明的公网 HTTP(S) 图片逐跳执行 SSRF 校验后下载，不携带页面凭据。
 - 正文已创建而图片失败时返回“部分成功”，保留可用原图链接或安全占位。
 - 正式发布前仍需在安装后的真实 macOS 注销/登录场景中验收 LaunchAgent 自启动。
+
+## Privacy Policy
+
+先存飞书（Feishu Clip）does not collect, transmit, sell, or share any user data with the developer or any third party.
+
+- **What is accessed**: when you click the extension icon, the extension reads the active tab's title, URL, text, and images to build the clip. Nothing is read in the background or without your explicit action.
+- **Where data goes**: clipped content is sent only to your own Feishu (Lark) account via a local Bridge service on your machine (`127.0.0.1`, using your own lark-cli credentials), or saved to your local disk / clipboard if you choose those actions. The extension itself contacts no remote server.
+- **What is stored**: pairing credential, clip presets, and settings are stored locally on your device only.
+- **No remote code, no analytics, no ads.**
+
+本扩展不收集、不传输、不出售任何用户数据。网页内容仅在你主动点击时读取，且只发送到你自己的飞书账号（经本机 Bridge）或保存到本机；配对凭据与设置只存储在本机。
+
+Contact / 联系方式：https://github.com/bailynlove/feishu-clip/issues
