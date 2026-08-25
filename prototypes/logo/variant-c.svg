@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="c-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#0b3b36"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#c-bg)"/>
+  <!-- down arrow into tray: save-to-vault -->
+  <path d="M58 22 L70 22 L70 52 L84 52 L64 72 L44 52 L58 52 Z" fill="#7fe3bd"/>
+  <path d="M30 62 L46 62 L54 76 L74 76 L82 62 L98 62 L98 92 Q98 100 90 100 L38 100 Q30 100 30 92 Z"
+        fill="none" stroke="#ffffff" stroke-width="7" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="b-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5fd4ec"/>
+      <stop offset="1" stop-color="#2fa8cf"/>
+    </linearGradient>
+    <linearGradient id="b-gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#b-bg)"/>
+  <rect x="10" y="8" width="108" height="46" rx="23" fill="url(#b-gloss)"/>
+  <!-- bookmark ribbon, bottom left -->
+  <path d="M28 80 L50 80 L50 112 L39 104 L28 112 Z" fill="#7fe3bd"
+        stroke="#0b3b36" stroke-opacity=".18" stroke-width="2" stroke-linejoin="round"/>
+  <!-- paper plane -->
+  <path d="M26 64 L104 24 L60 66 Z" fill="#ffffff"/>
+  <path d="M60 66 L104 24 L72 98 Z" fill="#d9f0f8"/>
+  <path d="M60 66 L72 98 L55 86 Z" fill="#b7e2f0"/>
+</svg>

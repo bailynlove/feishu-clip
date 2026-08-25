@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>先存飞书 · Logo 原型</title>
+<style>
+  :root {
+    --ink: #0b3b36;
+    --deep: #0f766e;
+    --mint: #7fe3bd;
+    --sky: #5fd4ec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 48px 32px 64px;
+    font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif;
+    color: var(--ink);
+    background: #f6faf9;
+  }
+  header { max-width: 880px; margin: 0 auto 40px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  header p { margin: 0; color: #4a6b66; font-size: 14px; }
+  .grid {
+    max-width: 880px; margin: 0 auto;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+  }
+  .card {
+    background: #fff; border: 1px solid #e0efeb; border-radius: 16px;
+    padding: 24px; box-shadow: 0 2px 10px rgba(11,59,54,.06);
+  }
+  .card h2 { font-size: 16px; margin: 0 0 4px; }
+  .card .note { font-size: 13px; color: #4a6b66; margin: 0 0 18px; line-height: 1.6; }
+  .sizes { display: flex; align-items: flex-end; gap: 28px; }
+  .size { text-align: center; }
+  .size .label { font-size: 11px; color: #8aa9a4; margin-top: 8px; }
+  .icon { display: block; }
+  .checker {
+    border-radius: 8px;
+    background:
+      repeating-conic-gradient(#eef4f2 0% 25%, #ffffff 0% 50%) 0 0 / 12px 12px;
+    padding: 6px; display: inline-block;
+  }
+  .s16 .checker { padding: 3px; }
+  footer { max-width: 880px; margin: 36px auto 0; font-size: 12px; color: #8aa9a4; }
+</style>
+</head>
+<body>
+
+<!-- 图标定义：与 variant-*.svg 内容一致，供页面内复用 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="va" viewBox="0 0 128 128">
+      <linearGradient id="a-bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#7fe3bd"/>
+        <stop offset="1" stop-color="#5fd4ec"/>
+      </linearGradient>
+      <linearGradient id="a-gloss" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffffff" stop-opacity=".75"/>
+        <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="a-shade" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0b3b36" stop-opacity="0"/>
+        <stop offset="1" stop-color="#0b3b36" stop-opacity=".14"/>
+      </linearGradient>
+      <rect width="128" height="128" rx="28" fill="url(#a-bg)"/>
+      <rect width="128" height="128" rx="28" fill="url(#a-shade)"/>
+      <rect x="10" y="8" width="108" height="52" rx="24" fill="url(#a-gloss)"/>
+      <text x="64" y="94" text-anchor="middle" font-size="76" font-weight="800"
+            font-family="'PingFang SC','Hiragino Sans GB','Source Han Sans SC','Microsoft YaHei',sans-serif"
+            fill="#0b3b36">先</text>
+    </symbol>
+
+    <symbol id="vb" viewBox="0 0 128 128">
+      <linearGradient id="b-bg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5fd4ec"/>
+        <stop offset="1" stop-color="#2fa8cf"/>
+      </linearGradient>
+      <linearGradient id="b-gloss" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffffff" stop-opacity=".55"/>
+        <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+      </linearGradient>
+      <rect width="128" height="128" rx="28" fill="url(#b-bg)"/>
+      <rect x="10" y="8" width="108" height="46" rx="23" fill="url(#b-gloss)"/>
+      <path d="M28 80 L50 80 L50 112 L39 104 L28 112 Z" fill="#7fe3bd"
+            stroke="#0b3b36" stroke-opacity=".18" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M26 64 L104 24 L60 66 Z" fill="#ffffff"/>
+      <path d="M60 66 L104 24 L72 98 Z" fill="#d9f0f8"/>
+      <path d="M60 66 L72 98 L55 86 Z" fill="#b7e2f0"/>
+    </symbol>
+
+    <symbol id="vc" viewBox="0 0 128 128">
+      <linearGradient id="c-bg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0f766e"/>
+        <stop offset="1" stop-color="#0b3b36"/>
+      </linearGradient>
+      <rect width="128" height="128" rx="28" fill="url(#c-bg)"/>
+      <path d="M58 22 L70 22 L70 52 L84 52 L64 72 L44 52 L58 52 Z" fill="#7fe3bd"/>
+      <path d="M30 62 L46 62 L54 76 L74 76 L82 62 L98 62 L98 92 Q98 100 90 100 L38 100 Q30 100 30 92 Z"
+            fill="none" stroke="#ffffff" stroke-width="7" stroke-linejoin="round"/>
+    </symbol>
+
+    <symbol id="vd" viewBox="0 0 128 128">
+      <rect width="128" height="128" rx="28" fill="#f2fbf7"/>
+      <rect x="3" y="3" width="122" height="122" rx="25" fill="none"
+            stroke="#0f766e" stroke-opacity=".18" stroke-width="2"/>
+      <rect x="34" y="28" width="60" height="74" rx="11" fill="#ffffff"
+            stroke="#0b3b36" stroke-width="8"/>
+      <path d="M76 18 L96 18 L96 56 L86 48 L76 56 Z" fill="#7fe3bd"
+            stroke="#0b3b36" stroke-width="5" stroke-linejoin="round"/>
+      <rect x="48" y="56" width="26" height="7" rx="3.5" fill="#5fd4ec"/>
+      <rect x="48" y="71" width="18" height="7" rx="3.5" fill="#0b3b36" fill-opacity=".22"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header>
+  <h1>先存飞书 · Logo 原型</h1>
+  <p>先进团队，先存飞书 —— 一键把网页剪藏为飞书知识库文档。四版方向，128 / 48 / 16 实尺寸渲染。</p>
+</header>
+
+<div class="grid">
+
+  <section class="card">
+    <h2>A · 果冻「先」</h2>
+    <p class="note">延续动森蓝绿果冻风，薄荷绿→天空蓝渐变圆角方块 + 顶部高光，中央墨色「先」字直给新品牌名。</p>
+    <div class="sizes">
+      <div class="size"><span class="checker"><svg class="icon" width="128" height="128"><use href="#va"/></svg></span><div class="label">128</div></div>
+      <div class="size"><span class="checker"><svg class="icon" width="48" height="48"><use href="#va"/></svg></span><div class="label">48</div></div>
+      <div class="size s16"><span class="checker"><svg class="icon" width="16" height="16"><use href="#va"/></svg></span><div class="label">16</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>B · 纸飞机 × 书签</h2>
+    <p class="note">天空蓝底上白色纸飞机（飞书官方意象）向右上飞出，左下角缀薄荷绿书签缎带，表达「剪藏进飞书」。</p>
+    <div class="sizes">
+      <div class="size"><span class="checker"><svg class="icon" width="128" height="128"><use href="#vb"/></svg></span><div class="label">128</div></div>
+      <div class="size"><span class="checker"><svg class="icon" width="48" height="48"><use href="#vb"/></svg></span><div class="label">48</div></div>
+      <div class="size s16"><span class="checker"><svg class="icon" width="16" height="16"><use href="#vb"/></svg></span><div class="label">16</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>C · 落库</h2>
+    <p class="note">深绿渐变底反衬薄荷绿下箭头落入白色托盘，把「先存」具象化为内容入库存档的动作，气质最沉稳。</p>
+    <div class="sizes">
+      <div class="size"><span class="checker"><svg class="icon" width="128" height="128"><use href="#vc"/></svg></span><div class="label">128</div></div>
+      <div class="size"><span class="checker"><svg class="icon" width="48" height="48"><use href="#vc"/></svg></span><div class="label">48</div></div>
+      <div class="size s16"><span class="checker"><svg class="icon" width="16" height="16"><use href="#vc"/></svg></span><div class="label">16</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>D · 文档标签</h2>
+    <p class="note">近白底 + 墨色描边文档页，右上角探出薄荷绿书签标签，极简线条风，强调「网页 → 飞书文档」的产物。</p>
+    <div class="sizes">
+      <div class="size"><span class="checker"><svg class="icon" width="128" height="128"><use href="#vd"/></svg></span><div class="label">128</div></div>
+      <div class="size"><span class="checker"><svg class="icon" width="48" height="48"><use href="#vd"/></svg></span><div class="label">48</div></div>
+      <div class="size s16"><span class="checker"><svg class="icon" width="16" height="16"><use href="#vd"/></svg></span><div class="label">16</div></div>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  16px 列为关键验收尺寸。单文件零依赖，内联 SVG；独立文件见 variant-a/b/c/d.svg，128px 快照见 preview-*.png。
+</footer>
+
+</body>
+</html>

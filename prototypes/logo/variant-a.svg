@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="a-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7fe3bd"/>
+      <stop offset="1" stop-color="#5fd4ec"/>
+    </linearGradient>
+    <linearGradient id="a-gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".75"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="a-shade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b3b36" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0b3b36" stop-opacity=".14"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#a-bg)"/>
+  <rect width="128" height="128" rx="28" fill="url(#a-shade)"/>
+  <rect x="10" y="8" width="108" height="52" rx="24" fill="url(#a-gloss)"/>
+  <text x="64" y="94" text-anchor="middle" font-size="76" font-weight="800"
+        font-family="'PingFang SC','Hiragino Sans GB','Source Han Sans SC','Microsoft YaHei',sans-serif"
+        fill="#0b3b36">先</text>
+</svg>
