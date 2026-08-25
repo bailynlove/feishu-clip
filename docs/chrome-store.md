@@ -31,12 +31,17 @@
 
 **使用前提**：需要本机安装 lark-cli 并完成飞书用户登录（安装脚本会引导配对）。
 
-## 权限说明（审核用）
+## 权限说明（审核用，英文）
 
-- **activeTab / scripting**：用户点击扩展图标时，从当前标签页提取正文与图片（DOM 解析 + 同源 frame 读取），仅在用户主动触发时运行。
-- **storage**：保存配对凭据、预设与设置项，全部存储在本机。
-- **downloads**：「保存为文件」动作将 Markdown 下载为本地 .md 文件。
-- **host_permissions: http://127.0.0.1:38479/**：与本机 Bridge 服务通信完成配对与剪藏任务下发，不访问任何其他网站。
+- **activeTab**："Grants temporary access to the active tab only after the user clicks the extension icon, so the extension can read the page's title, URL and content for the clip. No access to other tabs and no background monitoring."
+- **scripting**："The extension uses chrome.scripting.executeScript to inject its content-extraction script into the active tab when the user clicks save. This is how the article text and images are read. Scripts are never injected automatically or in the background."
+- **storage**："Stores the pairing credential for the local Bridge service and the user's clip presets/settings locally on the user's machine. Data never leaves the device."
+- **downloads**："The optional 'Save as file' action saves the clipped Markdown as a local .md file to the user's chosen download location."
+- **host_permissions: http://127.0.0.1:38479/**："The extension talks only to a local Bridge service on 127.0.0.1 that the user installs and pairs via a one-time code. The Bridge creates the Feishu document using the user's own lark-cli credentials. The extension itself contacts no remote server."
+
+## Privacy policy URL
+
+`https://github.com/bailynlove/feishu-clip#privacy-policy`（README 已含中英隐私政策，推送后生效）
 
 ## 单一用途声明
 
