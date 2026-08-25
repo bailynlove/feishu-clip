@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>promo</title>
+<style>
+  :root { --mint:#7fe3bd; --sky:#5fd4ec; --ink:#0b3b36; --deep:#0f766e; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    overflow: hidden;
+    font-family: "PingFang SC", "Hiragino Sans GB", sans-serif;
+    color: var(--ink);
+    background: linear-gradient(135deg, #7fe3bd 0%, #6fe0c9 38%, #5fd4ec 100%);
+    position: relative;
+  }
+  /* 果冻质感：顶部白色高光 + 底部轻暗部 */
+  body::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 46%;
+    background: linear-gradient(rgba(255,255,255,.42), rgba(255,255,255,0));
+    pointer-events: none;
+  }
+  body::after {
+    content: ""; position: absolute; inset: auto 0 0 0; height: 30%;
+    background: linear-gradient(rgba(15,118,110,0), rgba(15,118,110,.12));
+    pointer-events: none;
+  }
+  .bubble { position: absolute; border-radius: 50%; background: rgba(255,255,255,.16); }
+  .plane { position: absolute; filter: drop-shadow(0 8px 14px rgba(11,59,54,.16)); }
+  .logo { filter: drop-shadow(0 8px 18px rgba(11,59,54,.22)); }
+  h1 { font-weight: 800; letter-spacing: .02em; }
+  .slogan { font-weight: 600; opacity: .82; }
+  .feat {
+    display: inline-block; background: rgba(255,255,255,.5); color: var(--deep);
+    border-radius: 999px; font-weight: 600; box-shadow: inset 0 1px 2px rgba(255,255,255,.7), 0 2px 8px rgba(11,59,54,.08);
+  }
+
+  /* ——— 440×280 小横幅 ——— */
+  body.small { width: 440px; height: 280px; padding: 44px 38px; }
+  .small .row { display: flex; align-items: center; gap: 20px; position: relative; }
+  .small .logo { width: 78px; height: 78px; border-radius: 19px; }
+  .small h1 { font-size: 36px; line-height: 1.15; }
+  .small .slogan { font-size: 15.5px; margin-top: 6px; }
+  .small .feat { font-size: 12.5px; padding: 7px 15px; margin-top: 20px; position: relative; }
+  .small .plane { width: 88px; right: 24px; top: 18px; transform: rotate(8deg); }
+  .small .b1 { width: 130px; height: 130px; right: -36px; bottom: -44px; }
+  .small .b2 { width: 66px; height: 66px; left: 168px; top: -22px; opacity: .8; }
+
+  /* ——— 1400×560 大横幅 ——— */
+  body.marquee { width: 1400px; height: 560px; display: flex; align-items: center; padding: 0 0 0 100px; }
+  .marquee .left { position: relative; z-index: 1; }
+  .marquee .logo { width: 118px; height: 118px; border-radius: 28px; }
+  .marquee h1 { font-size: 68px; line-height: 1.12; margin-top: 26px; }
+  .marquee .slogan { font-size: 28px; margin-top: 14px; }
+  .marquee .feat { font-size: 17.5px; padding: 11px 24px; margin-top: 34px; }
+  .marquee .plane { width: 132px; left: 520px; top: 74px; transform: rotate(10deg); opacity: .9; }
+  .marquee .b1 { width: 260px; height: 260px; left: 430px; bottom: -120px; }
+  .marquee .b2 { width: 120px; height: 120px; left: 640px; top: -40px; opacity: .8; }
+  .marquee .b3 { width: 90px; height: 90px; left: 60px; top: 420px; opacity: .7; }
+  /* 右侧弹窗特写：从 screenshot-1-popup.png 裁出弹窗列，右缘出血 */
+  .marquee .shot {
+    margin-left: auto; width: 330px; height: 560px; overflow: hidden; flex-shrink: 0;
+    border-radius: 28px 0 0 28px; box-shadow: -14px 0 44px rgba(11,59,54,.22);
+    position: relative; z-index: 1;
+  }
+  .marquee .shot img { width: 992px; margin-left: -331px; display: block; }
+</style>
+</head>
+<body>
+<script>
+  // ?size=small|marquee 切换两版构图
+  const size = new URLSearchParams(location.search).get('size') || 'small';
+  document.body.className = size;
+
+  const plane = `
+    <svg class="plane" viewBox="0 0 128 128" aria-hidden="true">
+      <path d="M26 64 L104 24 L60 66 Z" fill="#ffffff"/>
+      <path d="M60 66 L104 24 L72 98 Z" fill="#d9f0f8"/>
+      <path d="M60 66 L72 98 L55 86 Z" fill="#b7e2f0"/>
+    </svg>`;
+
+  if (size === 'small') {
+    document.body.innerHTML = `
+      <span class="bubble b1"></span><span class="bubble b2"></span>${plane}
+      <div class="row">
+        <img class="logo" src="../logo/variant-d.svg" alt="">
+        <div><h1>先存飞书</h1><p class="slogan">先进团队，先存飞书</p></div>
+      </div>
+      <p class="feat">一键剪藏网页为飞书文档 · 预设模板 · 图片嵌入</p>`;
+  } else {
+    document.body.innerHTML = `
+      <span class="bubble b1"></span><span class="bubble b2"></span><span class="bubble b3"></span>${plane}
+      <div class="left">
+        <img class="logo" src="../logo/variant-d.svg" alt="">
+        <h1>先存飞书</h1>
+        <p class="slogan">先进团队，先存飞书</p>
+        <p class="feat">一键剪藏网页为飞书文档 · 预设模板 · 图片嵌入</p>
+      </div>
+      <div class="shot"><img src="../../docs/store/screenshot-1-popup.png" alt=""></div>`;
+  }
+</script>
+</body>
+</html>

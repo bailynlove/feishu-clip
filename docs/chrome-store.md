@@ -54,7 +54,12 @@
 2. `screenshot-2-preview.png` — 弹窗预览展开：Markdown 正文层级、列表、图片占位
 3. `screenshot-3-options.png` — 设置页：预设标签页管理、{{}} 模板变量、Triggers 规则
 
-素材见 `docs/store/` 目录；重生成方式见 `prototypes/store-shots/build.mjs`。
+## 宣传图
+
+1. `promo-small-440x280.png` — 小横幅（440×280）：logo + 产品名 + slogan + 功能点，蓝绿果冻渐变底
+2. `promo-marquee-1400x560.png` — 大横幅（1400×560）：左侧品牌区，右侧弹窗 UI 特写（裁自 screenshot-1）
+
+素材见 `docs/store/` 目录；截图重生成方式见 `prototypes/store-shots/build.mjs`，宣传图源文件为 `prototypes/store-shots/promo.html`（`?size=small|marquee` 两版）。
 
 ## 打包
 
@@ -64,4 +69,4 @@
 
 - 注册 Chrome 开发者账号（一次性 $5）
 - 后台填写：分类、权限说明（上文「权限说明」逐条粘贴）、单一用途声明、数据使用声明
-- 促销图块（440×280）非必填，可后续补
+- 上传宣传图：小横幅 440×280（`promo-small-440x280.png`，非必填但建议）、大横幅 1400×560（`promo-marquee-1400x560.png`，仅在被推荐位选中时使用）
