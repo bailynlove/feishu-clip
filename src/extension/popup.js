@@ -14,7 +14,8 @@ let previewLoading = false;
 
 const $ = (selector) => document.querySelector(selector);
 function message(payload) { return chrome.runtime.sendMessage(payload).then((response) => { if (!response?.ok) throw Object.assign(new Error(response?.error?.message || '操作失败'), response?.error); return response.result; }); }
-function show(text, kind = 'info') { const node = $('#status'); node.textContent = text; node.className = `status ${kind}`; }
+function show(text, kind = 'info') { const node = $('#status'); $('#status-text').textContent = text; node.className = `status ${kind}`; }
+$('#status-close').addEventListener('click', () => { $('#status').className = 'status hidden'; });
 // 目标 chip 只反映 presetState：预设目标不亮徽标，「仅本次」徽标只属于手动覆盖的临时目标
 function syncDestinationView() {
   const value = presetState.destination;

@@ -4,7 +4,7 @@
     <div class="presets-row"><div id="presets" class="presets" role="group" aria-label="预设"></div><button id="save-as-preset" class="save-as-preset" type="button" style="visibility:hidden" title="把本次的改动保存为新预设">新建预设</button></div>
     <span id="trigger-hint" class="trigger-hint hidden">⚡ 已按规则自动选择</span>
     <div id="save-as-bar" class="save-as-bar hidden"><input id="save-as-name" class="save-as-input" type="text" placeholder="新预设名称…" aria-label="新预设名称" spellcheck="false"><button id="save-as-confirm" class="save-as-confirm" type="button">保存</button><button id="save-as-cancel" class="save-as-cancel" type="button">取消</button></div>
-    <div id="status" class="status hidden"></div>
+    <div id="status" class="status hidden"><span id="status-text" class="status-text"></span><button id="status-close" class="status-close" type="button" aria-label="关闭提示">×</button></div>
     <section class="fold"><button id="settings-toggle" class="fold-head" type="button" aria-expanded="false"><span>⚙ 本次设置 <em>仅本次生效</em></span><span id="update-preset" class="update-preset" role="button" tabindex="0" style="visibility:hidden" title="把本次改动写回当前预设">修改预设</span><span id="settings-caret" class="fold-caret">⌄</span></button><div id="settings-body" class="fold-body hidden">
       <button id="change" class="chip" type="button" title="仅本次更改，不影响默认目标"><span class="chip-icon">🗂</span><span id="destination" class="chip-text">尚未设置</span><span id="destination-temp-badge" class="chip-temp hidden">仅本次</span><span class="chip-edit">更改 ›</span></button>
       <label class="img-row"><span class="img-text"><strong>包含图片</strong><small>失败时正文仍会保存</small></span><input id="images" type="checkbox" checked><span class="switch"></span></label>
