@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "飞书剪藏",
+  "name": "先存飞书",
   "version": "0.1.0",
-  "description": "一键将当前网页剪藏到飞书知识库",
+  "description": "先进团队，先存飞书——一键将当前网页剪藏为飞书知识库文档",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": ["http://127.0.0.1:38479/*"],
   "background": { "service_worker": "background.js", "type": "module" },

@@ -1,4 +1,6 @@
-# 飞书剪藏 MVP
+# 先存飞书 MVP
+
+> 先进团队，先存飞书。
 
 Chrome/Edge MV3 扩展通过只绑定 `127.0.0.1:38479` 的本机 Bridge，把当前来源页面剪藏为现有 Wiki 父节点下的新飞书文档。Bridge 复用 `lark-cli` 的用户 OAuth，不读取或复制飞书 token。
 

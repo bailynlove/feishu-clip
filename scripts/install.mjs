@@ -88,7 +88,7 @@ function install() {
   writeAtomic(plistPath, launchAgentPlist({ nodePath, larkCliPath }), 0o600);
   execFileSync('/usr/bin/plutil', ['-lint', plistPath], { stdio: 'pipe' });
   bootstrap();
-  console.log(`飞书剪藏 ${packageJson.version} 已安装。`);
+  console.log(`先存飞书 ${packageJson.version} 已安装。`);
   console.log(`扩展目录：${extensionDir}`);
   if (pairing.code) console.log(`一次性配对码（10 分钟有效）：${pairing.code}`);
   else console.log('已保留现有配对。需要重新配对时运行：npm run pair:mac');
@@ -122,7 +122,7 @@ function uninstall() {
   bootout();
   rmSync(plistPath, { force: true });
   rmSync(appRoot, { recursive: true, force: true });
-  console.log('Bridge、扩展安装目录、日志、配置和配对凭据均已移除。请在 Chrome 扩展页移除“飞书剪藏”。');
+  console.log('Bridge、扩展安装目录、日志、配置和配对凭据均已移除。请在 Chrome 扩展页移除“先存飞书”。');
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
