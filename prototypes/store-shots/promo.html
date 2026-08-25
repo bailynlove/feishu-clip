@@ -57,13 +57,16 @@
   .marquee .b1 { width: 260px; height: 260px; left: 430px; bottom: -120px; }
   .marquee .b2 { width: 120px; height: 120px; left: 640px; top: -40px; opacity: .8; }
   .marquee .b3 { width: 90px; height: 90px; left: 60px; top: 420px; opacity: .7; }
-  /* 右侧弹窗特写：从 screenshot-1-popup.png 裁出弹窗列，右缘出血 */
+  /* 右侧弹窗特写：从 screenshot-1-popup.png 裁出弹窗列；右缘留 60px 边距，
+     卡片上下居中、四角圆角，不再出血裁切；img 上移少许保住底部保存按钮 */
+  body.marquee { padding-right: 60px; }
   .marquee .shot {
-    margin-left: auto; width: 330px; height: 560px; overflow: hidden; flex-shrink: 0;
-    border-radius: 28px 0 0 28px; box-shadow: -14px 0 44px rgba(11,59,54,.22);
+    margin-left: auto; width: 330px; height: 540px; overflow: hidden; flex-shrink: 0;
+    align-self: center;
+    border-radius: 28px; box-shadow: 0 16px 44px rgba(11,59,54,.22);
     position: relative; z-index: 1;
   }
-  .marquee .shot img { width: 992px; margin-left: -331px; display: block; }
+  .marquee .shot img { width: 992px; margin-left: -331px; margin-top: -10px; display: block; }
 </style>
 </head>
 <body>
