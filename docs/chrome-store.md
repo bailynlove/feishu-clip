@@ -64,6 +64,10 @@
 1. `promo-small-440x280.png` — 小横幅（440×280）：logo + 产品名 + slogan + 功能点，蓝绿果冻渐变底
 2. `promo-marquee-1400x560.png` — 大横幅（1400×560）：左侧品牌区，右侧弹窗 UI 特写（裁自 screenshot-1）
 
+## 商店图标
+
+`store-icon-128.png` — 商店列表用 128×128 图标，24-bit 无 alpha 白底（商店规范要求）；由 `prototypes/logo/variant-d.svg` 以 `--default-background-color=ffffffff` 渲染。与扩展用 `src/extension/icons/`（圆角外透明）区分，互不影响。
+
 素材见 `docs/store/` 目录；截图重生成方式见 `prototypes/store-shots/build.mjs`，宣传图源文件为 `prototypes/store-shots/promo.html`（`?size=small|marquee` 两版）。
 
 ## 打包
