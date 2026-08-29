@@ -151,6 +151,41 @@ test('嵌套 pre 内的图片：锚点移出最外层 pre', async () => {
   assert.ok(result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:0]]') > result.markdown.lastIndexOf('```'));
 });
 
+// 图片尺寸回归（langgraph 文档剪藏图片全部 100x100）：飞书建图片块需要原始宽高，
+// extractor 必须从 img 的 naturalWidth/naturalHeight 带出尺寸给 bridge 用
+test('图片记录 naturalWidth/naturalHeight 作为原始尺寸', async () => {
+  const sized = img('https://example.test/sized.png');
+  sized.naturalWidth = 4572;
+  sized.naturalHeight = 2047;
+  const doc = {
+    title: '带尺寸的图片',
+    body: element('body', [element('p', [textNode(LONG)]), element('p', [sized])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images[0].width, 4572);
+  assert.equal(result.images[0].height, 2047);
+});
+
+test('图片未加载完成（naturalWidth 为 0/缺失）时不带尺寸字段', async () => {
+  const unloaded = img('https://example.test/unloaded.png');
+  unloaded.naturalWidth = 0; // 浏览器中未解码完成的图片 naturalWidth 为 0
+  unloaded.naturalHeight = 0;
+  const doc = {
+    title: '无尺寸的图片',
+    body: element('body', [element('p', [textNode(LONG)]), element('p', [unloaded]), element('p', [img('https://example.test/plain.png')])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal('width' in result.images[0], false, 'naturalWidth 为 0 时不应带 width');
+  assert.equal('height' in result.images[0], false);
+  assert.equal('width' in result.images[1], false, '属性缺失时也不应带 width');
+});
+
 test('pre 外的图片：仍在原地替换为锚点', async () => {
   const doc = {
     title: '普通图片',

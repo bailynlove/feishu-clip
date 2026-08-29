@@ -76,6 +76,13 @@
         const original = originalImages[cloneIndex] || clone;
         const source = candidate(original);
         const image = { label: original.alt?.trim() || `图片 ${index + 1}`, source };
+        // 飞书建图片块需要原始宽高（空块默认 100x100 且绑定 token 不重算），
+        // 从 naturalWidth/Height 拿解码后的真实像素；未加载完成时为 0，只带正整数
+        const { naturalWidth, naturalHeight } = original;
+        if (Number.isInteger(naturalWidth) && naturalWidth > 0 && Number.isInteger(naturalHeight) && naturalHeight > 0) {
+          image.width = naturalWidth;
+          image.height = naturalHeight;
+        }
         try { Object.assign(image, await readableBytes(source)); } catch (error) { image.browserWarning = error.message; }
         images.push(image);
         const anchor = document.createTextNode(`\n\n[[FEISHU_CLIP_IMAGE:${index}]]\n\n`);

@@ -64,8 +64,19 @@ export async function resolvePublicHost(hostname, lookup = dns.lookup) {
 function dimensions(buffer, mimeType) {
   if (mimeType === 'image/png' && buffer.length >= 24) return [buffer.readUInt32BE(16), buffer.readUInt32BE(20)];
   if (mimeType === 'image/gif' && buffer.length >= 10) return [buffer.readUInt16LE(6), buffer.readUInt16LE(8)];
-  if (mimeType === 'image/webp' && buffer.length >= 30 && buffer.subarray(12, 16).toString() === 'VP8X') {
-    return [1 + buffer.readUIntLE(24, 3), 1 + buffer.readUIntLE(27, 3)];
+  if (mimeType === 'image/webp' && buffer.length >= 30) {
+    const chunk = buffer.subarray(12, 16).toString('latin1');
+    // VP8X（扩展格式）：宽高各 3 字节小端、存的是减 1
+    if (chunk === 'VP8X') return [1 + buffer.readUIntLE(24, 3), 1 + buffer.readUIntLE(27, 3)];
+    // VP8L（无损）：0x2f 签名后 4 字节小端位打包，宽低 14 位、高次 14 位、各存减 1
+    if (chunk === 'VP8L' && buffer[20] === 0x2f) {
+      const packed = buffer.readUInt32LE(21);
+      return [(packed & 0x3fff) + 1, ((packed >> 14) & 0x3fff) + 1];
+    }
+    // VP8（有损）：3 字节帧标签后是 0x9d012a 起始码，宽高 14 位小端（高 2 位为缩放位）
+    if (chunk === 'VP8 ' && buffer[23] === 0x9d && buffer[24] === 0x01 && buffer[25] === 0x2a) {
+      return [buffer.readUInt16LE(26) & 0x3fff, buffer.readUInt16LE(28) & 0x3fff];
+    }
   }
   if (mimeType === 'image/jpeg') {
     let offset = 2;
@@ -89,6 +100,15 @@ function sniffType(buffer) {
   if (buffer.length >= 6 && buffer.toString('latin1', 0, 3) === 'GIF') return 'image/gif';
   if (buffer.length >= 12 && buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
   return null;
+}
+
+// 建图片块需要原始宽高（飞书 replace_image 不重算尺寸，空块固定 100x100）。
+// 以魔数为准手工解析四种格式的头部；识别不出或头被截断返回 null，调用方留空 image 对象
+export function parseImageDimensions(buffer) {
+  const type = sniffType(buffer);
+  if (!type) return null;
+  const size = dimensions(buffer, type);
+  return size ? { width: size[0], height: size[1] } : null;
 }
 
 export function validateImageBytes(buffer, mimeType, limits = IMAGE_LIMITS) {

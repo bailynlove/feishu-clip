@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { FAILURE_STAGE, JOB_STATUS } from './job-store.mjs';
-import { downloadPublicImage, IMAGE_LIMITS, validateImageBytes } from './image-policy.mjs';
+import { downloadPublicImage, IMAGE_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
 
 function safeTitle(value) {
   return String(value || '网页剪藏').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 180) || '网页剪藏';
@@ -66,6 +66,14 @@ async function imageBytes(image) {
   const source = safeHttpUrl(image.source);
   if (!source) throw Object.assign(new Error('图片地址不安全或浏览器未提供字节'), { code: 'IMAGE_SOURCE_UNAVAILABLE' });
   return downloadPublicImage(source);
+}
+
+// snapshot 里 extractor 记录的 naturalWidth/Height：只有 1-100000 的整数才可信，
+// 脏值（0/小数/超大）一律视为没有，回退到字节解析
+function snapshotDimensions(image) {
+  const { width, height } = image;
+  const valid = (value) => Number.isInteger(value) && value >= 1 && value <= 100_000;
+  return valid(width) && valid(height) ? { width, height } : null;
 }
 
 // 文本提取泛化：任何带 elements 数组的属性都读（text/bullet/ordered/code/heading…），
@@ -212,14 +220,16 @@ export class ClipExecutor {
             api('DELETE', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${parentId}/children/batch_delete`, [
               '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ start_index: start, end_index: end }),
             ]);
-          // 单图写入：锚点下标处建空图片块 → 上传媒体 → 绑定 token → 删锚点段落。
-          // 图片块插入后锚点顺延到 index+1，直接按区间删，无需再查子列表
-          const insertImageAt = async (anchor, filePath) => {
+          // 单图写入：锚点下标处建图片块（带原始宽高，空块会固定 100x100）→ 上传媒体 →
+          // 绑定 token（replace_image 会把宽高重置回 100x100，尺寸必须随 token 一起再传一遍）
+          // → 删锚点段落。图片块插入后锚点顺延到 index+1，直接按区间删，无需再查子列表
+          const insertImageAt = async (anchor, filePath, size) => {
+            const dimensions = size ? { width: size.width, height: size.height } : {};
             let imageBlockId = null;
             try {
               const created = await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${anchor.parentId}/children`, [
                 '--params', '{"document_revision_id":"-1"}',
-                '--data', JSON.stringify({ index: anchor.index, children: [{ block_type: 27, image: {} }] }),
+                '--data', JSON.stringify({ index: anchor.index, children: [{ block_type: 27, image: dimensions }] }),
               ]);
               imageBlockId = created.data?.children?.[0]?.block_id;
               if (!imageBlockId) throw new Error('IMAGE_BLOCK_CREATE_FAILED');
@@ -231,7 +241,7 @@ export class ClipExecutor {
               const token = uploaded.data?.file_token;
               if (!token) throw new Error('IMAGE_UPLOAD_MISSING_TOKEN');
               await api('PATCH', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${imageBlockId}`, [
-                '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ replace_image: { token } }),
+                '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ replace_image: { token, ...dimensions } }),
               ]);
               await removeRange(anchor.parentId, anchor.index + 1, anchor.index + 2);
             } catch (error) {
@@ -276,7 +286,9 @@ export class ClipExecutor {
                 if (totalBytes > IMAGE_LIMITS.maxTotalBytes) throw new Error('图片总量超过 40 MiB');
                 const filePath = path.join(scratch, `image-${index + 1}.${fetched.metadata.extension}`);
                 await writeFile(filePath, fetched.buffer);
-                return { index, filePath, downloadMs: Date.now() - downloadAt };
+                // 建块尺寸：snapshot 合法宽高优先，其次从字节解析；都没有则留空块（老行为）
+                const size = snapshotDimensions(image) || parseImageDimensions(fetched.buffer);
+                return { index, filePath, size, downloadMs: Date.now() - downloadAt };
               } catch (error) {
                 error.downloadMs = Date.now() - downloadAt;
                 throw error;
@@ -305,7 +317,7 @@ export class ClipExecutor {
             const writeAt = Date.now();
             try {
               if (Date.now() >= deadline) throw new Error('图片阶段超过 180 秒');
-              await insertImageAt(anchor, item.filePath);
+              await insertImageAt(anchor, item.filePath, item.size);
               timeline.push({ kind: 'image', name: `image-${item.index + 1}`, ms: item.downloadMs + Date.now() - writeAt });
             } catch (error) {
               recordFailure(item.index, error?.message || '处理失败', item.downloadMs + Date.now() - writeAt);

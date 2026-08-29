@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isPublicIp, pinnedLookup, resolvePublicHost, validateImageBytes } from '../src/bridge/image-policy.mjs';
+import { isPublicIp, parseImageDimensions, pinnedLookup, resolvePublicHost, validateImageBytes } from '../src/bridge/image-policy.mjs';
 
 test('SSRF policy rejects loopback, private, link-local, documentation and mapped private IPs', () => {
   for (const address of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.1.1', '192.0.2.1', '::1', 'fc00::1', '2001:db8::1', '::ffff:127.0.0.1']) {
@@ -45,4 +45,70 @@ test('magic bytes win over a lying extension/Content-Type (.png URL serving JPEG
   jpeg.writeUInt16BE(4000, 7); // 高
   jpeg.writeUInt16BE(6000, 9); // 宽
   assert.deepEqual(validateImageBytes(jpeg, 'image/png'), { mimeType: 'image/jpeg', extension: 'jpg', width: 6000, height: 4000 });
+});
+
+// parseImageDimensions：建图片块时需要原始宽高（飞书 replace_image 不重算尺寸），
+// 按魔数识别后手工解析四种格式的头部，解析不了返回 null 由调用方留空块
+test('parseImageDimensions reads PNG IHDR and JPEG SOF0/1/2 markers', () => {
+  const png = Buffer.alloc(24);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(0x0d0a1a0a, 4);
+  png.writeUInt32BE(4572, 16);
+  png.writeUInt32BE(2047, 20);
+  assert.deepEqual(parseImageDimensions(png), { width: 4572, height: 2047 });
+
+  for (const sof of [0xc0, 0xc1, 0xc2]) {
+    const jpeg = Buffer.alloc(16);
+    jpeg.writeUInt16BE(0xffd8, 0); // SOI
+    jpeg.writeUInt16BE(0xff00 | sof, 2); // SOF0/1/2
+    jpeg.writeUInt16BE(0x0011, 4);
+    jpeg.writeUInt8(0x08, 6);
+    jpeg.writeUInt16BE(180, 7); // 高
+    jpeg.writeUInt16BE(320, 9); // 宽
+    assert.deepEqual(parseImageDimensions(jpeg), { width: 320, height: 180 }, `SOF marker 0x${sof.toString(16)}`);
+  }
+});
+
+test('parseImageDimensions reads GIF logical screen descriptor', () => {
+  const gif = Buffer.alloc(10);
+  gif.write('GIF89a', 0, 'latin1');
+  gif.writeUInt16LE(480, 6);
+  gif.writeUInt16LE(270, 8);
+  assert.deepEqual(parseImageDimensions(gif), { width: 480, height: 270 });
+});
+
+test('parseImageDimensions reads WebP VP8X, lossless VP8L and lossy VP8 headers', () => {
+  const riff = (chunk) => {
+    const buffer = Buffer.alloc(30);
+    buffer.write('RIFF', 0, 'latin1');
+    buffer.write('WEBP', 8, 'latin1');
+    buffer.write(chunk, 12, 'latin1');
+    return buffer;
+  };
+  const vp8x = riff('VP8X');
+  vp8x.writeUIntLE(319, 24, 3); // 宽存的是减 1
+  vp8x.writeUIntLE(179, 27, 3);
+  assert.deepEqual(parseImageDimensions(vp8x), { width: 320, height: 180 });
+
+  const vp8l = riff('VP8L');
+  vp8l.writeUInt8(0x2f, 20); // VP8L 签名
+  vp8l.writeUInt32LE(((179 << 14) | 319) >>> 0, 21); // 宽低 14 位、高次 14 位，各存减 1
+  assert.deepEqual(parseImageDimensions(vp8l), { width: 320, height: 180 });
+
+  const vp8 = riff('VP8 ');
+  vp8.writeUInt8(0x9d, 23); // 起始码 9d 01 2a
+  vp8.writeUInt8(0x01, 24);
+  vp8.writeUInt8(0x2a, 25);
+  vp8.writeUInt16LE(320, 26);
+  vp8.writeUInt16LE(180, 28);
+  assert.deepEqual(parseImageDimensions(vp8), { width: 320, height: 180 });
+});
+
+test('parseImageDimensions returns null for garbage or truncated input', () => {
+  assert.equal(parseImageDimensions(Buffer.alloc(0)), null);
+  assert.equal(parseImageDimensions(Buffer.from('not an image')), null);
+  const truncatedPng = Buffer.alloc(8); // 只有魔数，读不到 IHDR
+  truncatedPng.writeUInt32BE(0x89504e47, 0);
+  truncatedPng.writeUInt32BE(0x0d0a1a0a, 4);
+  assert.equal(parseImageDimensions(truncatedPng), null);
 });

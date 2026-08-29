@@ -110,6 +110,65 @@ function fakeLark({ items, failOn } = {}) {
 const apiCalls = (calls, method, suffix) => calls.filter((args) => args[0] === 'api' && args[1] === method && args[2].includes(suffix));
 const deleteBody = (args) => JSON.parse(args[args.indexOf('--data') + 1]);
 
+// 图片尺寸回归（langgraph 文档全部 100x100）：建图片块必须带原始宽高，
+// 空块 + replace_image 不会重算尺寸。尺寸来源优先级：snapshot 合法宽高 → 字节解析 → 空对象
+function singleImageJob(images) {
+  return fakeJob({ markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]', images });
+}
+function singleAnchorSetup(job) {
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items });
+  return { store, lark };
+}
+const createdImage = (calls) => {
+  const [insert] = apiCalls(calls, 'POST', '/children');
+  return JSON.parse(insert[insert.indexOf('--data') + 1]).children[0].image;
+};
+// replace_image 会把宽高重置回 100x100（真实文档验证过），尺寸必须随 token 再传一遍
+const replacedImage = (calls) => {
+  const [patch] = apiCalls(calls, 'PATCH', '/blocks/');
+  return JSON.parse(patch[patch.indexOf('--data') + 1]).replace_image;
+};
+
+test('image block carries snapshot dimensions when they are valid integers', async () => {
+  const job = singleImageJob([{ label: 'a', bytesBase64: PNG_BYTES, width: 4572, height: 2047 }]);
+  const { store, lark } = singleAnchorSetup(job);
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.deepEqual(createdImage(lark.calls), { width: 4572, height: 2047 }, 'snapshot 的合法宽高优先');
+  assert.deepEqual(replacedImage(lark.calls), { token: 'tok1', width: 4572, height: 2047 }, '绑定 token 时尺寸要再传一遍');
+});
+
+test('invalid snapshot dimensions fall back to parsing the image bytes', async () => {
+  for (const bad of [{ width: 0, height: 2047 }, { width: 4572, height: 1.5 }, { width: 100001, height: 2047 }, {}]) {
+    const job = singleImageJob([{ label: 'a', bytesBase64: PNG_BYTES, ...bad }]);
+    const { store, lark } = singleAnchorSetup(job);
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+    await store.settled;
+    assert.deepEqual(createdImage(lark.calls), { width: 64, height: 64 }, `坏值 ${JSON.stringify(bad)} 应回退到字节解析（PNG_BYTES 是 64x64）`);
+    assert.deepEqual(replacedImage(lark.calls), { token: 'tok1', width: 64, height: 64 });
+  }
+});
+
+test('image block stays empty when neither snapshot nor bytes yield dimensions', async () => {
+  // 只有 PNG 魔数没有 IHDR：能通过字节校验，但解析不出尺寸
+  const headerOnly = Buffer.alloc(8);
+  headerOnly.writeUInt32BE(0x89504e47, 0);
+  headerOnly.writeUInt32BE(0x0d0a1a0a, 4);
+  const job = singleImageJob([{ label: 'a', bytesBase64: headerOnly.toString('base64') }]);
+  const { store, lark } = singleAnchorSetup(job);
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.deepEqual(createdImage(lark.calls), {}, '两个来源都没有尺寸时维持空 image 对象');
+  assert.deepEqual(replacedImage(lark.calls), { token: 'tok1' }, '无尺寸时 replace_image 也不带宽高');
+});
+
 test('anchors are located by a single blocks fetch; no keyword probe and no media-insert', async () => {
   const job = fakeJob({
     markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
