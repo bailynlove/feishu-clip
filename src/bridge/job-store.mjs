@@ -70,7 +70,7 @@ export class PersistentJobStore {
     this.#jobTtlMs = jobTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, clientTiming = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
 
     return this.#mutate(async (data) => {
@@ -100,6 +100,9 @@ export class PersistentJobStore {
         workerId: null,
         leaseExpiresAt: null,
         createInFlight: false,
+        timeline: [],
+        totalMs: null,
+        clientTiming: clientTiming ? structuredClone(clientTiming) : null,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -242,7 +245,7 @@ export class PersistentJobStore {
     });
   }
 
-  async complete(attemptId, workerId, { warnings = [] } = {}) {
+  async complete(attemptId, workerId, { warnings = [], timeline = null, totalMs = null } = {}) {
     return this.#mutate(async (data) => {
       const job = this.#findJob(data, attemptId);
       this.#assertActiveWorker(job, workerId);
@@ -250,13 +253,16 @@ export class PersistentJobStore {
       job.status = warnings.length > 0 ? JOB_STATUS.SUCCEEDED_WITH_WARNINGS : JOB_STATUS.SUCCEEDED;
       job.step = JOB_STEP.DONE;
       job.warnings = [...warnings];
+      // 耗时埋点只在终态一次性落盘，避免执行期每追加一条就整本重写 jobs.json（内含大 snapshot）
+      if (timeline) job.timeline = structuredClone(timeline);
+      if (totalMs !== null) job.totalMs = totalMs;
       this.#releaseLease(job);
       job.updatedAt = this.#now();
       return { result: structuredClone(job), changed: true };
     });
   }
 
-  async fail(attemptId, workerId, { stage, error, cleanup = null }) {
+  async fail(attemptId, workerId, { stage, error, cleanup = null, timeline = null, totalMs = null }) {
     if (!stage || !error) throw new TypeError('stage and error are required');
     if (!FAILURE_STAGES.has(stage)) throw new TypeError(`Unknown failure stage: ${stage}`);
     if (cleanup && !CLEANUP_STATUSES.has(cleanup.status)) {
@@ -283,6 +289,8 @@ export class PersistentJobStore {
       }
 
       this.#releaseLease(job);
+      if (timeline) job.timeline = structuredClone(timeline);
+      if (totalMs !== null) job.totalMs = totalMs;
       job.updatedAt = this.#now();
       return { result: structuredClone(job), changed: true };
     });
@@ -380,6 +388,12 @@ export class PersistentJobStore {
     try {
       const data = JSON.parse(await readFile(this.#filePath, 'utf8'));
       if (data.version !== 1 || !Array.isArray(data.jobs)) throw new Error('Unsupported job store format');
+      // 老 job 文件没有耗时字段，读取侧补缺省值，避免消费方逐个判空
+      for (const job of data.jobs) {
+        job.timeline ??= [];
+        job.totalMs ??= null;
+        job.clientTiming ??= null;
+      }
       return data;
     } catch (error) {
       if (error.code === 'ENOENT') return structuredClone(EMPTY_STORE);

@@ -116,3 +116,95 @@ export function insertVariable(text, cursor, name) {
   const snippet = `{{${name}}}`;
   return { text: value.slice(0, at) + snippet + value.slice(at), cursor: at + snippet.length };
 }
+
+// ——— 开发者模式：任务耗时日志的纯展示逻辑 ———
+// 输入为 bridge GET /v1/jobs 返回的 job 对象；输出全部是给 DOM 渲染用的字符串/结构化行，
+// 不碰 DOM 与 chrome API，node:test 直测。
+
+// 状态归类：决定任务行状态点的颜色（成功绿/警告黄/失败红/进行中蓝）。
+// cancelled* 是用户主动行为不算失败，归警告；needs_attention/expired 需要用户介入，归失败。
+export function jobStatusTone(status) {
+  switch (status) {
+    case 'succeeded': return 'success';
+    case 'succeeded_with_warnings':
+    case 'cancelled':
+    case 'cancelled_with_document': return 'warning';
+    case 'queued':
+    case 'running': return 'running';
+    default: return 'error';
+  }
+}
+
+// 状态中文标签，跟状态点并排展示
+export function jobStatusLabel(status) {
+  switch (status) {
+    case 'succeeded': return '成功';
+    case 'succeeded_with_warnings': return '有警告';
+    case 'failed': return '失败';
+    case 'needs_attention': return '需处理';
+    case 'expired': return '已过期';
+    case 'cancelled': return '已取消';
+    case 'cancelled_with_document': return '已取消（文档已建）';
+    case 'queued': return '排队中';
+    case 'running': return '进行中';
+    default: return String(status ?? '未知');
+  }
+}
+
+// 耗时格式化：<1s 显示毫秒（页面提取常在此区间），否则保留一位小数的秒
+export function formatDuration(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// 任务行总耗时列：进行中（未终态）显示「进行中」，终态无 totalMs（老数据）显示「—」
+export function jobTotalLabel(job) {
+  if (jobStatusTone(job?.status) === 'running') return '进行中';
+  return formatDuration(job?.totalMs);
+}
+
+// 开始时间 HH:MM:SS（本地时区）；缺 createdAt 时兜底
+export function formatClock(epochMs) {
+  if (typeof epochMs !== 'number' || !Number.isFinite(epochMs)) return '—';
+  const date = new Date(epochMs);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// 任务行标题：bridge 记录的剪藏标题优先；无标题回退来源 host，再退完整 URL
+export function jobDisplayTitle(job) {
+  const title = String(job?.title ?? '').trim();
+  if (title) return title;
+  try {
+    return new URL(job?.sourceUrl).host;
+  } catch {
+    return String(job?.sourceUrl ?? '') || '未知任务';
+  }
+}
+
+// stage 的 name 是机器标识，展示用中文名
+const STAGE_LABELS = { create_document: '创建文档', images: '图片处理' };
+
+// 展开明细行：页面提取（扩展侧 clientTiming）+ bridge timeline 按原顺序平铺。
+// 每行 { label, value, indent, failed }；indent 用于缩进层级（stage 0 / image 1 / cli 2）。
+export function jobDetailRows(job) {
+  const rows = [];
+  const extractMs = job?.clientTiming?.extractMs;
+  if (typeof extractMs === 'number') {
+    rows.push({ label: '页面提取', value: formatDuration(extractMs), indent: 0, failed: false });
+  }
+  for (const entry of job?.timeline ?? []) {
+    if (entry?.kind === 'stage') {
+      rows.push({ label: STAGE_LABELS[entry.name] ?? String(entry.name ?? ''), value: formatDuration(entry.ms), indent: 0, failed: false });
+    } else if (entry?.kind === 'image') {
+      // name 形如 image-<n>；失败时 detail 为原因
+      const label = String(entry.name ?? '').replace(/^image-/, '图片 ');
+      if (entry.detail) rows.push({ label, value: `失败：${entry.detail}`, indent: 1, failed: true });
+      else rows.push({ label, value: formatDuration(entry.ms), indent: 1, failed: false });
+    } else if (entry?.kind === 'cli') {
+      rows.push({ label: String(entry.name ?? ''), value: formatDuration(entry.ms), indent: 2, failed: false });
+    }
+  }
+  return rows;
+}

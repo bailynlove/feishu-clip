@@ -4,6 +4,7 @@ import { createDefaultPreset } from '../src/extension/presets.js';
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
+  jobStatusTone, jobStatusLabel, formatDuration, jobTotalLabel, formatClock, jobDisplayTitle, jobDetailRows,
 } from '../src/extension/options-state.js';
 
 function makeState(count = 3) {
@@ -153,4 +154,87 @@ test('insertVariable inserts {{name}} at the cursor and reports the new cursor',
 
 test('TEMPLATE_VARIABLES covers the v1 variable set (#30)', () => {
   assert.deepEqual(TEMPLATE_VARIABLES, ['title', 'url', 'host', 'date', 'time', 'datetime', 'content']);
+});
+
+// ——— 开发者模式：任务耗时日志展示逻辑 ———
+
+test('jobStatusTone buckets statuses into success/warning/error/running', () => {
+  assert.equal(jobStatusTone('succeeded'), 'success');
+  assert.equal(jobStatusTone('succeeded_with_warnings'), 'warning');
+  assert.equal(jobStatusTone('cancelled'), 'warning', '用户主动取消不算失败');
+  assert.equal(jobStatusTone('cancelled_with_document'), 'warning');
+  assert.equal(jobStatusTone('failed'), 'error');
+  assert.equal(jobStatusTone('needs_attention'), 'error');
+  assert.equal(jobStatusTone('expired'), 'error');
+  assert.equal(jobStatusTone('queued'), 'running');
+  assert.equal(jobStatusTone('running'), 'running');
+  assert.equal(jobStatusTone('something-new'), 'error', '未知状态按失败兜底，避免静默漏报');
+});
+
+test('jobStatusLabel gives Chinese labels for known statuses', () => {
+  assert.equal(jobStatusLabel('succeeded'), '成功');
+  assert.equal(jobStatusLabel('succeeded_with_warnings'), '有警告');
+  assert.equal(jobStatusLabel('failed'), '失败');
+  assert.equal(jobStatusLabel('running'), '进行中');
+  assert.equal(jobStatusLabel('brand_new_status'), 'brand_new_status', '未知状态原样透出');
+});
+
+test('formatDuration renders ms below one second and seconds above', () => {
+  assert.equal(formatDuration(320), '320ms');
+  assert.equal(formatDuration(93600), '93.6s');
+  assert.equal(formatDuration(1000), '1.0s');
+  assert.equal(formatDuration(null), '—');
+  assert.equal(formatDuration(Number.NaN), '—');
+  assert.equal(formatDuration(-5), '—');
+});
+
+test('jobTotalLabel shows 进行中 for non-terminal jobs and totalMs for terminal ones', () => {
+  assert.equal(jobTotalLabel({ status: 'running', totalMs: null }), '进行中');
+  assert.equal(jobTotalLabel({ status: 'queued' }), '进行中');
+  assert.equal(jobTotalLabel({ status: 'succeeded', totalMs: 93600 }), '93.6s');
+  assert.equal(jobTotalLabel({ status: 'failed', totalMs: null }), '—', '终态缺 totalMs 兜底');
+});
+
+test('formatClock renders HH:MM:SS with zero padding', () => {
+  const ms = new Date(2026, 0, 2, 3, 4, 5).getTime();
+  assert.equal(formatClock(ms), '03:04:05');
+  assert.equal(formatClock(undefined), '—');
+});
+
+test('jobDisplayTitle prefers title, falls back to host then raw url', () => {
+  assert.equal(jobDisplayTitle({ title: '  文章标题  ', sourceUrl: 'https://a.com/x' }), '文章标题');
+  assert.equal(jobDisplayTitle({ title: null, sourceUrl: 'https://blog.example.com/post/1?x=2' }), 'blog.example.com');
+  assert.equal(jobDisplayTitle({ sourceUrl: 'not a url' }), 'not a url');
+  assert.equal(jobDisplayTitle({}), '未知任务');
+});
+
+test('jobDetailRows flattens clientTiming and timeline with indent levels', () => {
+  const job = {
+    clientTiming: { extractMs: 800 },
+    timeline: [
+      { kind: 'stage', name: 'create_document', ms: 1200 },
+      { kind: 'stage', name: 'images', ms: 90000 },
+      { kind: 'image', name: 'image-1', ms: 3000 },
+      { kind: 'image', name: 'image-2', ms: 0, detail: '下载超时' },
+      { kind: 'cli', name: 'docs +update', ms: 1500 },
+    ],
+  };
+  assert.deepEqual(jobDetailRows(job), [
+    { label: '页面提取', value: '800ms', indent: 0, failed: false },
+    { label: '创建文档', value: '1.2s', indent: 0, failed: false },
+    { label: '图片处理', value: '90.0s', indent: 0, failed: false },
+    { label: '图片 1', value: '3.0s', indent: 1, failed: false },
+    { label: '图片 2', value: '失败：下载超时', indent: 1, failed: true },
+    { label: 'docs +update', value: '1.5s', indent: 2, failed: false },
+  ]);
+});
+
+test('jobDetailRows tolerates missing timing data', () => {
+  assert.deepEqual(jobDetailRows({}), []);
+  assert.deepEqual(jobDetailRows({ clientTiming: null, timeline: null }), []);
+  assert.deepEqual(
+    jobDetailRows({ timeline: [{ kind: 'stage', name: 'unknown_stage', ms: 100 }] }),
+    [{ label: 'unknown_stage', value: '100ms', indent: 0, failed: false }],
+    '未知 stage 名原样透出',
+  );
 });

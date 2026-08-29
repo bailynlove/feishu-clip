@@ -95,6 +95,34 @@
 .options .pc-form .ps-switch-row{margin-bottom:4px;padding:2px}
 .options .pc-form .ps-seg-opt{padding:7px;font-size:11.5px;border-radius:9px}
 
+/* 开发者模式任务日志：状态点沿用语义色（成功薄荷绿/警告黄/失败红/进行中天空蓝），
+   明细区限高滚动，行 indent 层级对应 stage/image/cli */
+.options .joblog-head{display:flex;align-items:center;justify-content:space-between;margin:6px 0 8px;border-top:1px solid #eef1f6;padding-top:10px}
+.options .joblog-head-title{font-size:12.5px;font-weight:700;color:#1a2233}
+.options .joblog-refresh{border:0;background:none;color:var(--brand-link);font-size:12px;font-weight:600;cursor:pointer;padding:0}
+.options .joblog-refresh:hover{text-decoration:underline}
+.options .joblog-status{font-size:12px;color:#9aa3b2;margin:4px 0}
+.options .joblog-status:empty{display:none}
+.options .joblog-list{display:flex;flex-direction:column;gap:6px}
+.options .joblog-item{border:1.5px solid #e2e7ee;border-radius:10px;background:#fff;margin-top:0}
+.options .joblog-item>summary{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:12.5px;font-weight:600;list-style:none;cursor:pointer}
+.options .joblog-item>summary::-webkit-details-marker{display:none}
+.options .joblog-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.options .joblog-dot.tone-success{background:#3ecf8e}
+.options .joblog-dot.tone-warning{background:#f0b429}
+.options .joblog-dot.tone-error{background:#ec5f67}
+.options .joblog-dot.tone-running{background:var(--brand-2)}
+.options .joblog-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1a2233}
+.options .joblog-total{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--brand-deep);white-space:nowrap}
+.options .joblog-time{font-size:11px;color:#9aa3b2;white-space:nowrap}
+.options .joblog-detail{max-height:180px;overflow-y:auto;border-top:1px solid #eef1f6;padding:8px 12px;font-size:12px}
+.options .joblog-row{display:flex;align-items:baseline;gap:8px;padding:2px 0;color:#3a4356}
+.options .joblog-row.indent-1{padding-left:14px}
+.options .joblog-row.indent-2{padding-left:28px;color:#6b7289}
+.options .joblog-row.failed{color:#962932}
+.options .joblog-row-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.options .joblog-row-value{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:nowrap}
+
 /* 设置页目标选择器面板：紧贴 chip 下方展开，行样式换蓝绿新设计语言
    （hover 天空蓝、选中薄荷绿，与 tab/switch/分段一致）。仅覆盖 .options 作用域，弹窗不动 */
 .options #picker-panel{margin-top:8px}

@@ -24,3 +24,13 @@ test('picker-more/back/retry start hidden (renderPicker toggles them)', () => {
     assert.ok(classAttr(id).includes('hidden'), `#${id} 初始应为 hidden`);
   }
 });
+
+// 开发者模式卡片（任务耗时日志）：开关初始关、日志区初始隐藏，由 options.js 按
+// chrome.storage.local 的 developerMode 开关
+test('devmode card exists with toggle off and joblog hidden initially', () => {
+  assert.match(html, /<h2>3\. 开发者模式<\/h2>/, '应有「3. 开发者模式」卡片');
+  assert.ok(!classAttr('devmode-toggle').includes('on'), '#devmode-toggle 初始应为关');
+  assert.ok(classAttr('joblog').includes('hidden'), '#joblog 初始应隐藏');
+  assert.ok(html.includes('id="joblog-refresh"'), '应有刷新按钮');
+  assert.ok(html.includes('id="joblog-list"'), '应有任务列表容器');
+});

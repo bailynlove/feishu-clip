@@ -49,6 +49,16 @@ function jobView(job) {
   return visible;
 }
 
+// 扩展侧上报的提取耗时：只接受有限数，超界视为客户端时钟/版本异常，直接 400
+function validateClientTiming(value) {
+  if (value === undefined || value === null) return null;
+  const extractMs = value?.extractMs;
+  if (typeof extractMs !== 'number' || !Number.isFinite(extractMs) || extractMs < 0 || extractMs > 600_000) {
+    throw Object.assign(new Error('clientTiming.extractMs 必须是 0-600000 的有限数'), { status: 400, code: 'CLIENT_TIMING_INVALID' });
+  }
+  return { extractMs };
+}
+
 const WIKI_TOKEN = /^[0-9A-Za-z_-]{1,64}$/;
 const MAX_CURSOR_LENGTH = 512;
 
@@ -161,11 +171,28 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         }
       }
 
+      if (request.method === 'GET' && request.url?.startsWith('/v1/jobs') && !request.url.startsWith('/v1/jobs/')) {
+        const { pathname, query, limit: parsedLimit } = parseTargetQuery(request, ['limit']);
+        if (pathname !== '/v1/jobs') return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);
+        // parseTargetQuery 的默认 limit 是 50（targets 端点约定），任务列表默认 20
+        const limit = query.get('limit') === null ? 20 : parsedLimit;
+        // 任务列表给排查耗时用：新的在前，剥掉 snapshot 全文，只留标题与耗时字段
+        const jobs = (await store.list()).reverse().slice(0, limit).map((job) => ({
+          ...jobView(job),
+          title: typeof job.snapshot?.title === 'string' ? job.snapshot.title : null,
+          timeline: job.timeline ?? [],
+          totalMs: job.totalMs ?? null,
+          clientTiming: job.clientTiming ?? null,
+        }));
+        return send(response, 200, { ok: true, jobs }, origin);
+      }
+
       if (request.method === 'POST' && request.url === '/v1/jobs') {
         const body = await readJson(request);
         const isSpaceTarget = body.destination?.kind === 'space';
         if (!body.attemptId || !(isSpaceTarget ? body.destination?.spaceId : body.destination?.nodeToken)) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
         validateSnapshot(body.snapshot);
+        const clientTiming = validateClientTiming(body.clientTiming);
         try { await lark.validateDestination(body.destination); }
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
         const submitted = await store.submit({
@@ -174,6 +201,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           snapshot: body.snapshot,
           destination: body.destination,
           includeImages: body.includeImages !== false,
+          clientTiming,
         });
         executor.kick();
         return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: jobView(submitted.job) }, origin);

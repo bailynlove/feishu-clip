@@ -52,8 +52,9 @@ async function handle(message) {
     case 'STATUS': return bridge('/v1/status');
     case 'GET_SETTINGS': {
       await migratePresets();
-      // activeAttempt 供 job 恢复；presets/defaultPresetId 供弹窗与设置页（#35/#36）
-      return localGet(['activeAttempt', 'presets', 'defaultPresetId']);
+      // activeAttempt 供 job 恢复；presets/defaultPresetId 供弹窗与设置页（#35/#36）；
+      // developerMode 供设置页开发者模式开关（缺省 false）
+      return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode']);
     }
     case 'SAVE_PRESETS': {
       // 设置页整体写回预设列表 + 默认预设（#35）；列表为空或默认预设悬空时拒绝/修复
@@ -80,7 +81,10 @@ async function handle(message) {
       return bridge(`/v1/targets/nodes?${params}`);
     }
     case 'CLIP': {
+      // 开发者模式耗时诊断：页面提取在扩展侧完成，bridge 看不到这段，故由扩展计时后随 job 上报考勤
+      const extractStart = performance.now();
       const snapshot = await extractActiveTab();
+      const extractMs = Math.round(performance.now() - extractStart);
       // 弹窗可编辑标题（#36）：渲染/手改结果随 CLIP 发来，清洗后覆盖；为空回退 extractor 标题
       const title = sanitizeClipTitle(message.title);
       if (title) snapshot.title = title;
@@ -88,10 +92,12 @@ async function handle(message) {
       // ctx 在标题覆盖之后构建，正文模板看到的即最终标题
       snapshot.markdown = renderBody(message.customBody, buildContext(snapshot));
       const attemptId = crypto.randomUUID();
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages } });
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, clientTiming: { extractMs } } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }
+    // 任务日志（开发者模式）：bridge 侧统一记录耗时时间线，设置页透传展示
+    case 'LIST_JOBS': return bridge('/v1/jobs?limit=20');
     // 预览懒提取（#37）：只抓快照、不建 job；弹窗首次展开预览时调用
     case 'EXTRACT': return extractActiveTab();
     case 'GET_JOB': {

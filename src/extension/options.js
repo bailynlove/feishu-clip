@@ -5,6 +5,7 @@ import { describeDestination, renderPicker, wirePicker } from './picker-view.js'
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
+  jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
 } from './options-state.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -417,6 +418,92 @@ async function initBridge() {
   }
 }
 
+// ——— 开发者模式：开关直写 chrome.storage.local（options 页是 trusted context，无需经 background
+// 中转；与 SAVE_PRESETS 不同，这是单 key 不涉及归约校验）。任务日志经 LIST_JOBS 从 bridge 读取。 ———
+function renderJobLog(jobs) {
+  const status = $('#joblog-status');
+  const list = $('#joblog-list');
+  list.replaceChildren();
+  if (!jobs.length) {
+    status.textContent = '暂无任务记录';
+    return;
+  }
+  status.textContent = '';
+  for (const job of jobs) {
+    const item = document.createElement('details');
+    item.className = 'joblog-item';
+    const summary = document.createElement('summary');
+    // 状态点颜色归类（绿/黄/红/蓝）在纯函数里，这里只拼 class
+    const dot = document.createElement('span');
+    dot.className = `joblog-dot tone-${jobStatusTone(job.status)}`;
+    dot.title = jobStatusLabel(job.status);
+    const name = document.createElement('span');
+    name.className = 'joblog-name';
+    name.textContent = jobDisplayTitle(job);
+    const total = document.createElement('span');
+    total.className = 'joblog-total';
+    total.textContent = jobTotalLabel(job);
+    const time = document.createElement('span');
+    time.className = 'joblog-time';
+    time.textContent = formatClock(job.createdAt);
+    summary.append(dot, name, total, time);
+    item.append(summary);
+
+    const detail = document.createElement('div');
+    detail.className = 'joblog-detail';
+    const rows = jobDetailRows(job);
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'joblog-row';
+      empty.textContent = '暂无耗时明细';
+      detail.append(empty);
+    }
+    for (const row of rows) {
+      const line = document.createElement('div');
+      line.className = `joblog-row indent-${row.indent}${row.failed ? ' failed' : ''}`;
+      const label = document.createElement('span');
+      label.className = 'joblog-row-label';
+      label.textContent = row.label;
+      const value = document.createElement('span');
+      value.className = 'joblog-row-value';
+      value.textContent = row.value;
+      line.append(label, value);
+      detail.append(line);
+    }
+    item.append(detail);
+    list.append(item);
+  }
+}
+
+async function loadJobLog() {
+  const status = $('#joblog-status');
+  status.textContent = '加载中…';
+  try {
+    const result = await message({ type: 'LIST_JOBS' });
+    renderJobLog(result.jobs ?? []);
+  } catch {
+    // bridge 离线/未配对/老版本无此端点，统一提示未连接（任务日志是诊断功能，不细究原因）
+    $('#joblog-list').replaceChildren();
+    status.textContent = 'Bridge 未连接，无法读取任务日志';
+  }
+}
+
+function setDeveloperMode(on) {
+  const toggle = $('#devmode-toggle');
+  toggle.classList.toggle('on', on);
+  toggle.setAttribute('aria-pressed', String(on));
+  $('#joblog').classList.toggle('hidden', !on);
+  if (on) loadJobLog();
+}
+
+$('#devmode-toggle').addEventListener('click', async () => {
+  const on = !$('#devmode-toggle').classList.contains('on');
+  setDeveloperMode(on);
+  await chrome.storage.local.set({ developerMode: on });
+});
+
+$('#joblog-refresh').addEventListener('click', () => loadJobLog());
+
 async function init() {
   const settings = await message({ type: 'GET_SETTINGS' });
   state = { presets: settings.presets ?? [], defaultPresetId: settings.defaultPresetId ?? null };
@@ -424,6 +511,8 @@ async function init() {
   renderTabs();
   syncEditor();
   initBridge();
+  // 开关为开时展开日志区并自动加载一次（缺省 false 不加载）
+  setDeveloperMode(settings.developerMode === true);
 }
 
 init();

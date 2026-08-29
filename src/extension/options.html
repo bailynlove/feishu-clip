@@ -76,6 +76,19 @@
   </div>
 </section>
 
+<section class="ps-card">
+  <h2>3. 开发者模式</h2>
+  <button class="ps-switch-row" id="devmode-toggle" type="button" aria-pressed="false">
+    <span class="ps-switch-text"><span class="ps-switch-label">开发者模式</span><span class="ps-switch-sub">记录并展示每次剪藏任务的耗时与日志</span></span>
+    <span class="ps-switch"></span>
+  </button>
+  <div id="joblog" class="hidden">
+    <div class="joblog-head"><span class="joblog-head-title">最近任务</span><button id="joblog-refresh" class="joblog-refresh" type="button">刷新</button></div>
+    <div id="joblog-status" class="joblog-status"></div>
+    <div id="joblog-list" class="joblog-list"></div>
+  </div>
+</section>
+
 <div id="status" class="ps-note hidden"></div>
 </main>
 <div id="toast" class="ps-toast" role="status"></div>

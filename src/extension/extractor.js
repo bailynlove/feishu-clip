@@ -69,6 +69,7 @@
 
       const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
       const clonedImages = [...root.querySelectorAll('img')];
+      const preTails = new Map(); // pre 元素 → 当前锚点插入点，保证同一 pre 多图锚点按原顺序排列
       for (const [cloneIndex, clone] of clonedImages.entries()) {
         if (cloneIndex >= 30) { clone.remove(); continue; }
         const index = images.length;
@@ -77,7 +78,20 @@
         const image = { label: original.alt?.trim() || `图片 ${index + 1}`, source };
         try { Object.assign(image, await readableBytes(source)); } catch (error) { image.browserWarning = error.message; }
         images.push(image);
-        clone.replaceWith(document.createTextNode(`\n\n[[FEISHU_CLIP_IMAGE:${index}]]\n\n`));
+        const anchor = document.createTextNode(`\n\n[[FEISHU_CLIP_IMAGE:${index}]]\n\n`);
+        // pre 内的 img 原地替换会让锚点成为围栏代码块里的一行文本，导入飞书后落在
+        // code 块（block_type 14）里——bridge 既定位不到也删不掉。改为移出最外层 pre
+        // （嵌套 pre 时 closest 只拿到内层），让锚点渲染成代码块之后的独立段落
+        let pre = clone.closest('pre');
+        if (pre) {
+          while (pre.parentElement?.closest('pre')) pre = pre.parentElement.closest('pre');
+          clone.remove();
+          const tail = preTails.get(pre) || pre;
+          tail.after(anchor);
+          preTails.set(pre, anchor);
+        } else {
+          clone.replaceWith(anchor);
+        }
       }
 
       return render(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();

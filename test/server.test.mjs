@@ -17,10 +17,17 @@ test('Bridge enforces Origin+credential, validates target, queues and completes 
     authStatus: async () => ({ ready: true, identity: 'tester' }),
     validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
     run: async (args) => {
-      // +fetch 返回不含锚点的内容，锚点定位不到则走 media-insert 顶层插入路径
-      if (args[0] === 'docs' && args[1] === '+fetch') return { ok: true, data: { document: { content: '' } } };
+      // 新管线一次 blocks 拉取定位锚点：返回含锚点段落的块列表
+      if (args[0] === 'api' && args[1] === 'GET' && args[2].endsWith('/blocks')) {
+        return { ok: true, data: { has_more: false, items: [
+          { block_id: 'root', parent_id: '', block_type: 1, children: ['p0'] },
+          { block_id: 'p0', parent_id: 'root', block_type: 2, text: { elements: [{ text_run: { content: '[[FEISHU_CLIP_IMAGE:0]]' } }] } },
+        ] } };
+      }
+      if (args[0] === 'api' && args[1] === 'POST') return { ok: true, data: { children: [{ block_id: 'i0' }] } };
+      if (args[0] === 'api') return { ok: true, data: {} };
       assert.equal(args[0], 'docs');
-      if (args.includes('--file')) assert.equal(path.isAbsolute(args[args.indexOf('--file') + 1]), false);
+      if (args[1] === '+media-upload') return { ok: true, data: { file_token: 'tok' } };
       return { ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } };
     },
   };
@@ -58,6 +65,66 @@ test('Bridge enforces Origin+credential, validates target, queues and completes 
     assert.equal(job.status, 'succeeded');
     assert.equal(job.document.url, 'https://example.feishu.cn/wiki/docx-1');
     assert.equal(job.snapshot, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('GET /v1/jobs lists recent jobs with timing fields and without snapshots; clientTiming is validated', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-jobs-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'another-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
+    run: async () => ({ ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } }),
+  };
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+
+    assert.equal((await call('/v1/jobs')).status, 401, '未配对不得读取任务列表');
+
+    // clientTiming 校验：非法 extractMs 一律 400
+    const snapshot = { title: '计时网页', sourceUrl: 'https://example.com/timed', capturedAt: new Date().toISOString(), markdown: '# 正文' };
+    for (const bad of [{ extractMs: -1 }, { extractMs: 600_001 }, { extractMs: 'fast' }, { extractMs: Number.NaN }, 'fast']) {
+      const rejected = await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: 'aaaaaaaa-1111-4111-8111-111111111111', destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot, clientTiming: bad }) });
+      assert.equal(rejected.status, 400, `clientTiming=${JSON.stringify(bad)} 应被拒绝`);
+    }
+
+    const first = await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: 'bbbbbbbb-1111-4111-8111-111111111111', destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot, clientTiming: { extractMs: 250 } }) });
+    assert.equal(first.status, 202);
+    const second = await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: 'cccccccc-1111-4111-8111-111111111111', destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot: { ...snapshot, title: '第二篇' } }) });
+    assert.equal(second.status, 202);
+
+    for (const badLimit of ['0', '51', 'abc', '1.5']) {
+      assert.equal((await call(`/v1/jobs?limit=${badLimit}`, { headers: auth })).status, 400, `limit=${badLimit} 应被拒绝`);
+    }
+
+    const listed = await (await call('/v1/jobs', { headers: auth })).json();
+    assert.equal(listed.ok, true);
+    assert.equal(listed.jobs.length, 2);
+    assert.equal(listed.jobs[0].attemptId, 'cccccccc-1111-4111-8111-111111111111', '新的在前');
+    assert.equal(listed.jobs[1].attemptId, 'bbbbbbbb-1111-4111-8111-111111111111');
+    assert.equal(listed.jobs[0].title, '第二篇');
+    assert.ok(Array.isArray(listed.jobs[0].timeline));
+    assert.ok('totalMs' in listed.jobs[0] && 'clientTiming' in listed.jobs[0]);
+    assert.deepEqual(listed.jobs[1].clientTiming, { extractMs: 250 });
+    assert.ok(!JSON.stringify(listed).includes('# 正文'), '列表不得泄露 snapshot 正文');
+
+    const limited = await (await call('/v1/jobs?limit=1', { headers: auth })).json();
+    assert.equal(limited.jobs.length, 1);
+    assert.equal(limited.jobs[0].attemptId, 'cccccccc-1111-4111-8111-111111111111');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });

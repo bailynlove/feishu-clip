@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -307,5 +307,69 @@ test('unsupported protocol strings are rejected without mutating the job', async
       /Unknown failure stage/,
     );
     assert.equal((await store.get('attempt-1')).status, 'running');
+  });
+});
+
+test('clientTiming is persisted on submit and defaults to null', async () => {
+  await withStore(async ({ store }) => {
+    const withTiming = await store.submit({
+      attemptId: 'attempt-1',
+      sourceUrl: 'https://example.test/article',
+      clientTiming: { extractMs: 123 },
+    });
+    assert.deepEqual(withTiming.job.clientTiming, { extractMs: 123 });
+
+    const without = await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/other' });
+    assert.equal(without.job.clientTiming, null);
+    assert.deepEqual((await store.get('attempt-1')).clientTiming, { extractMs: 123 });
+  });
+});
+
+test('complete and fail persist timeline and totalMs; old job files read with defaults', async () => {
+  await withStore(async ({ store, filePath }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article' });
+    await store.claim('attempt-1', 'worker-a');
+    await store.beginCreate('attempt-1', 'worker-a');
+    await store.recordDocument('attempt-1', 'worker-a', { documentId: 'docx-1', url: 'https://example.test/docx-1' });
+    const timeline = [
+      { kind: 'cli', name: 'docs +create', ms: 1200 },
+      { kind: 'stage', name: 'create_document', ms: 1500 },
+      { kind: 'image', name: 'image-1', ms: 800, detail: '失败消息' },
+    ];
+    const done = await store.complete('attempt-1', 'worker-a', { warnings: [], timeline, totalMs: 9300 });
+    assert.deepEqual(done.timeline, timeline);
+    assert.equal(done.totalMs, 9300);
+
+    const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+    assert.deepEqual(persisted.jobs[0].timeline, timeline);
+    assert.equal(persisted.jobs[0].totalMs, 9300);
+
+    await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/fail' });
+    await store.claim('attempt-2', 'worker-a');
+    const failed = await store.fail('attempt-2', 'worker-a', { stage: 'create_document', error: 'boom', timeline: [], totalMs: 50 });
+    assert.deepEqual(failed.timeline, []);
+    assert.equal(failed.totalMs, 50);
+
+    // 终态不带耗时字段时按缺省落盘
+    await store.submit({ attemptId: 'attempt-3', sourceUrl: 'https://example.test/plain' });
+    await store.claim('attempt-3', 'worker-a');
+    await store.beginCreate('attempt-3', 'worker-a');
+    await store.recordDocument('attempt-3', 'worker-a', { documentId: 'docx-3', url: 'https://example.test/docx-3' });
+    const plain = await store.complete('attempt-3', 'worker-a');
+    assert.deepEqual(plain.timeline, []);
+    assert.equal(plain.totalMs, null);
+
+    // 老 job 文件没有这些字段，读取侧补缺省值
+    const data = JSON.parse(await readFile(filePath, 'utf8'));
+    for (const job of data.jobs) {
+      delete job.timeline;
+      delete job.totalMs;
+      delete job.clientTiming;
+    }
+    await writeFile(filePath, JSON.stringify(data));
+    const legacy = await store.get('attempt-1');
+    assert.deepEqual(legacy.timeline, []);
+    assert.equal(legacy.totalMs, null);
+    assert.equal(legacy.clientTiming, null);
   });
 });
