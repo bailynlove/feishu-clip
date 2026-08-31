@@ -72,8 +72,11 @@
       const preTails = new Map(); // pre 元素 → 当前锚点插入点，保证同一 pre 多图锚点按原顺序排列
       for (const [cloneIndex, clone] of clonedImages.entries()) {
         if (cloneIndex >= 30) { clone.remove(); continue; }
-        const index = images.length;
         const original = originalImages[cloneIndex] || clone;
+        // 原页面未渲染的图片（display:none 子树内，如代码行内 hover 提示图）没有布局盒，
+        // 用户看不见，剪藏也不应出现；跳过并从克隆树移除，避免产生孤立锚点
+        if (typeof original.getClientRects === 'function' && original.getClientRects().length === 0) { clone.remove(); continue; }
+        const index = images.length;
         const source = candidate(original);
         const image = { label: original.alt?.trim() || `图片 ${index + 1}`, source };
         // 飞书建图片块需要原始宽高（空块默认 100x100 且绑定 token 不重算），

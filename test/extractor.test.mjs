@@ -186,6 +186,31 @@ test('图片未加载完成（naturalWidth 为 0/缺失）时不带尺寸字段'
   assert.equal('width' in result.images[1], false, '属性缺失时也不应带 width');
 });
 
+// 隐藏图片回归（labuladong 页面）：代码行内的 hover 提示图（span.code-extend-content 默认
+// display:none，悬停才显示）嵌在 pre 里，原页面不可见却被提取；又因 pre 锚点规则被移到
+// 最后一个代码块之后，剪藏文档末尾凭空多出两张图。未渲染（无布局盒）的图片必须跳过。
+test('display:none 容器内的图片：不提取、不产生锚点', async () => {
+  const hidden = img('https://example.test/hidden.png');
+  hidden.getClientRects = () => []; // display:none 子树内的元素没有布局盒
+  const visibleImg = img('https://example.test/visible.png');
+  visibleImg.getClientRects = () => [{ width: 100, height: 100 }];
+  const doc = {
+    title: '隐藏图片',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('pre', [textNode('const c = 3;\n'), hidden]),
+      element('p', [visibleImg]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 1, '隐藏图片不应进入 images');
+  assert.equal(result.images[0].source, 'https://example.test/visible.png');
+  assert.ok(!result.markdown.includes('hidden.png') && !result.markdown.includes('[[FEISHU_CLIP_IMAGE:1]]'), '隐藏图片不应产生锚点');
+});
+
 test('pre 外的图片：仍在原地替换为锚点', async () => {
   const doc = {
     title: '普通图片',
