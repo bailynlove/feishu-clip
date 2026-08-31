@@ -6,6 +6,18 @@ import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitl
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
+// job 恢复只属于发起它的页面：跨页面恢复会把旧文档的成功态（含「查看飞书文档」按钮）
+// 铺到无关页面上，看起来像"没点保存就存好了"。忽略 hash 差异（同页锚点跳转不算换页）；
+// 缺字段或 URL 非法一律按不匹配处理——宁可不恢复，不错恢复。
+export function isJobForPage(job, pageUrl) {
+  const strip = (value) => {
+    try { const url = new URL(value); url.hash = ''; return url.href; } catch { return null; }
+  };
+  const source = strip(job?.sourceUrl);
+  const page = strip(pageUrl);
+  return source !== null && page !== null && source === page;
+}
+
 export function describeJobView(job, { recovered = false } = {}) {
   if (job.status === 'succeeded' || job.status === 'succeeded_with_warnings') {
     const warning = job.status === 'succeeded_with_warnings';

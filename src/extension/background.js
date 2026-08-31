@@ -1,5 +1,6 @@
 import { ensurePresets } from './presets.js';
 import { buildContext, renderBody, sanitizeClipTitle } from './templates.js';
+import { isJobForPage, TERMINAL_STATUSES } from './popup-state.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 
@@ -102,7 +103,14 @@ async function handle(message) {
     case 'EXTRACT': return extractActiveTab();
     case 'GET_JOB': {
       const result = await bridge(`/v1/jobs/${message.attemptId}`);
-      if (['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document'].includes(result.job.status)) {
+      const job = result.job;
+      // 跨页面命中旧 attempt（弹窗在未剪藏过的页面打开）：终态顺手清指针，进行中的保留
+      // （回到原页面仍可恢复），但两种情况都不把 job 返回给弹窗展示
+      if (job && message.pageUrl && !isJobForPage(job, message.pageUrl)) {
+        if (TERMINAL_STATUSES.has(job.status)) await chrome.storage.local.remove('activeAttempt');
+        return { ...result, job: null };
+      }
+      if (job && TERMINAL_STATUSES.has(job.status)) {
         await chrome.storage.local.remove('activeAttempt');
       }
       return result;

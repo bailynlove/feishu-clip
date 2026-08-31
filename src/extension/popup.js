@@ -4,6 +4,7 @@ import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTit
 
 let attemptId = null;
 let recoveredAttempt = false;
+let currentTabUrl = null;
 let pollTimer = null;
 let popupPicker = null;
 let presetState = null;
@@ -157,6 +158,7 @@ function closePicker() {
 
 async function inspect() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  currentTabUrl = tab?.url || null;
   try { $('#page-host').textContent = new URL(tab.url).host; } catch { $('#page-host').textContent = ''; }
   const settings = await message({ type: 'GET_SETTINGS' });
   presetState = initPopupPresets(settings, tab);
@@ -183,7 +185,9 @@ async function inspect() {
 async function poll() {
   clearTimeout(pollTimer);
   try {
-    const { job } = await message({ type: 'GET_JOB', attemptId });
+    const { job } = await message({ type: 'GET_JOB', attemptId, pageUrl: currentTabUrl });
+    // job 为 null = 该 attempt 属于别的页面（跨页恢复）：静默丢弃，不展示任何状态
+    if (!job) { attemptId = null; recoveredAttempt = false; return; }
     const view = describeJobView(job, { recovered: recoveredAttempt });
     if (view.kind === 'success' || view.kind === 'warning') {
       show(view.message, view.kind);

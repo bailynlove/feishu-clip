@@ -24,6 +24,7 @@ import {
   composeClip,
   clipFilename,
   setMenuOpen,
+  isJobForPage,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -521,4 +522,14 @@ test('action menu state is session-only and toggles independently', () => {
   assert.equal(state.menuOpen, true);
   assert.equal(currentPreset(state).action, 'feishu', 'opening the menu never touches the preset action');
   assert.equal(setMenuOpen(state, false).menuOpen, false);
+});
+
+test('isJobForPage 只对发起页面恢复 job，跨页面不恢复', () => {
+  const job = { sourceUrl: 'https://blog.example.com/a?page=1' };
+  assert.equal(isJobForPage(job, 'https://blog.example.com/a?page=1'), true);
+  assert.equal(isJobForPage(job, 'https://blog.example.com/a?page=1#section'), true, 'hash 差异不算换页');
+  assert.equal(isJobForPage(job, 'https://blog.example.com/b'), false, '不同路径不恢复');
+  assert.equal(isJobForPage(job, 'https://other.example.com/a?page=1'), false, '不同 host 不恢复');
+  assert.equal(isJobForPage({ sourceUrl: null }, 'https://blog.example.com/a'), false, '缺 sourceUrl 宁可不恢复');
+  assert.equal(isJobForPage(job, 'not-a-url'), false, '非法页面 URL 不恢复');
 });
