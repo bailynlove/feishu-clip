@@ -1,5 +1,5 @@
 // 手写 mini-DOM，仅覆盖被测脚本用到的 DOM API（仓库测试零依赖约定，不引 linkedom）。
-// 支持：nodeType/textContent/childNodes/append/cloneNode/querySelectorAll(单标签)/getAttribute/remove/replaceWith/after/closest(单标签)。
+// 支持：nodeType/textContent/childNodes/append/cloneNode/querySelectorAll(单标签)/getAttribute/setAttribute/removeAttribute/remove/replaceWith/after/closest(单标签)。
 
 function link(parent, kids) {
   return kids.filter((kid) => kid && typeof kid === 'object').map((kid) => {
@@ -28,6 +28,8 @@ export function element(tag, children = []) {
       node.childNodes.push(...link(node, kids));
     },
     getAttribute(name) { return node.attributes[name] ?? null; },
+    setAttribute(name, value) { node.attributes[name] = String(value); },
+    removeAttribute(name) { delete node.attributes[name]; },
     cloneNode(deep) {
       const copy = element(tag);
       copy.attributes = { ...node.attributes };

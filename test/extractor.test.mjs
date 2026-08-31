@@ -211,6 +211,152 @@ test('display:none 容器内的图片：不提取、不产生锚点', async () =
   assert.ok(!result.markdown.includes('hidden.png') && !result.markdown.includes('[[FEISHU_CLIP_IMAGE:1]]'), '隐藏图片不应产生锚点');
 });
 
+// 悬浮内容（labuladong 代码行内的灯泡 hover 面板，span.code-extend-content 默认 display:none）：
+// 用户在原页面悬停时能看到这些内容，剪藏直接丢弃可惜、混进正文又无标注。约定：在悬浮触发位置
+// 留 `悬浮内容{i}` 标记，真正的内容作为注释段落 `悬浮内容{i}: 内容` 排到所在块（如代码块）之后。
+function hoverPanel(content) {
+  const node = element('span', [textNode(content)]);
+  node.getClientRects = () => []; // display:none 子树没有布局盒，悬停才显示
+  return node;
+}
+
+test('pre 内悬浮面板：标记留在代码块内原位，注释排在代码块后', async () => {
+  const panel = hoverPanel('拓扑排序两种实现：BFS 基于入度，DFS 基于后序遍历逆序。');
+  const doc = {
+    title: '悬浮内容',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('pre', [textNode('def topo_sort():\n    pass\n'), panel]),
+      element('p', [textNode('代码之后的段落')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  const fence = result.markdown.match(/```\n([\s\S]*?)```/);
+  assert.ok(fence, '应有围栏代码块');
+  assert.ok(fence[1].includes('悬浮内容1'), '标记应留在悬浮触发位置（代码块内）');
+  assert.ok(!fence[1].includes('拓扑排序两种实现'), '悬浮内容本身不应混进代码块文本');
+  const note = result.markdown.indexOf('悬浮内容1: 拓扑排序两种实现');
+  assert.ok(note > result.markdown.lastIndexOf('```'), '注释应排在代码块之后');
+  assert.equal(panel.getAttribute('data-feishu-clip-hover'), null, '提取后应清理原页面上的打标属性');
+});
+
+test('同一代码块多个悬浮面板：标记与注释都按出现顺序编号排列', async () => {
+  const doc = {
+    title: '多悬浮面板',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('pre', [
+        textNode('line1\n'), hoverPanel('第一个面板的讲解内容'),
+        textNode('line2\n'), hoverPanel('第二个面板的讲解内容'),
+      ]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  const fence = result.markdown.match(/```\n([\s\S]*?)```/);
+  assert.ok(fence[1].indexOf('悬浮内容1') > -1 && fence[1].indexOf('悬浮内容1') < fence[1].indexOf('悬浮内容2'), '标记应按原顺序编号');
+  const note1 = result.markdown.indexOf('悬浮内容1: 第一个面板');
+  const note2 = result.markdown.indexOf('悬浮内容2: 第二个面板');
+  assert.ok(note1 > result.markdown.lastIndexOf('```') && note2 > note1, '注释应按序排在代码块后');
+});
+
+test('普通段落内的悬浮面板：注释排在该段落之后', async () => {
+  const doc = {
+    title: '段落悬浮',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('p', [textNode('前文'), hoverPanel('对前文术语的补充解释内容'), textNode('后文')]),
+      element('p', [textNode('下一段落内容')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  const markerAt = result.markdown.indexOf('前文悬浮内容1后文');
+  const noteAt = result.markdown.indexOf('悬浮内容1: 对前文术语的补充解释内容');
+  const nextPara = result.markdown.indexOf('下一段落内容');
+  assert.ok(markerAt > -1, '标记应留在段落原位');
+  assert.ok(noteAt > markerAt && noteAt < nextPara, '注释应紧跟所在段落之后、下一段之前');
+});
+
+test('隐藏但文本过短（<2 字符）的容器不当作悬浮内容', async () => {
+  const dot = element('span', [textNode('·')]);
+  dot.getClientRects = () => [];
+  const doc = {
+    title: '无文本隐藏容器',
+    body: element('body', [element('p', [textNode(LONG), dot])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('悬浮内容'), '不应产生悬浮标记或注释');
+});
+
+// 纯图片悬浮面板（labuladong 的实际形态：.code-extend-content 里只有一张示意图，无文字）：
+// 图片作为该面板的内容保留——按面板编号标注、锚点移到所在代码块后，而不是像 0.1.1 那样直接丢弃。
+test('纯图片悬浮面板：图片提取并按面板编号标注，锚点排在代码块后', async () => {
+  const panel = element('span', []);
+  panel.getClientRects = () => [];
+  const hiddenImg = img('https://example.test/panel-only.png', '');
+  hiddenImg.getClientRects = () => [];
+  panel.append(hiddenImg);
+  const doc = {
+    title: '纯图片悬浮面板',
+    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('def f():\n'), panel]), element('p', [textNode('后续段落')])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 1, '面板内的图片应作为悬浮内容保留');
+  assert.equal(result.images[0].label, '悬浮内容1');
+  const fence = result.markdown.match(/```\n([\s\S]*?)```/);
+  assert.ok(fence[1].includes('悬浮内容1'), '触发位置应留标记');
+  const anchorAt = result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:0]]');
+  assert.ok(anchorAt > result.markdown.lastIndexOf('```'), '图片锚点应排在代码块之后');
+  assert.ok(!result.markdown.includes('悬浮内容1:'), '无文字的面板不应产生空注释');
+});
+
+test('悬浮面板内既有文字又有图片：注释和图片都按编号保留', async () => {
+  const panel = hoverPanel('带示意图的悬浮讲解内容');
+  const hiddenImg = img('https://example.test/panel-inner.png', '');
+  hiddenImg.getClientRects = () => [];
+  panel.append(hiddenImg);
+  const doc = {
+    title: '悬浮面板带图',
+    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('code\n'), panel])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 1);
+  assert.equal(result.images[0].label, '悬浮内容1');
+  assert.ok(result.markdown.includes('悬浮内容1: 带示意图的悬浮讲解内容'), '面板文字应作为注释保留');
+});
+
+test('display:none 散图（不在悬浮面板内）仍不提取', async () => {
+  const lone = img('https://example.test/lone-hidden.png');
+  lone.getClientRects = () => [];
+  const doc = {
+    title: '散落的隐藏图',
+    body: element('body', [element('p', [textNode(LONG)]), element('div', [lone])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 0);
+  assert.ok(!result.markdown.includes('悬浮内容'));
+});
+
 test('pre 外的图片：仍在原地替换为锚点', async () => {
   const doc = {
     title: '普通图片',

@@ -30,6 +30,37 @@
 
     const inline = new Set(['A', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'CODE', 'SMALL', 'MARK', 'DEL', 'S', 'SUP', 'SUB']);
     function text(node) { return (node.textContent || '').replace(/\s+/g, ' ').trim(); }
+
+    // 悬浮内容（悬停才展示的隐藏面板，如代码行内的灯泡注解）：
+    // 原页面 display:none 子树没有布局盒，用户悬停时才可见。直接在正文里渲染会无标注地混进来，
+    // 丢弃又可惜。约定：触发位置留 `悬浮内容{i}` 标记，内容作为注释段落排到所在块之后。
+    const HOVER_ATTR = 'data-feishu-clip-hover';
+    const HOVER_LIMIT = 20;
+    const JUNK_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'NAV', 'ASIDE', 'FORM', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SVG', 'CANVAS', 'IFRAME']);
+    // 布局盒只在原页面有意义（克隆树未挂载），所以打标在原树上做、随克隆带入；
+    // 返回打标过的原元素列表，调用方负责用后 removeAttribute 还原页面
+    function tagHoverPanels(sourceRoot) {
+      const tagged = [];
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType !== Node.ELEMENT_NODE || JUNK_TAGS.has(child.tagName)) continue;
+          if (typeof child.getClientRects === 'function' && child.getClientRects().length === 0) {
+            const content = text(child);
+            // 纯图片面板（labuladong 的 .code-extend-content 只有一张示意图）也算悬浮内容；
+            // 文本过短又无图的隐藏容器（装饰点、占位）不算
+            const hasImage = child.querySelectorAll('img').length > 0;
+            if ((content.length >= 2 || hasImage) && tagged.length < HOVER_LIMIT) {
+              child.setAttribute(HOVER_ATTR, String(tagged.length + 1));
+              tagged.push({ original: child, content });
+            }
+            continue;
+          }
+          walk(child);
+        }
+      };
+      walk(sourceRoot);
+      return tagged;
+    }
     function render(node, depth = 0) {
       if (node.nodeType === Node.TEXT_NODE) return node.nodeValue.replace(/\s+/g, ' ');
       if (node.nodeType !== Node.ELEMENT_NODE) return '';
@@ -62,9 +93,11 @@
       return children();
     }
 
-    // 单根提取：清理 + 图片管线 + 渲染。images/browserBytes 跨根共享（占位符索引连续、流量预算合并）
+    // 单根提取：清理 + 图片管线 + 悬浮内容管线 + 渲染。images/browserBytes 跨根共享（占位符索引连续、流量预算合并）
     async function extractFrom(sourceRoot) {
+      const tagged = tagHoverPanels(sourceRoot); // 打标须在克隆前，标记随克隆带入
       const root = sourceRoot.cloneNode(true);
+      for (const { original } of tagged) original.removeAttribute(HOVER_ATTR); // 还原原页面，标记只留在克隆树
       root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe').forEach((node) => node.remove());
 
       const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
@@ -73,12 +106,23 @@
       for (const [cloneIndex, clone] of clonedImages.entries()) {
         if (cloneIndex >= 30) { clone.remove(); continue; }
         const original = originalImages[cloneIndex] || clone;
-        // 原页面未渲染的图片（display:none 子树内，如代码行内 hover 提示图）没有布局盒，
-        // 用户看不见，剪藏也不应出现；跳过并从克隆树移除，避免产生孤立锚点
-        if (typeof original.getClientRects === 'function' && original.getClientRects().length === 0) { clone.remove(); continue; }
+        // 原页面未渲染的图片（display:none 子树内）没有布局盒。若在打标的悬浮面板内
+        // （悬停可见，如代码行内灯泡提示图），作为该面板的内容保留并按面板编号标注；
+        // 否则用户看不见，剪藏也不应出现，跳过并从克隆树移除，避免产生孤立锚点
+        let hoverSeq = null;
+        let hoverHolder = null; // 克隆树里的面板元素，锚点兜底用
+        if (typeof original.getClientRects === 'function' && original.getClientRects().length === 0) {
+          let holder = clone.parentElement;
+          while (holder && holder !== root) {
+            const seq = holder.getAttribute(HOVER_ATTR);
+            if (seq !== null) { hoverSeq = seq; hoverHolder = holder; break; }
+            holder = holder.parentElement;
+          }
+          if (hoverSeq === null) { clone.remove(); continue; }
+        }
         const index = images.length;
         const source = candidate(original);
-        const image = { label: original.alt?.trim() || `图片 ${index + 1}`, source };
+        const image = { label: hoverSeq ? `悬浮内容${hoverSeq}` : original.alt?.trim() || `图片 ${index + 1}`, source };
         // 飞书建图片块需要原始宽高（空块默认 100x100 且绑定 token 不重算），
         // 从 naturalWidth/Height 拿解码后的真实像素；未加载完成时为 0，只带正整数
         const { naturalWidth, naturalHeight } = original;
@@ -99,10 +143,51 @@
           const tail = preTails.get(pre) || pre;
           tail.after(anchor);
           preTails.set(pre, anchor);
+        } else if (hoverSeq) {
+          // 悬浮面板内的图（不在 pre 里）：面板稍后会被替换为标记，原地锚点会随面板丢失，
+          // 移到所在块（段落/列表项等）之后；找不到块级祖先时跟在面板元素后（面板替换不影响兄弟节点）
+          let block = clone.parentElement;
+          while (block && block !== root && !/^(P|LI|BLOCKQUOTE|TABLE|H[1-6])$/.test(block.tagName)) block = block.parentElement;
+          const target = block && block !== root ? block : hoverHolder || clone.parentElement;
+          clone.remove();
+          const tail = preTails.get(target) || target;
+          tail.after(anchor);
+          preTails.set(target, anchor);
         } else {
           clone.replaceWith(anchor);
         }
       }
+
+      // 悬浮内容管线：打标元素原位替换为 `悬浮内容{i}` 标记，内容作为注释段落插到
+      // 所在块（pre/p/li/blockquote/table/标题）之后；同一块多条注释按序追加（同 pre 锚点的 tail 手法）。
+      // 落在被清理掉的垃圾子树（nav/aside 等）里的打标元素在克隆树中已不存在，自然跳过。
+      const blockTails = new Map();
+      const hoverWalk = (node) => {
+        for (const child of [...node.childNodes]) {
+          if (child.nodeType !== Node.ELEMENT_NODE) continue;
+          const seq = child.getAttribute(HOVER_ATTR);
+          if (seq !== null) {
+            const item = tagged[Number(seq) - 1];
+            const marker = document.createTextNode(`悬浮内容${seq}`);
+            child.replaceWith(marker);
+            if (item.content) { // 纯图片面板没有文字可注，图片已由图片管线按编号标注
+              let block = marker.parentElement;
+              while (block && block !== root && !/^(P|PRE|LI|BLOCKQUOTE|TABLE|H[1-6])$/.test(block.tagName)) block = block.parentElement;
+              const note = document.createTextNode(`\n\n悬浮内容${seq}: ${item.content}\n\n`);
+              if (block && block !== root) {
+                const tail = blockTails.get(block) || block;
+                tail.after(note);
+                blockTails.set(block, note);
+              } else {
+                marker.after(note); // 没有块级祖先（直接挂在根上）：注释紧跟标记
+              }
+            }
+            continue; // 面板已替换为标记，不再下钻
+          }
+          hoverWalk(child);
+        }
+      };
+      hoverWalk(root);
 
       return render(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     }
