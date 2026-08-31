@@ -20,15 +20,48 @@ test('snapshot markers become traceable image anchors and unsafe sources are pla
   assert.match(prepared.markdown, /剪藏尝试：attempt-1/);
 });
 
-test('includeImages keeps raw anchors for media-insert to locate', () => {
+test('includeImages：有浏览器字节的图片保留锚点供上传管线定位', () => {
   const prepared = prepareMarkdown({
     sourceUrl: 'https://example.com/article',
     capturedAt: '2026-08-12T00:00:00.000Z',
     markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]',
-    images: [{ label: 'public', source: 'https://cdn.example.com/a.png' }],
+    images: [{ label: 'protected', source: 'https://example.com/a.png', bytesBase64: 'AA==' }],
   }, 'attempt-1', { includeImages: true });
   assert.match(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:0\]\]/);
   assert.doesNotMatch(prepared.markdown, /原图链接/);
+});
+
+// 内联 URL 管线（#45，spike 结论见 docs/research/inline-image-url-import.md）：
+// 无浏览器字节的公开图片直接写成 Markdown 图片语法，由飞书服务端下载成图片块，
+// 不再走「Bridge 下载 + 逐图 4 次 API 调用」的上传管线
+test('includeImages：无字节的公开图片内联为 Markdown 图片语法，不产生锚点', () => {
+  const prepared = prepareMarkdown({
+    sourceUrl: 'https://example.com/article',
+    capturedAt: '2026-08-12T00:00:00.000Z',
+    markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
+    images: [
+      { label: 'pub[lic]', source: 'https://cdn.example.com/a.png' },
+      { label: 'protected', source: 'https://example.com/b.png', bytesBase64: 'AA==' },
+    ],
+  }, 'attempt-1', { includeImages: true });
+  assert.match(prepared.markdown, /!\[pub\\\[lic\\\]\]\(https:\/\/cdn\.example\.com\/a\.png\)/, '内联图片语法，label 里的方括号要转义');
+  assert.doesNotMatch(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:0\]\]/, '内联图片不留锚点');
+  assert.match(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:1\]\]/, '有字节的图片保留锚点');
+  assert.equal(prepared.images[0].inline, true, '内联图片要打 inline 标记供 executor 跳过');
+  assert.notEqual(prepared.images[1].inline, true);
+});
+
+test('includeImages：无字节且 URL 不安全的图片直接降级为文本，不进上传管线', () => {
+  const prepared = prepareMarkdown({
+    sourceUrl: 'https://example.com/article',
+    capturedAt: '2026-08-12T00:00:00.000Z',
+    markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'blob图', source: 'blob:https://example.com/id' }],
+  }, 'attempt-1', { includeImages: true });
+  assert.match(prepared.markdown, /图片：blob图/);
+  assert.doesNotMatch(prepared.markdown, /blob:https/);
+  assert.doesNotMatch(prepared.markdown, /FEISHU_CLIP_IMAGE/);
+  assert.notEqual(prepared.images[0].inline, true, 'URL 不安全不能内联');
 });
 
 // 图片阶段集成测试：脚本化假 lark 模拟 CLI 应答，验证新管线——
@@ -96,6 +129,7 @@ function fakeLark({ items, failOn } = {}) {
       if (head === 'docs' && sub === '+create') return { ok: true, data: { document: { document_id: 'doc1', url: 'https://doc1' } } };
       if (head === 'docs' && sub === '+media-upload') return { ok: true, data: { file_token: 'tok1' } };
       if (head === 'docs' && (sub === '+update' || sub === '+media-insert')) return { ok: true, data: {} };
+      if (head === 'wiki' && sub === '+node-delete') return { ok: true, data: {} };
       if (head === 'api') {
         const [, method, apiPath] = args;
         if (method === 'GET' && apiPath.endsWith('/blocks')) return { ok: true, data: { items, has_more: false } };
@@ -221,8 +255,9 @@ test('images in the same parent are inserted in reverse index order so indices s
   assert.match(inserts[1].join(' '), /"index":1/, '再处理下标小的锚点 p0');
   const deletes = apiCalls(lark.calls, 'DELETE', 'batch_delete');
   assert.equal(deletes.length, 2);
-  // 插入图片块后锚点顺延一位，删除区间跟着 +1
-  assert.deepEqual(deleteBody(deletes[0]), { start_index: 4, end_index: 5 });
+  // 分阶段插入（#46）下同父块所有图片块先就位，锚点被每个「下标 ≤ 它」的同父锚点顶右一位：
+  // p1 原始下标 3 → 当前 3+2=5；p0 原始下标 1 → 当前 1+1=2
+  assert.deepEqual(deleteBody(deletes[0]), { start_index: 5, end_index: 6 });
   assert.deepEqual(deleteBody(deletes[1]), { start_index: 2, end_index: 3 });
 });
 
@@ -272,9 +307,10 @@ test('a failed image keeps a warning, cleans up the empty block and falls back t
   await store.settled;
   assert.equal(store.completed.warnings.length, 1);
   assert.match(store.completed.warnings[0], /图片 2：upload boom/);
-  // 失败图片留下的空图片块要清掉：锚点 p1 在下标 1，图片块插在下标 1，删除 [1,2)
+  // 失败图片留下的空图片块要清掉：p1 原始下标 1，被两个「下标 ≤ 它」的同父锚点顶右，
+  // 空块当前下标 = 1+2-1 = 2，删除 [2,3)
   const deletes = apiCalls(lark.calls, 'DELETE', 'batch_delete').map(deleteBody);
-  assert.ok(deletes.some((body) => body.start_index === 1 && body.end_index === 2), '应清掉失败图片的空块');
+  assert.ok(deletes.some((body) => body.start_index === 2 && body.end_index === 3), '应清掉失败图片的空块');
   // 失败的锚点最后用 str_replace 换成可读文案
   const fallback = lark.calls.find((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:1]]'));
   assert.ok(fallback, '失败锚点应走 str_replace 回退');
@@ -354,6 +390,105 @@ test('anchor embedded in list-item text falls back to media-insert and never bat
   assert.ok(store.completed.timeline.some((entry) => entry.kind === 'image' && entry.name === 'image-1'), 'fallback 路径也计 image 时间线条目');
 });
 
+// 分阶段写入（#46）：块操作（建块/绑定/删锚点）推进文档版本必须串行，
+// 媒体上传不动文档版本，集中并行——可观察契约是调用顺序：全部建块 → 全部上传 → 全部绑定
+test('上传管线分阶段：全部建块完成后才上传，全部上传完成后才绑定', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
+    images: [{ label: 'a', bytesBase64: PNG_BYTES }, { label: 'b', bytesBase64: PNG_BYTES }],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0', 'x0', 'p1']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+    textBlock('x0', 'doc1', '中间'),
+    textBlock('p1', 'doc1', '[[FEISHU_CLIP_IMAGE:1]]'),
+  ];
+  const lark = fakeLark({ items });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  const phases = lark.calls.map((args) => {
+    if (args[0] === 'api' && args[1] === 'POST' && args[2].includes('/children')) return 'create-block';
+    if (args[1] === '+media-upload') return 'upload';
+    if (args[0] === 'api' && args[1] === 'PATCH') return 'bind';
+    if (args[0] === 'api' && args[1] === 'DELETE') return 'delete-anchor';
+    return null;
+  }).filter(Boolean);
+  assert.deepEqual(phases, ['create-block', 'create-block', 'upload', 'upload', 'bind', 'delete-anchor', 'bind', 'delete-anchor']);
+});
+
+// 建块失败的下标换算（code-review 发现的边界）：低位锚点建块失败时没有块顶位，
+// 高位锚点的删除下标只能按「建块成功数」右移，否则会误删正文块
+test('同父块内低位锚点建块失败：高位锚点下标按实际建块成功数换算', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
+    images: [{ label: 'a', bytesBase64: PNG_BYTES }, { label: 'b', bytesBase64: PNG_BYTES }],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0', 'x0', 'p1']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+    textBlock('x0', 'doc1', '中间'),
+    textBlock('p1', 'doc1', '[[FEISHU_CLIP_IMAGE:1]]'),
+  ];
+  // 低位锚点 p0（父块内下标 0）建块失败
+  const lark = fakeLark({ items, failOn: (args) => args[0] === 'api' && args[1] === 'POST' && args.some((arg) => String(arg).includes('"index":0')) });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /图片 1/);
+  // p1 原始下标 2，只有自己的图片块顶位（p0 没建成）→ 当前下标 2+1=3，删 [3,4)
+  const deletes = apiCalls(lark.calls, 'DELETE', 'batch_delete').map(deleteBody);
+  assert.deepEqual(deletes, [{ start_index: 3, end_index: 4 }], '高位锚点只能按建块成功的数量右移');
+  // 建块失败的锚点仍在文档里，走 str_replace 回退
+  assert.ok(lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:0]]')));
+});
+
+// 频控退避（#46 AC）：429/99991400 带抖动重试，其他错误不重试
+test('媒体上传遇到 99991400 频控时退避重试并最终成功', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', bytesBase64: PNG_BYTES }],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items });
+  let uploads = 0;
+  const baseRun = lark.run.bind(lark);
+  lark.run = async (args, options) => {
+    if (args[1] === '+media-upload') {
+      uploads += 1;
+      if (uploads === 1) throw Object.assign(new Error('rate limited'), { code: '99991400' });
+    }
+    return baseRun(args, options);
+  };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(uploads, 2, '第一次 99991400 后应退避重试一次');
+});
+
+test('非频控错误不重试，直接进失败回退', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', bytesBase64: PNG_BYTES }],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items, failOn: (args) => args[1] === '+media-upload' });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 1, '普通错误不应重试');
+  assert.equal(store.completed.warnings.length, 1);
+});
+
 test('standalone anchor in a bullet block is located natively regardless of block type', async () => {
   const job = fakeJob({
     markdown: '# T\n\n- [[FEISHU_CLIP_IMAGE:0]]',
@@ -373,4 +508,116 @@ test('standalone anchor in a bullet block is located natively regardless of bloc
   const deletes = apiCalls(lark.calls, 'DELETE', 'batch_delete').map(deleteBody);
   assert.deepEqual(deletes, [{ start_index: 1, end_index: 2 }]);
   assert.ok(!lark.calls.some((args) => args[1] === '+media-insert'));
+});
+
+// 内联 URL 管线（#45）：无字节图片由飞书服务端下载，executor 不做任何逐图调用
+test('内联图片不下载不上传，只有锚点图片走块管线', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
+    images: [
+      { label: 'inline', source: 'https://cdn.example.com/a.png' },
+      { label: 'upload', bytesBase64: PNG_BYTES },
+    ],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p1']),
+    textBlock('p1', 'doc1', '[[FEISHU_CLIP_IMAGE:1]]'),
+  ];
+  const lark = fakeLark({ items });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 1, '只有锚点图片上传');
+  assert.equal(apiCalls(lark.calls, 'POST', '/children').length, 1, '只有锚点图片建块');
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'image' && entry.name === 'image-1' && entry.detail === 'inline-url'), '内联图片在时间线里留痕');
+});
+
+test('全部是内联图片时不做 blocks 拉取和任何逐图调用', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'inline', source: 'https://cdn.example.com/a.png' }],
+  });
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: [] });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 0, '没有锚点图片时不需要拉块列表');
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 0);
+});
+
+// 服务端下载失败（degrade_code=2108）：失败图在文档里无残留（spike 实测），
+// 只能删档重建并把失败图转回锚点管线——最多重建一次
+test('服务端下载失败的图片：删档重建并转入锚点管线', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', source: 'https://nonexistent.invalid/a.png' }],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items });
+  let createCount = 0;
+  const baseRun = lark.run.bind(lark);
+  lark.run = async (args, options) => {
+    if (args[0] === 'docs' && args[1] === '+create') {
+      createCount += 1;
+      if (createCount === 1) {
+        return {
+          ok: true,
+          data: {
+            document: { document_id: 'doc1', url: 'https://doc1' },
+            warnings: ['degrade_code=2108,msg=Image download failed. image URL: https://nonexistent.invalid/a.png. Verify that the image URL is accessible'],
+          },
+        };
+      }
+    }
+    return baseRun(args, options);
+  };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(createCount, 2, '首次创建带 degrade warning 后应重建一次');
+  const deleted = lark.calls.find((args) => args[0] === 'wiki' && args[1] === '+node-delete');
+  assert.ok(deleted && deleted.includes('doc1'), '重建前删掉旧文档');
+  assert.ok(deleted.includes('--yes'), 'node-delete 是高危命令，要带 --yes');
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 1, '重建后走锚点管线');
+  // nonexistent.invalid 必然 DNS 失败：Bridge 也下不到，回退为含原图链接的可读文案
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /图片 1/);
+  assert.ok(lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:0]]')), '失败锚点应走 str_replace 回退');
+});
+
+test('重建后仍 degrade 不再重试，直接按现状完成', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', source: 'https://nonexistent.invalid/a.png' }],
+  });
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items });
+  let createCount = 0;
+  const baseRun = lark.run.bind(lark);
+  lark.run = async (args, options) => {
+    if (args[0] === 'docs' && args[1] === '+create') {
+      createCount += 1;
+      return {
+        ok: true,
+        data: {
+          document: { document_id: 'doc1', url: 'https://doc1' },
+          warnings: ['degrade_code=2108,msg=Image download failed. image URL: https://nonexistent.invalid/a.png, HTTP status: 404.'],
+        },
+      };
+    }
+    return baseRun(args, options);
+  };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(createCount, 2, '最多重建一次');
+  assert.ok(store.completed, '仍应正常完成（失败图走锚点管线的自身回退）');
 });
