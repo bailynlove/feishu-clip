@@ -621,3 +621,84 @@ test('重建后仍 degrade 不再重试，直接按现状完成', async () => {
   assert.equal(createCount, 2, '最多重建一次');
   assert.ok(store.completed, '仍应正常完成（失败图走锚点管线的自身回退）');
 });
+
+
+// iframe 转写（#48）：占位符段落 → 飞书 iframe 块（block_type 26，与用户手动「预览视图」同型，
+// spike 实测 children API 可创建）。建块插在锚点下标处、锚点顺延一位后删除；失败降级为链接并警告
+function iframeJob(iframes) {
+  const job = fakeJob({ markdown: '# T\n\n[[FEISHU_CLIP_IFRAME:0]]', images: [] });
+  job.snapshot.iframes = iframes;
+  return job;
+}
+function iframeAnchorItems() {
+  return [containerBlock('doc1', '', 1, ['p0']), textBlock('p0', 'doc1', '[[FEISHU_CLIP_IFRAME:0]]')];
+}
+
+test('iframe 占位符转写为 block_type 26 并删除锚点段落', async () => {
+  const url = 'https://labuladong.online/algo-visualize/tutorial/uf-native/';
+  const job = iframeJob([{ url, title: '算法可视化 - uf-native' }]);
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: iframeAnchorItems() });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  const [insert] = apiCalls(lark.calls, 'POST', '/children');
+  const body = JSON.parse(insert[insert.indexOf('--data') + 1]);
+  assert.equal(body.children[0].block_type, 26);
+  assert.equal(body.children[0].iframe.component.iframe_type, 99);
+  assert.equal(body.children[0].iframe.component.url, encodeURIComponent(url), 'url 需 encodeURIComponent（用户手动块的实测结构）');
+  const [del] = apiCalls(lark.calls, 'DELETE', 'batch_delete');
+  assert.deepEqual(deleteBody(del), { start_index: 1, end_index: 2 }, '建块后锚点顺延一位再删');
+});
+
+test('iframe 建块失败时降级为标题链接段落并警告', async () => {
+  const job = iframeJob([{ url: 'https://example.test/widget/', title: '面板' }]);
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: iframeAnchorItems(), failOn: (args) => args[0] === 'api' && args[1] === 'POST' && args[2].includes('/children') });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /面板/);
+  const fix = lark.calls.find((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IFRAME:0]]'));
+  assert.ok(fix, '失败占位符应走 str_replace 回退');
+  assert.equal(fix[fix.indexOf('--content') + 1], '[面板](https://example.test/widget/)');
+});
+
+test('iframe 占位符定位不到独立块时降级为链接并警告', async () => {
+  const job = iframeJob([{ url: 'https://example.test/widget/', title: '面板' }]);
+  const store = fakeStore(job);
+  // 锚点混在其他文本里（非独立成块），locateAnchors 返回 null
+  const items = [containerBlock('doc1', '', 1, ['p0']), textBlock('p0', 'doc1', '前缀 [[FEISHU_CLIP_IFRAME:0]] 后缀')];
+  const lark = fakeLark({ items });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(store.completed.warnings.length, 1);
+  const fix = lark.calls.find((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IFRAME:0]]'));
+  assert.ok(fix, '定位不到的占位符应 str_replace 成链接');
+  assert.equal(fix[fix.indexOf('--content') + 1], '[面板](https://example.test/widget/)');
+});
+
+test('快照没有 iframes 字段时不拉块列表、零调用', async () => {
+  const job = fakeJob({ markdown: '# T\n\n正文', images: [] });
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: [] });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 0);
+  assert.equal(apiCalls(lark.calls, 'POST', '/children').length, 0);
+});
+
+// code-review 发现的边界：listBlocks 等整体性失败不应把剪藏判死，剩余占位符全部降级为链接
+test('iframe 阶段整体性失败（块列表拉取抛错）：占位符全部降级，任务仍完成', async () => {
+  const job = iframeJob([{ url: 'https://example.test/widget/', title: '面板' }]);
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: iframeAnchorItems(), failOn: (args) => args[0] === 'api' && args[1] === 'GET' && args[2].endsWith('/blocks') });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.ok(store.completed, '任务应完成而非失败');
+  assert.equal(store.failed, null);
+  assert.equal(store.completed.warnings.length, 1);
+  const fix = lark.calls.find((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IFRAME:0]]'));
+  assert.ok(fix, '占位符应降级为链接');
+});

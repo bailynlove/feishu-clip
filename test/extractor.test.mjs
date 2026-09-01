@@ -11,7 +11,7 @@ const extractorCode = await readFile(new URL('../src/extension/extractor.js', im
 
 function runExtractor(doc) {
   const context = vm.createContext({
-    document: { createTextNode: (value) => textNode(value), ...doc },
+    document: { createTextNode: (value) => textNode(value), createElement: (tag) => element(tag), ...doc },
     location: new URL('https://example.test/'),
     URL,
     Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
@@ -355,6 +355,173 @@ test('display:none 散图（不在悬浮面板内）仍不提取', async () => {
   assert.equal(result.error, undefined);
   assert.equal(result.images.length, 0);
   assert.ok(!result.markdown.includes('悬浮内容'));
+});
+
+// 公式误判回归（labuladong 并查集页面）：KaTeX 的 math > semantics > annotation 存 TeX 源码，
+// 浏览器 UA 样式对 annotation display:none（无布局盒），被悬浮检测误打标——正文出现
+// 「O(1)悬浮内容1O(1)」、段落末尾跟着「悬浮内容1: O(1)」。MathML 子树永远不是悬浮内容。
+test('KaTeX 公式的 MathML annotation（TeX 源码，display:none）不误判为悬浮内容', async () => {
+  const annotation = element('annotation', [textNode('O(1)')]);
+  annotation.getClientRects = () => []; // annotation 不渲染，无布局盒
+  const math = element('math', [element('semantics', [element('mrow', [textNode('O(1)')]), annotation])]);
+  const katex = element('span', [
+    element('span', [math]), // .katex-mathml，视觉隐藏但有 1px 布局盒
+    element('span', [textNode('O(1)')]), // .katex-html，可见副本
+  ]);
+  const doc = {
+    title: '公式页面',
+    body: element('body', [element('p', [textNode(LONG), textNode(' 可以在 '), katex, textNode(' 时间内合并')])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('悬浮内容'), '公式不得产生悬浮标记或注释');
+});
+
+test('同一块的多个悬浮注释：每条各自占一段（换行分隔）', async () => {
+  const doc = {
+    title: '多注释换行',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('pre', [
+        textNode('line1\n'), hoverPanel('第一个面板的讲解内容'),
+        textNode('line2\n'), hoverPanel('第二个面板的讲解内容'),
+      ]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.match(result.markdown, /悬浮内容1: 第一个面板的讲解内容\n\n悬浮内容2: 第二个面板的讲解内容/, '注释应各自成段，不得连在一行');
+});
+
+// iframe 提取（#47）：正文里的 iframe（如 labuladong 折叠 details 里的算法可视化面板）不再被
+// 当垃圾清除，快照带出 url/title，正文原位留 [[FEISHU_CLIP_IFRAME:i]] 占位符供 bridge 转写。
+function iframe(src, title = '') {
+  const node = element('iframe');
+  if (src !== null) node.setAttribute('src', src);
+  if (title) node.setAttribute('title', title);
+  return node;
+}
+
+test('正文 iframe：快照带出 url/title，原位留占位符', async () => {
+  const doc = {
+    title: 'iframe 页面',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('p', [textNode('算法可视化')]),
+      element('details', [iframe('https://example.test/algo-visualize/uf/', '算法可视化 - uf')]),
+      element('p', [textNode('后续内容')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  // vm 跨域对象与测试侧原型不同，不能用 deepEqual，逐字段断言
+  assert.equal(result.iframes.length, 1);
+  assert.equal(result.iframes[0].url, 'https://example.test/algo-visualize/uf/');
+  assert.equal(result.iframes[0].title, '算法可视化 - uf');
+  const anchorAt = result.markdown.indexOf('[[FEISHU_CLIP_IFRAME:0]]');
+  assert.ok(anchorAt > result.markdown.indexOf('算法可视化') && anchorAt < result.markdown.indexOf('后续内容'), '占位符应在 iframe 原位');
+});
+
+test('iframe src 为相对路径时按页面 URL resolve', async () => {
+  const doc = {
+    title: '相对 src',
+    body: element('body', [element('p', [textNode(LONG)]), iframe('/widget/demo/', '')]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.iframes[0].url, 'https://example.test/widget/demo/');
+  assert.equal(result.iframes[0].title, 'iframe 1', '无 title 时用默认标注');
+});
+
+test('无 src / 非 http(s) / 跟踪尺寸（≤2px）的 iframe 跳过', async () => {
+  const noSrc = iframe(null);
+  const jsSrc = iframe('javascript:void(0)');
+  const tiny = iframe('https://example.test/pixel');
+  tiny.getBoundingClientRect = () => ({ width: 1, height: 1 }); // 跟踪像素
+  const doc = {
+    title: '脏 iframe',
+    body: element('body', [element('p', [textNode(LONG)]), noSrc, jsSrc, tiny]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.iframes.length, 0);
+  assert.ok(!result.markdown.includes('FEISHU_CLIP_IFRAME'), '跳过的 iframe 不留占位符');
+});
+
+test('iframe 超过 10 个时只保留前 10 个', async () => {
+  const iframes = Array.from({ length: 12 }, (_, i) => iframe(`https://example.test/w${i}/`, `w${i}`));
+  const doc = {
+    title: '大量 iframe',
+    body: element('body', [element('p', [textNode(LONG)]), ...iframes]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.iframes.length, 10);
+  assert.ok(result.markdown.includes('[[FEISHU_CLIP_IFRAME:9]]'));
+  assert.ok(!result.markdown.includes('[[FEISHU_CLIP_IFRAME:10]]'));
+});
+
+// 折叠 details 里的 iframe（labuladong 可视化面板的真实形态）未渲染，getBoundingClientRect 全零；
+// 0x0 不等于跟踪像素（跟踪像素是渲染出来的 1-2px 小点），必须保留
+test('折叠 details 内 0x0 的 iframe 保留', async () => {
+  const collapsed = iframe('https://example.test/algo-visualize/uf/', '算法可视化');
+  collapsed.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  const doc = {
+    title: '折叠面板',
+    body: element('body', [element('p', [textNode(LONG)]), element('details', [collapsed])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.iframes.length, 1);
+  assert.equal(result.iframes[0].url, 'https://example.test/algo-visualize/uf/');
+});
+
+// code-review 发现的边界：iframe 直接挂在 details 下、与 summary 文本混排时，文本节点占位符的
+// \n\n 会被 render 压成空格，占位符糊进 summary 段落，bridge 定位不到独立锚点块。占位符必须
+// 用 P 元素，保证任何父容器下都独立成段
+test('iframe 与 summary 文本同在 details 内：占位符仍独立成段', async () => {
+  const doc = {
+    title: 'details 混排',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('details', [element('summary', [textNode('算法可视化')]), iframe('https://example.test/viz/', '演示')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  const line = result.markdown.split('\n').find((l) => l.includes('FEISHU_CLIP_IFRAME'));
+  assert.equal(line?.trim(), '[[FEISHU_CLIP_IFRAME:0]]', '占位符应独立成行，不得混入 summary 文本');
+});
+
+// 同为 code-review 边界：折叠容器里既有文本又有 iframe 时，若被悬浮打标，iframe 占位符会随
+// 面板一起被替换成标记——快照有 iframes 条目但正文没占位符。含 iframe 的隐藏容器不打标
+test('含 iframe 的隐藏容器不作悬浮打标，iframe 占位符保留', async () => {
+  const panel = element('div', [textNode('折叠起来的补充说明文字'), iframe('https://example.test/viz2/', '面板')]);
+  panel.getClientRects = () => []; // 折叠 details 内容，无布局盒
+  const doc = {
+    title: '隐藏容器带 iframe',
+    body: element('body', [element('p', [textNode(LONG)]), element('details', [panel])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.iframes.length, 1, 'iframe 仍应提取');
+  assert.ok(result.markdown.includes('[[FEISHU_CLIP_IFRAME:0]]'), '占位符不应被悬浮标记吞掉');
+  assert.ok(!result.markdown.includes('悬浮内容'), '含 iframe 的容器不应产生悬浮标记');
 });
 
 test('pre 外的图片：仍在原地替换为锚点', async () => {

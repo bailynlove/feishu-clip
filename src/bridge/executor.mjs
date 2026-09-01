@@ -105,14 +105,13 @@ function blockText(block) {
 }
 
 // 从全量块列表一次性定位所有锚点：块 id、父块 id、父块内下标都在块数据里，
-// 不再需要每张图做 keyword 探测（旧流程 14 图约 22s）。
+// 不再需要每个锚点做 keyword 探测（旧流程 14 图约 22s）。
 // 只接受独立成块的锚点（块文本 trim 后严格等于锚点）：混在列表项/代码块文本中间的
-// 锚点若原生删除会把有内容的块误删，那种返回 null 由调用方走 media-insert 回退
-function locateAnchors(items, count) {
+// 锚点若原生删除会把有内容的块误删，那种返回 null 由调用方走降级回退
+function locateAnchors(items, markers) {
   const byId = new Map(items.map((item) => [item.block_id, item]));
   const anchors = [];
-  for (let index = 0; index < count; index += 1) {
-    const marker = `[[FEISHU_CLIP_IMAGE:${index}]]`;
+  for (const marker of markers) {
     const block = items.find((item) => blockText(item).trim() === marker);
     const parent = block ? byId.get(block.parent_id) : null;
     const at = parent?.children?.indexOf(block.block_id) ?? -1;
@@ -250,6 +249,47 @@ export class ClipExecutor {
 
       const warnings = [];
       let totalBytes = 0;
+      // 图片/iframe 两个阶段共用的文档块操作辅助（原图片阶段内部函数提升）：
+      // 频控退避、原生块 API 调用、全量块拉取、占位符文本替换
+      const apiRaw = (method, apiPath, extra = []) =>
+        run(['api', method, apiPath, ...extra, '--format', 'json'], { timeoutMs: 15_000 });
+      // 频控（429/99991400）带抖动的指数退避，最多重试 2 次；其他错误直接抛
+      const withBackoff = async (fn) => {
+        for (let attempt = 0; ; attempt += 1) {
+          try { return await fn(); } catch (error) {
+            const text = `${error?.code || ''} ${error?.message || ''}`;
+            if (attempt >= 2 || !/429|99991400/.test(text)) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.random() * 300));
+          }
+        }
+      };
+      const api = (method, apiPath, extra = []) => withBackoff(() => apiRaw(method, apiPath, extra));
+      const removeRange = (parentId, start, end) =>
+        api('DELETE', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${parentId}/children/batch_delete`, [
+          '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ start_index: start, end_index: end }),
+        ]);
+      // 一次全量块拉取定位所有锚点，取代旧流程每锚点的 keyword 探测（14 图约 22s）；
+      // 锚点段落无论在哪（顶层/表格单元格/引用里），父块与下标都能直接算出来
+      const listBlocks = async () => {
+        const blocks = [];
+        let pageToken = null;
+        do {
+          const params = { page_size: 500 };
+          if (pageToken) params.page_token = pageToken;
+          const page = await api('GET', `/open-apis/docx/v1/documents/${document.documentId}/blocks`, ['--params', JSON.stringify(params)]);
+          blocks.push(...(page.data?.items || []));
+          pageToken = page.data?.has_more ? page.data?.page_token || null : null;
+        } while (pageToken);
+        return blocks;
+      };
+      // str_replace 只用于降级路径：把残留占位符换成可读的链接文本，正文不留占位符
+      const replaceMarker = async (marker, replacement) => {
+        await run([
+          'docs', '+update', '--as', 'user', '--doc', document.documentId,
+          '--command', 'str_replace', '--doc-format', 'markdown',
+          '--pattern', marker, '--content', replacement, '--format', 'json',
+        ], { timeoutMs: 15_000 });
+      };
       if (job.includeImages) {
         const imagesStageAt = Date.now();
         try {
@@ -257,31 +297,7 @@ export class ClipExecutor {
           // 写入分阶段：建块串行 → 上传并行 → 绑定删锚点串行（#46）。180s 上限对剩余场景留足余量
           const deadline = Date.now() + 180_000;
           const anchorOf = (index) => `[[FEISHU_CLIP_IMAGE:${index}]]`;
-          // str_replace 只用于失败路径：把残留锚点换成可读的链接文本，正文不留占位符
-          const replaceAnchor = async (index, replacement) => {
-            await run([
-              'docs', '+update', '--as', 'user', '--doc', document.documentId,
-              '--command', 'str_replace', '--doc-format', 'markdown',
-              '--pattern', anchorOf(index), '--content', replacement, '--format', 'json',
-            ], { timeoutMs: 15_000 });
-          };
-          const apiRaw = (method, apiPath, extra = []) =>
-            run(['api', method, apiPath, ...extra, '--format', 'json'], { timeoutMs: 15_000 });
-          // 频控（429/99991400）带抖动的指数退避，最多重试 2 次；其他错误直接抛
-          const withBackoff = async (fn) => {
-            for (let attempt = 0; ; attempt += 1) {
-              try { return await fn(); } catch (error) {
-                const text = `${error?.code || ''} ${error?.message || ''}`;
-                if (attempt >= 2 || !/429|99991400/.test(text)) throw error;
-                await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.random() * 300));
-              }
-            }
-          };
-          const api = (method, apiPath, extra = []) => withBackoff(() => apiRaw(method, apiPath, extra));
-          const removeRange = (parentId, start, end) =>
-            api('DELETE', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${parentId}/children/batch_delete`, [
-              '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ start_index: start, end_index: end }),
-            ]);
+          const replaceAnchor = (index, replacement) => replaceMarker(anchorOf(index), replacement);
           const dimensionsOf = (item) => (item.size ? { width: item.size.width, height: item.size.height } : {});
 
           // 内联图片（#45）已由飞书服务端在导入时下载，这里只留痕，不做任何逐图调用
@@ -290,21 +306,9 @@ export class ClipExecutor {
           for (const { index } of partitioned.filter(({ image }) => image.inline)) {
             timeline.push({ kind: 'image', name: `image-${index + 1}`, ms: 0, detail: 'inline-url' });
           }
-          // 一次全量块拉取定位所有锚点，取代旧流程每张图的 keyword 探测（14 图约 22s）；
-          // 锚点段落无论在哪（顶层/表格单元格/引用里），父块与下标都能直接算出来，
-          // 插入统一走原生块操作，不再用 media-insert（14 图约 51s，且只能插顶层）
           const anchors = [];
           if (queue.length) {
-            const blocks = [];
-            let pageToken = null;
-            do {
-              const params = { page_size: 500 };
-              if (pageToken) params.page_token = pageToken;
-              const page = await api('GET', `/open-apis/docx/v1/documents/${document.documentId}/blocks`, ['--params', JSON.stringify(params)]);
-              blocks.push(...(page.data?.items || []));
-              pageToken = page.data?.has_more ? page.data?.page_token || null : null;
-            } while (pageToken);
-            anchors.push(...locateAnchors(blocks, prepared.images.length));
+            anchors.push(...locateAnchors(await listBlocks(), prepared.images.map((_, index) => anchorOf(index))));
           }
 
           const failures = new Map();
@@ -465,6 +469,67 @@ export class ClipExecutor {
           }
         } finally {
           timeline.push({ kind: 'stage', name: 'images', ms: Date.now() - imagesStageAt });
+        }
+      }
+
+      // iframe 阶段（#48）：占位符段落转写为飞书 iframe 块（block_type 26，与用户手动
+      // 「预览视图」同型；spike 实测 children API 可创建，url 需 encodeURIComponent）。
+      // 与图片锚点同构：建块插在锚点下标处、锚点顺延一位后删除；同父块内按下标倒序处理。
+      // 建块失败或锚点定位不到时降级为 [title](url) 链接段落，计入警告，不静默丢弃
+      const iframeItems = Array.isArray(job.snapshot.iframes) ? job.snapshot.iframes.slice(0, 10) : [];
+      if (iframeItems.length) {
+        const iframesStageAt = Date.now();
+        const settledIframes = new Set(); // 已处理（建块或降级）的下标，兜底 catch 不重复降级
+        // markers/linkText/degrade 须在 try 外声明：listBlocks 抛错时 catch 里还要用它们降级，
+        // 声明在 try 内会因 TDZ 再抛 ReferenceError（测试里表现为假 store 无限重试挂起）
+        const markers = iframeItems.map((_, index) => `[[FEISHU_CLIP_IFRAME:${index}]]`);
+        const linkText = (index) => {
+          const label = escapeMarkdown(iframeItems[index].title || `iframe ${index + 1}`);
+          const source = safeHttpUrl(iframeItems[index].url);
+          return source ? `[${label}](${source})` : label;
+        };
+        const degrade = async (index, message) => {
+          settledIframes.add(index);
+          warnings.push(`iframe「${iframeItems[index].title || `iframe ${index + 1}`}」：${message}`);
+          try {
+            await replaceMarker(markers[index], linkText(index));
+          } catch (fallbackError) {
+            this.logger.warn('iframe 占位符回退失败，文档残留占位符', { attemptId: job.attemptId, index, error: fallbackError.message });
+          }
+        };
+        try {
+          const anchors = locateAnchors(await listBlocks(), markers);
+          const located = iframeItems.map((_, index) => index).filter((index) => anchors[index])
+            .sort((a, b) => (anchors[a].parentId === anchors[b].parentId ? anchors[b].index - anchors[a].index : 0));
+          for (const index of located) {
+            const anchor = anchors[index];
+            const at = Date.now();
+            try {
+              await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${anchor.parentId}/children`, [
+                '--params', '{"document_revision_id":"-1"}',
+                '--data', JSON.stringify({
+                  index: anchor.index,
+                  children: [{ block_type: 26, iframe: { component: { iframe_type: 99, url: encodeURIComponent(iframeItems[index].url) } } }],
+                }),
+              ]);
+              await removeRange(anchor.parentId, anchor.index + 1, anchor.index + 2);
+              settledIframes.add(index);
+              timeline.push({ kind: 'iframe', name: `iframe-${index + 1}`, ms: Date.now() - at });
+            } catch (error) {
+              timeline.push({ kind: 'iframe', name: `iframe-${index + 1}`, ms: Date.now() - at, detail: String(error?.message || error).slice(0, 300) });
+              await degrade(index, error?.message || '处理失败');
+            }
+          }
+          for (const index of iframeItems.map((_, i) => i).filter((i) => !anchors[i])) {
+            await degrade(index, '未能嵌入，保留原链接');
+          }
+        } catch (error) {
+          // 整体性失败（如块列表拉取抛错）：不拖垮整个剪藏，剩余占位符全部降级为链接
+          for (const index of iframeItems.map((_, i) => i).filter((i) => !settledIframes.has(i))) {
+            await degrade(index, error?.message || '处理失败');
+          }
+        } finally {
+          timeline.push({ kind: 'stage', name: 'iframes', ms: Date.now() - iframesStageAt });
         }
       }
       await this.store.complete(job.attemptId, workerId, { warnings, ...timing() });

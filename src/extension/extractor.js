@@ -1,6 +1,7 @@
 (async () => {
   try {
     const images = [];
+    const iframes = [];
     let browserBytes = 0;
 
     function candidate(image) {
@@ -43,13 +44,18 @@
       const tagged = [];
       const walk = (node) => {
         for (const child of node.childNodes) {
-          if (child.nodeType !== Node.ELEMENT_NODE || JUNK_TAGS.has(child.tagName)) continue;
+          // MathML 子树（KaTeX 公式的无障碍副本）不下钻：里面的 annotation 存 TeX 源码，
+          // 浏览器 UA 样式对它 display:none，会被误判成悬浮面板（labuladong 公式 bug）
+          if (child.nodeType !== Node.ELEMENT_NODE || JUNK_TAGS.has(child.tagName) || child.tagName === 'MATH') continue;
           if (typeof child.getClientRects === 'function' && child.getClientRects().length === 0) {
             const content = text(child);
+            // 含 iframe 的隐藏容器不打标：iframe 有自己的占位符管线，打标会把占位符随面板一起吞掉；
+            // 容器文本按老行为内联渲染，不丢内容
+            const hasIframe = child.querySelectorAll('iframe').length > 0;
             // 纯图片面板（labuladong 的 .code-extend-content 只有一张示意图）也算悬浮内容；
             // 文本过短又无图的隐藏容器（装饰点、占位）不算
             const hasImage = child.querySelectorAll('img').length > 0;
-            if ((content.length >= 2 || hasImage) && tagged.length < HOVER_LIMIT) {
+            if (!hasIframe && (content.length >= 2 || hasImage) && tagged.length < HOVER_LIMIT) {
               child.setAttribute(HOVER_ATTR, String(tagged.length + 1));
               tagged.push({ original: child, content });
             }
@@ -98,7 +104,37 @@
       const tagged = tagHoverPanels(sourceRoot); // 打标须在克隆前，标记随克隆带入
       const root = sourceRoot.cloneNode(true);
       for (const { original } of tagged) original.removeAttribute(HOVER_ATTR); // 还原原页面，标记只留在克隆树
-      root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe').forEach((node) => node.remove());
+
+      // iframe 管线（#47）：正文里的 iframe（如折叠 details 里的算法可视化面板）是有价值的内容，
+      // 不能随垃圾清理丢掉。数据只取 src/title/尺寸（都在原树上），克隆树里原位留占位符，
+      // 由 bridge 转写成飞书 iframe 块（block_type 26）。须在清理之前做——清理会删掉 iframe。
+      // 跟踪像素（≤2px）跳过；不用「无布局盒」过滤，折叠 details 里的 iframe 没有布局盒但内容有价值
+      const originalIframes = [...sourceRoot.querySelectorAll('iframe')];
+      const clonedIframes = [...root.querySelectorAll('iframe')];
+      for (const [cloneIndex, clone] of clonedIframes.entries()) {
+        const original = originalIframes[cloneIndex] || clone;
+        const raw = (original.getAttribute('src') || '').trim();
+        let url = null;
+        try {
+          const parsed = new URL(raw, location.href); // 注意空串会 resolve 成页面自身 URL，所以先判空
+          if (raw && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) url = parsed.href;
+        } catch { url = null; }
+        const rect = typeof original.getBoundingClientRect === 'function' ? original.getBoundingClientRect() : null;
+        // 只过滤「确实渲染成 1-2px 小点」的跟踪 iframe；0x0 多半是折叠 details 里的内容面板
+        // （未渲染所以 rect 全零），正是要保留的，不能误杀
+        const tiny = rect && rect.width >= 1 && rect.width <= 2 && rect.height >= 1 && rect.height <= 2;
+        if (!url || tiny || iframes.length >= 10) { clone.remove(); continue; }
+        iframes.push({ url, title: (original.getAttribute('title') || '').trim() || `iframe ${iframes.length + 1}` });
+        // 占位符用 P 元素而非文本节点：render 会把文本节点的 \n\n 压成空格，iframe 与 summary
+        // 等文本混排（如 details 直挂）时占位符会糊进别的段落，bridge 就定位不到独立锚点块
+        const placeholder = document.createElement('p');
+        placeholder.append(document.createTextNode(`[[FEISHU_CLIP_IFRAME:${iframes.length - 1}]]`));
+        clone.replaceWith(placeholder);
+      }
+
+      // math 也清掉：KaTeX/MathJax 的 MathML 是公式的无障碍副本，正文另有可见渲染（katex-html 等），
+      // 保留会让每个公式重复三遍（mrow 文本 + annotation 里的 TeX 源码 + 可见副本）；公式只留可见副本
+      root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe,math').forEach((node) => node.remove());
 
       const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
       const clonedImages = [...root.querySelectorAll('img')];
@@ -173,7 +209,11 @@
             if (item.content) { // 纯图片面板没有文字可注，图片已由图片管线按编号标注
               let block = marker.parentElement;
               while (block && block !== root && !/^(P|PRE|LI|BLOCKQUOTE|TABLE|H[1-6])$/.test(block.tagName)) block = block.parentElement;
-              const note = document.createTextNode(`\n\n悬浮内容${seq}: ${item.content}\n\n`);
+              // 注释用 P 元素而非文本节点：render 会把文本节点的换行压成空格，多条注释会连在一行；
+              // P 渲染为独立段落，每条注释各自一段。列表项内的注释提升到整个列表之后，避免变成列表项
+              if (block?.tagName === 'LI' && /^(UL|OL)$/.test(block.parentElement?.tagName)) block = block.parentElement;
+              const note = document.createElement('p');
+              note.append(document.createTextNode(`悬浮内容${seq}: ${item.content}`));
               if (block && block !== root) {
                 const tail = blockTails.get(block) || block;
                 tail.after(note);
@@ -218,6 +258,6 @@
       }
     }
     if (markdown.length < 20) throw new Error('未提取到足够的正文内容');
-    return { title: document.title.trim() || '网页剪藏', sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images };
+    return { title: document.title.trim() || '网页剪藏', sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes };
   } catch (error) { return { error: error.message }; }
 })()

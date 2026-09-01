@@ -41,6 +41,7 @@ function validateSnapshot(snapshot) {
   if (!snapshot.title || !snapshot.markdown) throw new Error('SNAPSHOT_CONTENT_REQUIRED');
   if (snapshot.markdown.length > 1_500_000) throw new Error('SNAPSHOT_TOO_LARGE');
   if (snapshot.images && (!Array.isArray(snapshot.images) || snapshot.images.length > 30)) throw new Error('TOO_MANY_IMAGES');
+  if (snapshot.iframes && (!Array.isArray(snapshot.iframes) || snapshot.iframes.length > 10)) throw new Error('TOO_MANY_IFRAMES');
 }
 
 function jobView(job) {
