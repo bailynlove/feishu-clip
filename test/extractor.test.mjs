@@ -541,3 +541,50 @@ test('pre 外的图片：仍在原地替换为锚点', async () => {
   assert.equal(result.images.length, 1);
   assert.equal(result.images[0].source, 'https://example.test/normal.png');
 });
+
+// Medium 页面噪声（#50）：
+// 1) 页头点赞/收藏等动作按钮是只包图标的 <a>，图标被清理后链接文字为空，
+//    旧代码 `children().trim() || href` 回退把裸 URL 当文字输出，文档开头混入 signin 长链
+// 2) 图片上的 "Press enter or click to view image in full size" 是 Medium 放在
+//    div[role=button] 里的控件提示文字（span 与包 img 的 div 并列），不是正文
+test('空文字链接（图标按钮类）跳过，不回退输出裸 URL', async () => {
+  const iconLink = element('a', [element('div', [element('span', [])])]);
+  iconLink.setAttribute('href', 'https://medium.com/m/signin?actionUrl=x');
+  const textLink = element('a', [textNode('原文链接')]);
+  textLink.setAttribute('href', 'https://example.test/page');
+  const doc = {
+    title: '链接过滤',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('p', [iconLink, textLink]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('signin'), '空文字链接不得回退输出裸 URL');
+  assert.ok(result.markdown.includes('[原文链接](https://example.test/page)'), '有文字的链接不受影响');
+});
+
+test('role=button 内的控件提示文字不进入正文，按钮内图片锚点保留', async () => {
+  const button = element('div', [
+    element('span', [textNode('Press enter or click to view image in full size')]),
+    element('div', [img('https://example.test/medium.png')]),
+  ]);
+  button.setAttribute('role', 'button');
+  const doc = {
+    title: '图片按钮',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('figure', [button]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('Press enter'), '控件提示文字不应进入正文');
+  assert.ok(result.markdown.includes('[[FEISHU_CLIP_IMAGE:0]]'), '按钮内图片锚点应保留');
+  assert.equal(result.images.length, 1);
+});

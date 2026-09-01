@@ -72,6 +72,16 @@
       if (node.nodeType !== Node.ELEMENT_NODE) return '';
       const tag = node.tagName;
       const children = () => [...node.childNodes].map((child) => render(child, depth)).join('');
+      // 伪按钮（div[role=button]，Medium 图片的点击放大容器）里的文字是控件提示
+      // （"Press enter or click to view image in full size"），不是正文；但按钮可能
+      // 包着正文图片（已被替换成锚点文本），只保留含锚点的子树。须在 P/DIV 等通用
+      // 分支之前判定，否则 div 会被提前接管
+      if (node.getAttribute('role') === 'button') {
+        return [...node.childNodes].map((child) => {
+          const rendered = render(child, depth);
+          return rendered.includes('[[FEISHU_CLIP_') ? rendered : '';
+        }).join('');
+      }
       if (/^H[1-6]$/.test(tag)) return `\n\n${'#'.repeat(Number(tag[1]))} ${text(node)}\n\n`;
       if (tag === 'P' || tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE') return `\n\n${children()}\n\n`;
       if (tag === 'BR') return '  \n';
@@ -82,8 +92,11 @@
       if (tag === 'PRE') return `\n\n\`\`\`\n${node.textContent.trim()}\n\`\`\`\n\n`;
       if (tag === 'BLOCKQUOTE') return `\n\n${text(node).split('\n').map((line) => `> ${line}`).join('\n')}\n\n`;
       if (tag === 'A') {
+        // 空文字链接（图标按钮类：SVG/图标被清理后什么都没剩，如 Medium 页头的点赞/收藏
+        // 动作链接）是控件不是内容：跳过，不回退输出裸 URL
+        const label = children().trim();
+        if (!label) return '';
         let href; try { href = new URL(node.getAttribute('href'), location.href).href; } catch { href = null; }
-        const label = children().trim() || href || '';
         return href && /^https?:/.test(href) ? `[${label.replace(/[\[\]]/g, '\\$&')}](${href})` : label;
       }
       if (tag === 'UL' || tag === 'OL') return `\n${[...node.children].map((child, index) => `${'  '.repeat(depth)}${tag === 'OL' ? `${index + 1}.` : '-'} ${render(child, depth + 1).trim()}`).join('\n')}\n`;
