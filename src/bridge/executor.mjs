@@ -21,11 +21,10 @@ function escapeMarkdown(value) {
 }
 
 export function prepareMarkdown(snapshot, attemptId, { includeImages = false } = {}) {
-  // 拷贝一份再标记 inline，避免污染 job snapshot 里的原始对象（重建时要改标记重新生成）
   const images = Array.isArray(snapshot.images) ? snapshot.images.slice(0, IMAGE_LIMITS.maxImages).map((image) => ({ ...image })) : [];
   let body = String(snapshot.markdown || '').slice(0, 1_500_000);
   if (!includeImages) {
-    // 不处理图片时锚点直接落成可读文本（含原图链接）；处理时保留锚点供 media-insert 定位
+    // 不处理图片时锚点直接落成可读文本（含原图链接）；处理时保留锚点供 bridge 图片阶段定位
     for (const [index, image] of images.entries()) {
       const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
       const source = safeHttpUrl(image.source);
@@ -33,19 +32,12 @@ export function prepareMarkdown(snapshot, attemptId, { includeImages = false } =
     }
     body = body.replace(/\[\[FEISHU_CLIP_IMAGE:\d+\]\]/g, '图片：未能处理');
   } else {
-    // 内联 URL 管线（#45，spike 见 docs/research/inline-image-url-import.md）：
-    // 无浏览器字节的公开图片写成 Markdown 图片语法，由飞书服务端在导入时下载成图片块；
-    // 有字节的（同源/需凭证）保留锚点走上传管线；URL 不安全的直接降级为文本。
-    // image.inline === false 是重建路径的强制标记：服务端下载失败的图转回锚点管线
+    // 处理图片时保留锚点：bridge 图片阶段按「预览块 → 下载上传 → 纯链接」三级降级处理。
+    // URL 不安全又无字节的图哪级都建不了，直接降级为文本，不留锚点
     for (const [index, image] of images.entries()) {
-      const anchor = `[[FEISHU_CLIP_IMAGE:${index}]]`;
-      const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
-      const source = safeHttpUrl(image.source);
-      if (!image.bytesBase64 && source && image.inline !== false) {
-        image.inline = true;
-        body = body.replaceAll(anchor, `![${label}](${source})`);
-      } else if (!image.bytesBase64 && !source) {
-        body = body.replaceAll(anchor, `图片：${label}`);
+      if (!image.bytesBase64 && !safeHttpUrl(image.source)) {
+        const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
+        body = body.replaceAll(`[[FEISHU_CLIP_IMAGE:${index}]]`, `图片：${label}`);
       }
     }
   }
@@ -120,23 +112,8 @@ function locateAnchors(items, markers) {
   return anchors;
 }
 
-// 从 +create/+update 的 warnings 里提取服务端下载失败的图片 URL（degrade_code=2108）。
-// spike 实测有两种报文格式，URL 后的收尾不一样：
-// "...image URL: <url>, HTTP status: 404..." 和 "...image URL: <url>. Verify that..."
-function degradedImageUrls(warnings) {
-  const urls = new Set();
-  for (const warning of warnings || []) {
-    const text = String(warning);
-    if (!text.includes('degrade_code=2108')) continue;
-    const match = text.match(/image URL: (\S+)/);
-    if (match) urls.add(match[1].replace(/[.,]$/, ''));
-  }
-  return urls;
-}
-
 // 服务端整体超时：lark-cli 把飞书网关的 "server time out error" 归为 network/timeout。
-// 与本地 CLI 超时（LARK_TIMEOUT）不同——文档导入已在服务端耗满 30s 预算（实测是内联图
-// 下载挂死所致），原样重试必然再超时，只能降级内容后重建
+// 与本地 CLI 超时（LARK_TIMEOUT）不同——服务端可能已实际建出文档，无文档句柄时按建档歧义处理
 function isServerTimeout(error) {
   return /server time out/i.test(error?.message || '');
 }
@@ -191,70 +168,33 @@ export class ClipExecutor {
       }
     };
     try {
-      // prepared 可变：服务端下载失败的图片会翻转 inline 标记、删档重建后重新生成正文
-      let prepared = prepareMarkdown(job.snapshot, job.attemptId, { includeImages: job.includeImages });
+      const prepared = prepareMarkdown(job.snapshot, job.attemptId, { includeImages: job.includeImages });
       if (!document) {
         const createStageAt = Date.now();
         await this.store.beginCreate(job.attemptId, workerId);
         const contentPath = path.join(scratch, 'content.md');
         try {
-          // 最多重建一次：spike（docs/research/inline-image-url-import.md）实测服务端下载失败的
-          // 图片在文档里无任何残留，无法文档内定位补插——只能删掉重建，失败图转回锚点上传管线
-          let recreated = false;
-          for (;;) {
-            await writeFile(contentPath, prepared.markdown, 'utf8');
-            const warnings = [];
-            try {
-              if (job.destination.kind === 'space') {
-                // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
-                const node = await run([
-                  'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
-                  '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
-                ], { cwd: scratch });
-                document = parseCreatedNode(node);
-                // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
-                const updated = await run([
-                  'docs', '+update', '--as', 'user', '--doc', document.documentId,
-                  '--command', 'append', '--doc-format', 'markdown',
-                  '--content', '@content.md', '--format', 'json',
-                ], { cwd: scratch, timeoutMs: 120_000 });
-                warnings.push(...(updated.data?.warnings || []));
-              } else {
-                const created = await run([
-                  'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
-                  '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
-                  '--content', '@content.md', '--format', 'json',
-                ], { cwd: scratch, timeoutMs: 120_000 });
-                document = parseDocument(created);
-                warnings.push(...(created.data?.warnings || []));
-              }
-            } catch (error) {
-              // 服务端整体超时（实测：单张挂死的内联图即可打满 30s 导入预算，Medium miro 图必现）。
-              // 空间两步法中空节点已建好，删档重建一次，全部内联图翻转回锚点上传管线绕开服务端下载；
-              // 无文档（节点目标 create 本身超时）则交给外层 catch 维持原歧义/失败处理
-              const hasInline = prepared.images.some((image) => image.inline);
-              if (recreated || !document || !hasInline || !isServerTimeout(error)) throw error;
-              recreated = true;
-              await run([
-                'wiki', '+node-delete', '--node-token', document.documentId,
-                '--obj-type', 'docx', '--as', 'user', '--yes', '--format', 'json',
-              ], { timeoutMs: 30_000 });
-              document = null;
-              for (const image of prepared.images) image.inline = false;
-              prepared = prepareMarkdown({ ...job.snapshot, images: prepared.images }, job.attemptId, { includeImages: job.includeImages });
-              continue;
-            }
-            const degraded = degradedImageUrls(warnings);
-            const retry = prepared.images.filter((image) => image.inline && degraded.has(safeHttpUrl(image.source)));
-            if (!retry.length || recreated) break;
-            recreated = true;
+          await writeFile(contentPath, prepared.markdown, 'utf8');
+          if (job.destination.kind === 'space') {
+            // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
+            const node = await run([
+              'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
+              '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
+            ], { cwd: scratch });
+            document = parseCreatedNode(node);
+            // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
             await run([
-              'wiki', '+node-delete', '--node-token', document.documentId,
-              '--obj-type', 'docx', '--as', 'user', '--yes', '--format', 'json',
-            ], { timeoutMs: 30_000 });
-            document = null;
-            for (const image of retry) image.inline = false;
-            prepared = prepareMarkdown({ ...job.snapshot, images: prepared.images }, job.attemptId, { includeImages: job.includeImages });
+              'docs', '+update', '--as', 'user', '--doc', document.documentId,
+              '--command', 'append', '--doc-format', 'markdown',
+              '--content', '@content.md', '--format', 'json',
+            ], { cwd: scratch, timeoutMs: 120_000 });
+          } else {
+            const created = await run([
+              'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
+              '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
+              '--content', '@content.md', '--format', 'json',
+            ], { cwd: scratch, timeoutMs: 120_000 });
+            document = parseDocument(created);
           }
         } catch (error) {
           // 空间目标的两步合并为一个 create_document 阶段；失败也要先记阶段再落盘
@@ -318,23 +258,14 @@ export class ClipExecutor {
       if (job.includeImages) {
         const imagesStageAt = Date.now();
         try {
-          // 图片阶段只处理浏览器取了字节的图片（公开图已在导入时由服务端内联下载，#45）；
-          // 写入分阶段：建块串行 → 上传并行 → 绑定删锚点串行（#46）。180s 上限对剩余场景留足余量
+          // 图片三级降级（优先级：预览块 → 下载上传 → 纯链接，取代 #45 内联导入——
+          // 内联靠飞书服务端下载，挂死图会打满 30s 导入预算，且不可达图无救）：
+          // 写入分阶段：预览块串行 → 下载并行 → 建块串行 → 上传并行 → 绑定删锚点串行（#46）。
+          // 180s 上限对剩余场景留足余量
           const deadline = Date.now() + 180_000;
           const anchorOf = (index) => `[[FEISHU_CLIP_IMAGE:${index}]]`;
           const replaceAnchor = (index, replacement) => replaceMarker(anchorOf(index), replacement);
           const dimensionsOf = (item) => (item.size ? { width: item.size.width, height: item.size.height } : {});
-
-          // 内联图片（#45）已由飞书服务端在导入时下载，这里只留痕，不做任何逐图调用
-          const partitioned = prepared.images.map((image, index) => ({ image, index }));
-          const queue = partitioned.filter(({ image }) => !image.inline);
-          for (const { index } of partitioned.filter(({ image }) => image.inline)) {
-            timeline.push({ kind: 'image', name: `image-${index + 1}`, ms: 0, detail: 'inline-url' });
-          }
-          const anchors = [];
-          if (queue.length) {
-            anchors.push(...locateAnchors(await listBlocks(), prepared.images.map((_, index) => anchorOf(index))));
-          }
 
           const failures = new Map();
           const recordFailure = (index, message, ms) => {
@@ -342,11 +273,49 @@ export class ClipExecutor {
             timeline.push({ kind: 'image', name: `image-${index + 1}`, ms, detail: message });
           };
 
+          const queue = prepared.images.map((image, index) => ({ image, index }));
+          const markers = prepared.images.map((_, index) => anchorOf(index));
+          let anchors = queue.length ? locateAnchors(await listBlocks(), markers) : [];
+
+          // 第一级：预览块。原图 URL 直出为 iframe 块（block_type 26），查看者浏览器渲染，
+          // 不下载不上传——最快最稳；服务端/桥都不可达的图（Medium miro）也能显示。
+          // 建块是文档操作必须串行；同父块内按下标倒序，对其余锚点下标中性。
+          // 建块失败或锚点定位不到的转入第二级下载管线（锚点仍在原位）
+          const downloadQueue = queue.filter(({ image }) => !safeHttpUrl(image.source));
+          const previewable = queue.filter(({ image }) => safeHttpUrl(image.source));
+          const locatedPreview = previewable.filter(({ index }) => anchors[index])
+            .sort((a, b) => (anchors[a.index].parentId === anchors[b.index].parentId ? anchors[b.index].index - anchors[a.index].index : a.index - b.index));
+          for (const item of locatedPreview) {
+            const anchor = anchors[item.index];
+            const at = Date.now();
+            try {
+              if (Date.now() >= deadline) throw new Error('图片阶段超过 180 秒');
+              await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${anchor.parentId}/children`, [
+                '--params', '{"document_revision_id":"-1"}',
+                '--data', JSON.stringify({
+                  index: anchor.index,
+                  children: [{ block_type: 26, iframe: { component: { iframe_type: 99, url: encodeURIComponent(safeHttpUrl(item.image.source)) } } }],
+                }),
+              ]);
+              await removeRange(anchor.parentId, anchor.index + 1, anchor.index + 2);
+              timeline.push({ kind: 'image', name: `image-${item.index + 1}`, ms: Date.now() - at, detail: 'iframe-preview' });
+            } catch (error) {
+              timeline.push({ kind: 'image', name: `image-${item.index + 1}`, ms: Date.now() - at, detail: `预览块失败转下载：${String(error?.message || error).slice(0, 120)}` });
+              downloadQueue.push(item);
+            }
+          }
+          downloadQueue.push(...previewable.filter(({ index }) => !anchors[index]));
+
+          // 第二级：下载上传。预览 pass 改过文档就重新拉块定位，避免锚点下标漂移
+          if (locatedPreview.length && downloadQueue.length) {
+            anchors = locateAnchors(await listBlocks(), markers);
+          }
+
           // 下载保持 3 路并行（字节来自扩展缓存或公网，与文档版本无关）；
           // 文档修改必须串行——每次块操作都推进文档版本
           const downloaded = [];
-          for (let start = 0; start < queue.length; start += 3) {
-            const batch = queue.slice(start, start + 3);
+          for (let start = 0; start < downloadQueue.length; start += 3) {
+            const batch = downloadQueue.slice(start, start + 3);
             const downloads = await Promise.allSettled(batch.map(async ({ image, index }) => {
               const downloadAt = Date.now();
               try {
@@ -479,47 +448,11 @@ export class ClipExecutor {
             }
           }
 
-          // 全部处理完后统一回退。失败的图优先降级为 iframe 预览块（#49）：原图 URL
-          // 直出为 block_type 26 块，渲染在查看者浏览器里，绕开服务端/桥下载——
-          // Medium miro 这类两边都不可达、只有浏览器能加载的图这是唯一可行路径。
-          // 定位不到锚点或建块失败才退回 str_replace 可读文案（含原图链接）
-          const failedEntries = [...failures.entries()].sort((a, b) => a[0] - b[0]);
-          const previewed = new Set();
-          const previewable = failedEntries.map(([index]) => index).filter((index) => safeHttpUrl(prepared.images[index]?.source));
-          if (previewable.length) {
-            try {
-              const markers = prepared.images.map((_, index) => anchorOf(index));
-              const previewAnchors = locateAnchors(await listBlocks(), markers);
-              // 同父块内按下标倒序处理：建块+删锚点对其余锚点下标中性（与 iframe 阶段同构）
-              const located = previewable.filter((index) => previewAnchors[index])
-                .sort((a, b) => (previewAnchors[a].parentId === previewAnchors[b].parentId ? previewAnchors[b].index - previewAnchors[a].index : 0));
-              for (const index of located) {
-                if (Date.now() >= deadline) break; // 超时就别再逐图建块，剩余直接走文本回退
-                const anchor = previewAnchors[index];
-                const at = Date.now();
-                try {
-                  await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${anchor.parentId}/children`, [
-                    '--params', '{"document_revision_id":"-1"}',
-                    '--data', JSON.stringify({
-                      index: anchor.index,
-                      children: [{ block_type: 26, iframe: { component: { iframe_type: 99, url: encodeURIComponent(safeHttpUrl(prepared.images[index].source)) } } }],
-                    }),
-                  ]);
-                  await removeRange(anchor.parentId, anchor.index + 1, anchor.index + 2);
-                  previewed.add(index);
-                  timeline.push({ kind: 'image', name: `image-${index + 1}`, ms: Date.now() - at, detail: 'iframe-preview' });
-                } catch (error) {
-                  timeline.push({ kind: 'image', name: `image-${index + 1}`, ms: Date.now() - at, detail: `iframe 预览降级失败：${String(error?.message || error).slice(0, 120)}` });
-                }
-              }
-            } catch (error) {
-              // 块列表拉取等整体性失败：全部退回文本回退
-              this.logger.warn('图片 iframe 预览降级定位失败，退回文本回退', { attemptId: job.attemptId, error: error.message });
-            }
-          }
-          for (const [index, message] of failedEntries) {
-            warnings.push(`图片 ${index + 1}：${message}${previewed.has(index) ? '，已转为链接预览块展示' : ''}`);
-            if (previewed.has(index)) continue;
+          // 全部处理完后统一回退：失败的锚点 str_replace 成可读文案（含原图链接）。
+          // 预览块已是第一级（见上），走到这里的图要么没有公开 URL、要么两级都失败，
+          // 只剩文本兜底
+          for (const [index, message] of [...failures.entries()].sort((a, b) => a[0] - b[0])) {
+            warnings.push(`图片 ${index + 1}：${message}`);
             const image = prepared.images[index];
             const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
             const source = safeHttpUrl(image.source);
