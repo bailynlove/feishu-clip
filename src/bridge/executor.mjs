@@ -134,6 +134,13 @@ function degradedImageUrls(warnings) {
   return urls;
 }
 
+// 服务端整体超时：lark-cli 把飞书网关的 "server time out error" 归为 network/timeout。
+// 与本地 CLI 超时（LARK_TIMEOUT）不同——文档导入已在服务端耗满 30s 预算（实测是内联图
+// 下载挂死所致），原样重试必然再超时，只能降级内容后重建
+function isServerTimeout(error) {
+  return /server time out/i.test(error?.message || '');
+}
+
 export class ClipExecutor {
   constructor({ store, lark, logger = console }) {
     this.store = store;
@@ -197,28 +204,45 @@ export class ClipExecutor {
           for (;;) {
             await writeFile(contentPath, prepared.markdown, 'utf8');
             const warnings = [];
-            if (job.destination.kind === 'space') {
-              // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
-              const node = await run([
-                'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
-                '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
-              ], { cwd: scratch });
-              document = parseCreatedNode(node);
-              // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
-              const updated = await run([
-                'docs', '+update', '--as', 'user', '--doc', document.documentId,
-                '--command', 'append', '--doc-format', 'markdown',
-                '--content', '@content.md', '--format', 'json',
-              ], { cwd: scratch, timeoutMs: 120_000 });
-              warnings.push(...(updated.data?.warnings || []));
-            } else {
-              const created = await run([
-                'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
-                '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
-                '--content', '@content.md', '--format', 'json',
-              ], { cwd: scratch, timeoutMs: 120_000 });
-              document = parseDocument(created);
-              warnings.push(...(created.data?.warnings || []));
+            try {
+              if (job.destination.kind === 'space') {
+                // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
+                const node = await run([
+                  'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
+                  '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
+                ], { cwd: scratch });
+                document = parseCreatedNode(node);
+                // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
+                const updated = await run([
+                  'docs', '+update', '--as', 'user', '--doc', document.documentId,
+                  '--command', 'append', '--doc-format', 'markdown',
+                  '--content', '@content.md', '--format', 'json',
+                ], { cwd: scratch, timeoutMs: 120_000 });
+                warnings.push(...(updated.data?.warnings || []));
+              } else {
+                const created = await run([
+                  'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
+                  '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
+                  '--content', '@content.md', '--format', 'json',
+                ], { cwd: scratch, timeoutMs: 120_000 });
+                document = parseDocument(created);
+                warnings.push(...(created.data?.warnings || []));
+              }
+            } catch (error) {
+              // 服务端整体超时（实测：单张挂死的内联图即可打满 30s 导入预算，Medium miro 图必现）。
+              // 空间两步法中空节点已建好，删档重建一次，全部内联图翻转回锚点上传管线绕开服务端下载；
+              // 无文档（节点目标 create 本身超时）则交给外层 catch 维持原歧义/失败处理
+              const hasInline = prepared.images.some((image) => image.inline);
+              if (recreated || !document || !hasInline || !isServerTimeout(error)) throw error;
+              recreated = true;
+              await run([
+                'wiki', '+node-delete', '--node-token', document.documentId,
+                '--obj-type', 'docx', '--as', 'user', '--yes', '--format', 'json',
+              ], { timeoutMs: 30_000 });
+              document = null;
+              for (const image of prepared.images) image.inline = false;
+              prepared = prepareMarkdown({ ...job.snapshot, images: prepared.images }, job.attemptId, { includeImages: job.includeImages });
+              continue;
             }
             const degraded = degradedImageUrls(warnings);
             const retry = prepared.images.filter((image) => image.inline && degraded.has(safeHttpUrl(image.source)));
@@ -235,7 +259,8 @@ export class ClipExecutor {
         } catch (error) {
           // 空间目标的两步合并为一个 create_document 阶段；失败也要先记阶段再落盘
           timeline.push({ kind: 'stage', name: 'create_document', ms: Date.now() - createStageAt });
-          if (error.code === 'LARK_TIMEOUT' && !document) {
+          // 服务端超时与本地超时一样可能「实际已建出文档」：无文档句柄时都按建档歧义处理
+          if ((error.code === 'LARK_TIMEOUT' || isServerTimeout(error)) && !document) {
             await this.store.markCreateAmbiguous(job.attemptId, workerId);
             return;
           }

@@ -622,6 +622,73 @@ test('重建后仍 degrade 不再重试，直接按现状完成', async () => {
   assert.ok(store.completed, '仍应正常完成（失败图走锚点管线的自身回退）');
 });
 
+// 服务端整体超时（"server time out error"，network/timeout）：飞书导入时串行下载内联图，
+// 单张挂死图（miro.medium.com 实测必现）即可打满 30s 服务端预算。空间两步法中空节点已建好，
+// 无法靠 warnings 定位失败图——删档重建一次，全部内联图翻转回锚点上传管线绕开服务端下载
+function spaceTimeoutJob() {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', source: 'https://nonexistent.invalid/a.png' }],
+  });
+  job.destination = { kind: 'space', spaceId: 'space-1' };
+  return job;
+}
+function spaceTimeoutLark(items, { timeoutOnAppends = new Set([1]) } = {}) {
+  const lark = fakeLark({ items });
+  let appendCount = 0;
+  const baseRun = lark.run.bind(lark);
+  lark.appendCount = () => appendCount;
+  lark.run = async (args, options) => {
+    if (args[0] === 'wiki' && args[1] === '+node-create') {
+      lark.calls.push(args);
+      return { ok: true, data: { obj_token: 'doc1', url: 'https://doc1' } };
+    }
+    if (args[0] === 'docs' && args[1] === '+update' && args.includes('append')) {
+      appendCount += 1;
+      if (timeoutOnAppends.has(appendCount)) {
+        throw Object.assign(new Error('API call failed: server time out error'), { code: 'network' });
+      }
+    }
+    return baseRun(args, options);
+  };
+  return lark;
+}
+
+test('空间目标 append 服务端超时：删档重建，全部内联图转回锚点管线', async () => {
+  const job = spaceTimeoutJob();
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = spaceTimeoutLark(items);
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(lark.appendCount(), 2, '首次 append 超时后应删档重建一次');
+  const creates = lark.calls.filter((args) => args[0] === 'wiki' && args[1] === '+node-create');
+  assert.equal(creates.length, 2, '重建要重新建空节点');
+  const deleted = lark.calls.filter((args) => args[0] === 'wiki' && args[1] === '+node-delete');
+  assert.equal(deleted.length, 1, '重建前删掉旧节点');
+  assert.ok(store.completed, '重建后应正常完成');
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 1, '重建后走锚点管线');
+  assert.equal(store.completed.warnings.length, 1, 'nonexistent.invalid 必然下载失败，回退为含原图链接的文案');
+});
+
+test('重建后 append 仍超时：不再重建，按失败落盘', async () => {
+  const job = spaceTimeoutJob();
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = spaceTimeoutLark(items, { timeoutOnAppends: new Set([1, 2]) });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(lark.appendCount(), 2, '最多重建一次');
+  assert.ok(store.failed, '重建后仍超时应失败落盘');
+  assert.match(store.failed.error, /server time out/);
+});
+
 
 // iframe 转写（#48）：占位符段落 → 飞书 iframe 块（block_type 26，与用户手动「预览视图」同型，
 // spike 实测 children API 可创建）。建块插在锚点下标处、锚点顺延一位后删除；失败降级为链接并警告
