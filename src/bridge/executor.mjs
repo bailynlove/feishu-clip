@@ -479,9 +479,47 @@ export class ClipExecutor {
             }
           }
 
-          // 全部处理完后统一回退：失败的锚点 str_replace 成可读文案（含原图链接）
-          for (const [index, message] of [...failures.entries()].sort((a, b) => a[0] - b[0])) {
-            warnings.push(`图片 ${index + 1}：${message}`);
+          // 全部处理完后统一回退。失败的图优先降级为 iframe 预览块（#49）：原图 URL
+          // 直出为 block_type 26 块，渲染在查看者浏览器里，绕开服务端/桥下载——
+          // Medium miro 这类两边都不可达、只有浏览器能加载的图这是唯一可行路径。
+          // 定位不到锚点或建块失败才退回 str_replace 可读文案（含原图链接）
+          const failedEntries = [...failures.entries()].sort((a, b) => a[0] - b[0]);
+          const previewed = new Set();
+          const previewable = failedEntries.map(([index]) => index).filter((index) => safeHttpUrl(prepared.images[index]?.source));
+          if (previewable.length) {
+            try {
+              const markers = prepared.images.map((_, index) => anchorOf(index));
+              const previewAnchors = locateAnchors(await listBlocks(), markers);
+              // 同父块内按下标倒序处理：建块+删锚点对其余锚点下标中性（与 iframe 阶段同构）
+              const located = previewable.filter((index) => previewAnchors[index])
+                .sort((a, b) => (previewAnchors[a].parentId === previewAnchors[b].parentId ? previewAnchors[b].index - previewAnchors[a].index : 0));
+              for (const index of located) {
+                if (Date.now() >= deadline) break; // 超时就别再逐图建块，剩余直接走文本回退
+                const anchor = previewAnchors[index];
+                const at = Date.now();
+                try {
+                  await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${anchor.parentId}/children`, [
+                    '--params', '{"document_revision_id":"-1"}',
+                    '--data', JSON.stringify({
+                      index: anchor.index,
+                      children: [{ block_type: 26, iframe: { component: { iframe_type: 99, url: encodeURIComponent(safeHttpUrl(prepared.images[index].source)) } } }],
+                    }),
+                  ]);
+                  await removeRange(anchor.parentId, anchor.index + 1, anchor.index + 2);
+                  previewed.add(index);
+                  timeline.push({ kind: 'image', name: `image-${index + 1}`, ms: Date.now() - at, detail: 'iframe-preview' });
+                } catch (error) {
+                  timeline.push({ kind: 'image', name: `image-${index + 1}`, ms: Date.now() - at, detail: `iframe 预览降级失败：${String(error?.message || error).slice(0, 120)}` });
+                }
+              }
+            } catch (error) {
+              // 块列表拉取等整体性失败：全部退回文本回退
+              this.logger.warn('图片 iframe 预览降级定位失败，退回文本回退', { attemptId: job.attemptId, error: error.message });
+            }
+          }
+          for (const [index, message] of failedEntries) {
+            warnings.push(`图片 ${index + 1}：${message}${previewed.has(index) ? '，已转为链接预览块展示' : ''}`);
+            if (previewed.has(index)) continue;
             const image = prepared.images[index];
             const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
             const source = safeHttpUrl(image.source);

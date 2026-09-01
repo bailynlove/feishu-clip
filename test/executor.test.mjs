@@ -287,7 +287,7 @@ test('anchor inside a table cell inserts the image block into the cell parent', 
   assert.ok(!lark.calls.some((args) => args[1] === '+media-insert'));
 });
 
-test('a failed image keeps a warning, cleans up the empty block and falls back to str_replace', async () => {
+test('a failed image keeps a warning, cleans up the empty block and degrades to an iframe preview block', async () => {
   const job = fakeJob({
     markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
     images: [
@@ -311,10 +311,11 @@ test('a failed image keeps a warning, cleans up the empty block and falls back t
   // 空块当前下标 = 1+2-1 = 2，删除 [2,3)
   const deletes = apiCalls(lark.calls, 'DELETE', 'batch_delete').map(deleteBody);
   assert.ok(deletes.some((body) => body.start_index === 2 && body.end_index === 3), '应清掉失败图片的空块');
-  // 失败的锚点最后用 str_replace 换成可读文案
-  const fallback = lark.calls.find((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:1]]'));
-  assert.ok(fallback, '失败锚点应走 str_replace 回退');
-  assert.match(fallback.join(' '), /原图链接/);
+  // 失败的锚点降级为 iframe 预览块（#49）：原图 URL 直出，不再 str_replace 文本
+  const previews = apiCalls(lark.calls, 'POST', '/children').filter((args) => args.join(' ').includes('"block_type":26'));
+  assert.equal(previews.length, 1, '失败图应降级为 iframe 预览块');
+  assert.ok(previews[0].join(' ').includes(encodeURIComponent('https://cdn.example.com/b.png')));
+  assert.match(store.completed.warnings[0], /链接预览块/);
   // 成功的图片不受影响
   assert.equal(apiCalls(lark.calls, 'PATCH', '/blocks/').length, 1);
 });
@@ -583,11 +584,13 @@ test('服务端下载失败的图片：删档重建并转入锚点管线', async
   const deleted = lark.calls.find((args) => args[0] === 'wiki' && args[1] === '+node-delete');
   assert.ok(deleted && deleted.includes('doc1'), '重建前删掉旧文档');
   assert.ok(deleted.includes('--yes'), 'node-delete 是高危命令，要带 --yes');
-  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 1, '重建后走锚点管线');
-  // nonexistent.invalid 必然 DNS 失败：Bridge 也下不到，回退为含原图链接的可读文案
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 2, '重建后走锚点管线 + 预览降级各拉一次块列表');
+  // nonexistent.invalid 必然 DNS 失败：Bridge 也下不到，降级为 iframe 预览块（#49）
   assert.equal(store.completed.warnings.length, 1);
   assert.match(store.completed.warnings[0], /图片 1/);
-  assert.ok(lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:0]]')), '失败锚点应走 str_replace 回退');
+  assert.match(store.completed.warnings[0], /链接预览块/);
+  const previews = apiCalls(lark.calls, 'POST', '/children').filter((args) => args.join(' ').includes('"block_type":26'));
+  assert.equal(previews.length, 1, '失败锚点应降级为 iframe 预览块');
 });
 
 test('重建后仍 degrade 不再重试，直接按现状完成', async () => {
@@ -670,8 +673,8 @@ test('空间目标 append 服务端超时：删档重建，全部内联图转回
   const deleted = lark.calls.filter((args) => args[0] === 'wiki' && args[1] === '+node-delete');
   assert.equal(deleted.length, 1, '重建前删掉旧节点');
   assert.ok(store.completed, '重建后应正常完成');
-  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 1, '重建后走锚点管线');
-  assert.equal(store.completed.warnings.length, 1, 'nonexistent.invalid 必然下载失败，回退为含原图链接的文案');
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 2, '重建后走锚点管线 + 预览降级各拉一次块列表');
+  assert.equal(store.completed.warnings.length, 1, 'nonexistent.invalid 必然下载失败，降级为 iframe 预览块（#49）');
 });
 
 test('重建后 append 仍超时：不再重建，按失败落盘', async () => {
@@ -687,6 +690,75 @@ test('重建后 append 仍超时：不再重建，按失败落盘', async () => 
   assert.equal(lark.appendCount(), 2, '最多重建一次');
   assert.ok(store.failed, '重建后仍超时应失败落盘');
   assert.match(store.failed.error, /server time out/);
+});
+
+// 图片失败降级为 iframe 预览块（#49）：原图 URL 直出为 block_type 26 预览块，
+// 渲染在查看者浏览器里，绕开服务端/桥下载（Medium miro 图唯一可行路径）；
+// 建块失败才退回 str_replace 可读文案。
+// 测试借 degrade-2108 重建路径把图片翻进锚点管线（无字节的公开图默认走内联，不进图片阶段）
+function degradeRebuildJob() {
+  return fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', source: 'https://nonexistent.invalid/a.png' }],
+  });
+}
+function degradeRebuildLark(items, { failOn } = {}) {
+  const lark = fakeLark({ items, failOn });
+  let createCount = 0;
+  const baseRun = lark.run.bind(lark);
+  lark.run = async (args, options) => {
+    if (args[0] === 'docs' && args[1] === '+create') {
+      createCount += 1;
+      if (createCount === 1) {
+        return {
+          ok: true,
+          data: {
+            document: { document_id: 'doc1', url: 'https://doc1' },
+            warnings: ['degrade_code=2108,msg=Image download failed. image URL: https://nonexistent.invalid/a.png. Verify that the image URL is accessible'],
+          },
+        };
+      }
+    }
+    return baseRun(args, options);
+  };
+  return lark;
+}
+
+test('图片下载失败且有公开 URL：降级为 iframe 预览块而非纯文本', async () => {
+  const job = degradeRebuildJob();
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = degradeRebuildLark(items);
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  // 重建后 Bridge 下载 nonexistent.invalid 必然 DNS 失败，触发预览块降级
+  const inserts = apiCalls(lark.calls, 'POST', '/children');
+  assert.equal(inserts.length, 1, '应建 iframe 预览块');
+  const body = JSON.parse(inserts[0][inserts[0].indexOf('--data') + 1]);
+  assert.equal(body.children[0].block_type, 26);
+  assert.equal(body.children[0].iframe.component.iframe_type, 99);
+  assert.equal(body.children[0].iframe.component.url, encodeURIComponent('https://nonexistent.invalid/a.png'));
+  assert.match(store.completed.warnings[0], /链接预览块/);
+  assert.ok(!lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace')), '预览块降级成功就不应再 str_replace 文本');
+});
+
+test('iframe 预览块建块失败：退回纯文本原图链接', async () => {
+  const job = degradeRebuildJob();
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = degradeRebuildLark(items, { failOn: (args) => args[0] === 'api' && args[1] === 'POST' });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.ok(store.completed, '降级失败不应拖垮任务');
+  assert.equal(store.completed.warnings.length, 1);
+  assert.doesNotMatch(store.completed.warnings[0], /链接预览块/);
+  assert.ok(lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:0]]')), '应退回 str_replace 文本兜底');
 });
 
 
