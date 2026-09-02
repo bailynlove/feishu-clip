@@ -25,7 +25,9 @@ async function seedAmbiguous(store, { attemptId, title = '测试页', destinatio
   if (cancel) await store.cancel(attemptId);
 }
 
-function fakeReconcileLark({ nodes = [], contents = {}, failOn } = {}) {
+// node-list 不返回 obj_create_time（真实 API 行为），创建时间由逐候选的 node-get 提供；
+// nodeDetails 缺省返回当前时间（落在时间窗内）
+function fakeReconcileLark({ nodes = [], contents = {}, nodeDetails = {}, failOn } = {}) {
   const calls = [];
   return {
     calls,
@@ -33,6 +35,10 @@ function fakeReconcileLark({ nodes = [], contents = {}, failOn } = {}) {
       calls.push(args);
       if (failOn?.(args)) throw new Error('lark boom');
       if (args[0] === 'wiki' && args[1] === '+node-list') return { ok: true, data: { nodes, has_more: false } };
+      if (args[0] === 'wiki' && args[1] === '+node-get') {
+        const token = args[args.indexOf('--node-token') + 1];
+        return { ok: true, data: nodeDetails[token] ?? { obj_create_time: String(Math.floor(Date.now() / 1000)) } };
+      }
       if (args[0] === 'docs' && args[1] === '+fetch') {
         const doc = args[args.indexOf('--doc') + 1];
         return { ok: true, data: { document: { content: contents[doc] ?? '' } } };
@@ -56,12 +62,12 @@ async function withHarness(setup, fn) {
   }
 }
 
+// node-list 的真实响应没有 obj_create_time（创建时间走 node-get 补齐），夹据保持同形
 const docNode = (overrides = {}) => ({
   node_token: 'node-found',
   obj_token: 'docx-found',
   obj_type: 'docx',
   title: '测试页',
-  obj_create_time: String(Math.floor(Date.now() / 1000)),
   ...overrides,
 });
 
@@ -92,6 +98,7 @@ test('目标下无同名节点：确认未建，重排 create_document', async (
         assert.equal(job.step, 'create_document');
         assert.equal(job.document, null);
         assert.ok(!lark.calls.some((args) => args[1] === '+fetch'), '无同名候选不该拉正文');
+        assert.ok(!lark.calls.some((args) => args[1] === '+node-get'), '无同名候选不该补查详情');
       },
     },
   );
@@ -223,7 +230,10 @@ test('同名节点但创建时间在任务窗口之外：不拉正文，按未�
   await withHarness(
     (store) => seedAmbiguous(store, { attemptId: 'attempt-stale' }),
     {
-      setup: () => ({ nodes: [docNode({ obj_create_time: String(Math.floor(Date.now() / 1000) - 86400) })] }),
+      setup: () => ({
+        nodes: [docNode()],
+        nodeDetails: { 'node-found': { obj_create_time: String(Math.floor(Date.now() / 1000) - 86400) } },
+      }),
       assert: async ({ store, lark }) => {
         const job = await store.get('attempt-stale');
         assert.equal(job.step, 'create_document');

@@ -192,15 +192,15 @@ export class ClipExecutor {
       if (!pageToken) break;
     }
     // 创建时间窗锚在 job.createdAt 前后（create 调用最多跑满本地超时 + 服务端导入滞后），
-    // 排除同名老文档，也省得对无关候选拉正文；缺创建时间的节点无法确证，直接排除
+    // 排除同名老文档，也省得对无关候选拉正文；node-list 不带创建时间，逐候选 node-get 补齐
     const windowStart = (job.createdAt ?? 0) - 120_000;
     const windowEnd = (job.createdAt ?? 0) + 20 * 60_000;
-    const candidates = nodes.filter((node) => {
-      if (node.obj_type !== 'docx' || node.title !== title || !node.obj_token) return false;
-      const createdMs = Number(node.obj_create_time) * 1000;
-      return Number.isFinite(createdMs) && createdMs >= windowStart && createdMs <= windowEnd;
-    });
+    const candidates = nodes.filter((node) => node.obj_type === 'docx' && node.title === title && node.obj_token);
     for (const candidate of candidates) {
+      const detail = await this.lark.run(['wiki', '+node-get', '--as', 'user', '--node-token', candidate.node_token, '--format', 'json'], { timeoutMs: 30_000 });
+      const node = detail.data?.node || detail.data || {};
+      const createdMs = Number(node.obj_create_time) * 1000;
+      if (!Number.isFinite(createdMs) || createdMs < windowStart || createdMs > windowEnd) continue;
       const fetched = await this.lark.run(['docs', '+fetch', '--as', 'user', '--doc', candidate.obj_token, '--format', 'json'], { timeoutMs: 30_000 });
       // 标记在文档元信息引用块里，截断不影响判定，还能省掉大文档的全量驻留
       const content = String(fetched.data?.document?.content || '').slice(0, 20_000);
