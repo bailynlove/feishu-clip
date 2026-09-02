@@ -322,6 +322,11 @@ test('纯图片悬浮面板：图片提取并按面板编号标注，锚点排�
   const anchorAt = result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:0]]');
   assert.ok(anchorAt > result.markdown.lastIndexOf('```'), '图片锚点应排在代码块之后');
   assert.ok(!result.markdown.includes('悬浮内容1:'), '无文字的面板不应产生空注释');
+  // 纯图片面板没有文字注释，图片直接出现在代码块后，文档里看不出是哪条悬浮内容：
+  // 锚点前要有编号标签段（独立段落，不与锚点同段，否则 bridge 定位不到独立锚点块）
+  const labelAt = result.markdown.indexOf('悬浮内容1：');
+  assert.ok(labelAt > result.markdown.lastIndexOf('```'), '编号标签应排在代码块之后');
+  assert.ok(labelAt > -1 && labelAt < anchorAt, '编号标签应紧挨图片锚点之前');
 });
 
 test('悬浮面板内既有文字又有图片：注释和图片都按编号保留', async () => {

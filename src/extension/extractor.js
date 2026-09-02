@@ -182,6 +182,14 @@
         try { Object.assign(image, await readableBytes(source)); } catch (error) { image.browserWarning = error.message; }
         images.push(image);
         const anchor = document.createTextNode(`\n\n[[FEISHU_CLIP_IMAGE:${index}]]\n\n`);
+        // 悬浮面板的图（尤其纯图面板，没有文字注释）移到块后就是一张无归属的图，
+        // 文档里看不出是哪条悬浮内容。锚点前插编号标签段——必须是独立段落（P），
+        // 不能与锚点同段，否则 bridge 的 locateAnchors 匹配不到独立锚点块
+        let hoverLabel = null;
+        if (hoverSeq) {
+          hoverLabel = document.createElement('p');
+          hoverLabel.append(document.createTextNode(`悬浮内容${hoverSeq}：`));
+        }
         // pre 内的 img 原地替换会让锚点成为围栏代码块里的一行文本，导入飞书后落在
         // code 块（block_type 14）里——bridge 既定位不到也删不掉。改为移出最外层 pre
         // （嵌套 pre 时 closest 只拿到内层），让锚点渲染成代码块之后的独立段落
@@ -190,7 +198,7 @@
           while (pre.parentElement?.closest('pre')) pre = pre.parentElement.closest('pre');
           clone.remove();
           const tail = preTails.get(pre) || pre;
-          tail.after(anchor);
+          if (hoverLabel) { tail.after(hoverLabel); hoverLabel.after(anchor); } else { tail.after(anchor); }
           preTails.set(pre, anchor);
         } else if (hoverSeq) {
           // 悬浮面板内的图（不在 pre 里）：面板稍后会被替换为标记，原地锚点会随面板丢失，
@@ -200,7 +208,7 @@
           const target = block && block !== root ? block : hoverHolder || clone.parentElement;
           clone.remove();
           const tail = preTails.get(target) || target;
-          tail.after(anchor);
+          if (hoverLabel) { tail.after(hoverLabel); hoverLabel.after(anchor); } else { tail.after(anchor); }
           preTails.set(target, anchor);
         } else {
           clone.replaceWith(anchor);
