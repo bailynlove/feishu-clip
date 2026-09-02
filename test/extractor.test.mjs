@@ -11,15 +11,26 @@ const extractorCode = await readFile(new URL('../src/extension/extractor.js', im
 
 function runExtractor(doc) {
   const context = vm.createContext({
-    document: { createTextNode: (value) => textNode(value), createElement: (tag) => element(tag), ...doc },
+    document: { createTextNode: (value) => textNode(value), createElement: (tag) => (tag === 'canvas' ? fakeCompositeCanvas() : element(tag)), ...doc },
     location: new URL('https://example.test/'),
     URL,
     Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
     fetch: async () => { throw new Error('no network in test'); },
     btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
+    requestAnimationFrame: (cb) => setTimeout(cb, 0),
     console,
   });
   return vm.runInContext(extractorCode, context);
+}
+
+// extractor 里 document.createElement('canvas') 的合成画布夹具：
+// 只需白底 fillRect/逐层 drawImage/toDataURL 三个动作，像素检查读的是源图层自己的 context
+function fakeCompositeCanvas() {
+  return {
+    width: 0, height: 0,
+    getContext: () => ({ fillStyle: null, fillRect() {}, drawImage() {} }),
+    toDataURL: () => `data:image/png;base64,${Buffer.from('fake-png-bytes').toString('base64')}`,
+  };
 }
 
 // img 夹具：candidate() 读 dataset/currentSrc/src/alt，mini-DOM 没有这些，后挂
@@ -592,4 +603,83 @@ test('role=button 内的控件提示文字不进入正文，按钮内图片锚�
   assert.ok(!result.markdown.includes('Press enter'), '控件提示文字不应进入正文');
   assert.ok(result.markdown.includes('[[FEISHU_CLIP_IMAGE:0]]'), '按钮内图片锚点应保留');
   assert.equal(result.images.length, 1);
+});
+
+// canvas 组图（#52，labuladong 算法图形：每容器多层叠放 2d canvas、懒渲染、无独立 URL）：
+// 按父容器分组合成一张 PNG，以 bytesBase64 接入图片管线，锚点留在组图原位置；
+// 全透明组（未滚入视口未渲染/空层）丢弃，不产生空白图片块
+function canvasLayer(width, height, painted) {
+  const node = element('canvas');
+  node.width = width;
+  node.height = height;
+  node.getContext = () => ({
+    getImageData: (x, y, w, h) => {
+      const data = new Uint8ClampedArray(w * h * 4);
+      if (painted) data[3] = 255; // 有一个非零 alpha 即视为已绘制
+      return { data };
+    },
+  });
+  return node;
+}
+
+test('canvas 组图：同容器多图层合成一张 PNG 候选，锚点留在组图原位置', async () => {
+  const doc = {
+    title: 'canvas 组图',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('div', [canvasLayer(1508, 596, false), canvasLayer(1508, 596, true), canvasLayer(1508, 596, false)]),
+      element('p', [textNode('后续段落')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 1, '一组 canvas 合成一个图片候选');
+  assert.equal(result.images[0].mimeType, 'image/png');
+  assert.ok(result.images[0].bytesBase64, '合成结果应以 bytesBase64 接入图片管线');
+  assert.equal(result.images[0].source, null, 'canvas 组图没有原站 URL');
+  assert.equal(result.images[0].width, 1508);
+  assert.equal(result.images[0].height, 596);
+  const anchorAt = result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:0]]');
+  assert.ok(anchorAt > -1, '组图原位应留锚点');
+  assert.ok(anchorAt > result.markdown.indexOf(LONG.slice(0, 12)) && anchorAt < result.markdown.indexOf('后续段落'), '锚点应在组图原位置（前后段落之间）');
+});
+
+test('canvas 组图：全透明组（未渲染）丢弃，不产生候选和锚点', async () => {
+  const doc = {
+    title: '未渲染 canvas',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('div', [canvasLayer(1508, 596, false), canvasLayer(1508, 596, false)]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 0, '全透明组应丢弃');
+  assert.ok(!result.markdown.includes('FEISHU_CLIP_IMAGE'), '丢弃的组不应留锚点');
+});
+
+test('canvas 组图：多个容器各自成组，候选与锚点按文档顺序排列', async () => {
+  const doc = {
+    title: '多组 canvas',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('div', [canvasLayer(100, 100, true), canvasLayer(100, 100, false)]),
+      element('p', [textNode('中间段落')]),
+      element('div', [canvasLayer(200, 80, true)]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.equal(result.images.length, 2, '每个容器各合成一张');
+  assert.equal(result.images[0].width, 100);
+  assert.equal(result.images[1].width, 200);
+  const first = result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:0]]');
+  const second = result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:1]]');
+  assert.ok(first > -1 && second > first, '锚点应按文档顺序编号排列');
 });

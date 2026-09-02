@@ -145,6 +145,73 @@
         clone.replaceWith(placeholder);
       }
 
+      // canvas 组图管线（#52）：labuladong 的算法图形（加权图、生成树演示）是每容器
+      // 多层叠放的 2d canvas、懒渲染（滚入视口才绘制），既不是 <img> 也没有独立 URL，
+      // 不处理就整块丢失。按父容器分组，逐组滚入视口等两帧触发绘制，按 DOM 序合成
+      // 一张 PNG，以 bytesBase64 接入图片管线（走「下载上传」级，落成真正的飞书图片块）。
+      // 与 iframe 同理须在清理前做。原树/克隆树的 canvas 列表按 querySelectorAll 顺序对齐
+      const originalCanvases = [...sourceRoot.querySelectorAll('canvas')];
+      const clonedCanvases = [...root.querySelectorAll('canvas')];
+      const canvasGroups = []; // 按父容器分组，组内保文档序
+      const groupByHolder = new Map();
+      for (const [canvasIndex, canvas] of originalCanvases.entries()) {
+        const holder = canvas.parentElement || canvas;
+        if (!groupByHolder.has(holder)) { groupByHolder.set(holder, []); canvasGroups.push(groupByHolder.get(holder)); }
+        groupByHolder.get(holder).push(canvasIndex);
+      }
+      const waitForPaint = () => new Promise((resolve) => {
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(resolve));
+        else setTimeout(resolve, 50);
+      });
+      const scrollPos = typeof window !== 'undefined' && Number.isFinite(window.scrollX) ? { x: window.scrollX, y: window.scrollY } : null;
+      for (const group of canvasGroups.slice(0, 10)) {
+        if (images.length >= 30) break; // 与 <img> 共用候选上限
+        const layers = group.map((canvasIndex) => originalCanvases[canvasIndex]);
+        const width = Math.max(...layers.map((layer) => layer.width || 0));
+        const height = Math.max(...layers.map((layer) => layer.height || 0));
+        if (!width || !height) continue;
+        try {
+          const holder = layers[0].parentElement || layers[0];
+          if (typeof holder.scrollIntoView === 'function') { holder.scrollIntoView({ block: 'center' }); await waitForPaint(); }
+          // 先查源图层有没有绘制（全透明 = 懒渲染未触发/空层组），再合成——
+          // 白底打底会把 alpha 全填成 255，合成后就查不出来了
+          let painted = false;
+          for (const layer of layers) {
+            const layerCtx = typeof layer.getContext === 'function' ? layer.getContext('2d') : null;
+            if (!layerCtx) continue;
+            const data = layerCtx.getImageData(0, 0, layer.width, layer.height).data;
+            for (let p = 3; p < data.length; p += 4) if (data[p] !== 0) { painted = true; break; }
+            if (painted) break;
+          }
+          if (!painted) continue;
+          const comp = document.createElement('canvas');
+          comp.width = width;
+          comp.height = height;
+          const ctx = comp.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, width, height);
+          for (const layer of layers) ctx.drawImage(layer, 0, 0);
+          const bytesBase64 = comp.toDataURL('image/png').split(',')[1];
+          if (!bytesBase64) continue;
+          const byteLength = Math.floor(bytesBase64.length * 3 / 4);
+          if (browserBytes + byteLength > 40 * 1024 * 1024) continue; // 与 readableBytes 同一流量预算
+          browserBytes += byteLength;
+          const index = images.length;
+          images.push({ source: null, mimeType: 'image/png', bytesBase64, width, height });
+          // 克隆树里组内首个 canvas 原位替换为锚点（与 iframe 同理用 P 元素保持独立段落），
+          // 其余层移除；组图落在 nav/aside 等垃圾子树时锚点随后被清理带走，候选成孤儿——
+          // bridge 定位不到锚点会降级为一次失败的 media-insert + 警告，不破坏文档
+          const firstClone = clonedCanvases[group[0]];
+          if (firstClone) {
+            const placeholder = document.createElement('p');
+            placeholder.append(document.createTextNode(`[[FEISHU_CLIP_IMAGE:${index}]]`));
+            firstClone.replaceWith(placeholder);
+            for (const canvasIndex of group.slice(1)) clonedCanvases[canvasIndex]?.remove();
+          }
+        } catch { /* 单组失败（如画布被跨域污染）不拖垮整页提取 */ }
+      }
+      if (scrollPos && typeof window.scrollTo === 'function') window.scrollTo(scrollPos.x, scrollPos.y);
+
       // math 也清掉：KaTeX/MathJax 的 MathML 是公式的无障碍副本，正文另有可见渲染（katex-html 等），
       // 保留会让每个公式重复三遍（mrow 文本 + annotation 里的 TeX 源码 + 可见副本）；公式只留可见副本
       root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe,math').forEach((node) => node.remove());
