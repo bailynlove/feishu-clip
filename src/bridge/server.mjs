@@ -90,10 +90,20 @@ function larkQueryError(error) {
 
 export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console }) {
   const pairing = new PairingStore(config.pairingFile);
-  const store = new PersistentJobStore({ filePath: config.jobFile });
+  const store = new PersistentJobStore({ filePath: config.jobFile, jobTtlMs: config.jobTtlMs });
   const executor = new ClipExecutor({ store, lark, logger });
-  await store.recoverExpired();
-  executor.kick();
+  // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
+  // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出
+  const sweep = async () => {
+    await store.recoverExpired();
+    await executor.reconcile();
+    executor.kick();
+  };
+  await sweep();
+  const sweepTimer = setInterval(() => {
+    sweep().catch((error) => logger.error('periodic sweep failed', error));
+  }, config.sweepIntervalMs ?? 10 * 60_000);
+  sweepTimer.unref();
 
   const server = createServer(async (request, response) => {
     const origin = String(request.headers.origin || '');

@@ -25,6 +25,8 @@ Before calling Feishu, the worker must persist `beginCreate`. A crash with this 
 - confirmed absent → it queues `create_document` again;
 - reconciliation itself expires → `needs_attention`.
 
+This query runs in the Bridge's sweep (`ClipExecutor.reconcile()`): once at startup and then on a periodic interval (`sweepIntervalMs`, default 10 minutes), alongside `recoverExpired`. Only a document whose body carries the attempt marker is adopted; a same-titled document without the marker cannot be proven ours and is treated as absent.
+
 ## Cancellation
 
 - Before a document exists → `cancelled`.

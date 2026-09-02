@@ -5,6 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { FAILURE_STAGE, JOB_STATUS } from './job-store.mjs';
 import { downloadPublicImage, IMAGE_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
 
+// 尝试标记：写在元信息引用块里（prepareMarkdown），reconcile 靠它在 wiki 里反查认领文档
+const ATTEMPT_MARKER_PREFIX = '剪藏尝试：';
+
 function safeTitle(value) {
   return String(value || '网页剪藏').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 180) || '网页剪藏';
 }
@@ -45,7 +48,7 @@ export function prepareMarkdown(snapshot, attemptId, { includeImages = false } =
   const metadata = [
     source ? `> 来源：[${escapeMarkdown(source)}](${source})` : '> 来源：不可用',
     `> 剪藏时间：${new Date(snapshot.capturedAt || Date.now()).toISOString()}`,
-    `> 剪藏尝试：${attemptId}`,
+    `> ${ATTEMPT_MARKER_PREFIX}${attemptId}`,
     '',
   ].join('\n');
   return { markdown: `${metadata}${body}`.trim(), images };
@@ -124,6 +127,7 @@ export class ClipExecutor {
     this.lark = lark;
     this.logger = logger;
     this.running = false;
+    this.reconcileRunning = false;
   }
 
   kick() {
@@ -141,6 +145,71 @@ export class ClipExecutor {
       if (!job) return;
       await this.#execute(job).catch((error) => this.logger.error('clip worker failed', error));
     }
+  }
+
+  // 收尾「建档歧义」（create 超时但服务端可能已建出，协议见 docs/job-protocol.md）：
+  // 命中（正文带本尝试标记）→ 记录 document 重排 write_body；确认未建 → 重排 create_document；
+  // 单个任务查证失败不拖累其他任务，保持 reconciling 等下轮 sweep 或 TTL 兜底。
+  // 重排由调用方（server 的 sweep）随后 kick 消费，这里不直接 kick，便于测试只观察状态迁移
+  async reconcile() {
+    if (this.reconcileRunning) return;
+    this.reconcileRunning = true;
+    try {
+      const jobs = await this.store.list({ statuses: [JOB_STATUS.RECONCILING, JOB_STATUS.CANCEL_PENDING_RECONCILIATION] });
+      for (const job of jobs) {
+        try {
+          const document = await this.#findCreatedDocument(job);
+          await this.store.resolveAmbiguousCreate(job.attemptId, { document });
+          this.logger.log?.('reconcile resolved', { attemptId: job.attemptId, found: document !== null });
+        } catch (error) {
+          this.logger.warn('reconcile failed', { attemptId: job.attemptId, error: error?.message || String(error) });
+        }
+      }
+    } finally {
+      this.reconcileRunning = false;
+    }
+  }
+
+  // 在目的地 wiki 反查本尝试建出的文档：同名 docx 节点 + 正文含尝试标记才算命中。
+  // 无标记的同名文档（空文档/别人的同名档/别的尝试）无法确证归属，一律按未建处理——
+  // 极端情况下（space 目标 node-create 自身超时）会留下空同名孤儿节点，人工删除即可
+  async #findCreatedDocument(job) {
+    const spaceId = job.destination?.spaceId;
+    if (!spaceId) throw new Error('任务目的地缺少 spaceId，无法查证');
+    const title = safeTitle(job.snapshot?.title);
+    const marker = `${ATTEMPT_MARKER_PREFIX}${job.attemptId}`;
+    const parentNodeToken = job.destination?.kind === 'node' ? job.destination?.nodeToken : null;
+    const nodes = [];
+    let pageToken = null;
+    for (let page = 0; page < 20; page += 1) {
+      const args = ['wiki', '+node-list', '--as', 'user', '--space-id', spaceId, '--page-size', '50', '--format', 'json'];
+      if (parentNodeToken) args.push('--parent-node-token', parentNodeToken);
+      if (pageToken) args.push('--page-token', pageToken);
+      const result = await this.lark.run(args, { timeoutMs: 30_000 });
+      const data = result.data || {};
+      nodes.push(...(data.nodes || []));
+      pageToken = data.has_more === true ? data.page_token || null : null;
+      if (!pageToken) break;
+    }
+    // 创建时间窗锚在 job.createdAt 前后（create 调用最多跑满本地超时 + 服务端导入滞后），
+    // 排除同名老文档，也省得对无关候选拉正文；缺创建时间的节点无法确证，直接排除
+    const windowStart = (job.createdAt ?? 0) - 120_000;
+    const windowEnd = (job.createdAt ?? 0) + 20 * 60_000;
+    const candidates = nodes.filter((node) => {
+      if (node.obj_type !== 'docx' || node.title !== title || !node.obj_token) return false;
+      const createdMs = Number(node.obj_create_time) * 1000;
+      return Number.isFinite(createdMs) && createdMs >= windowStart && createdMs <= windowEnd;
+    });
+    for (const candidate of candidates) {
+      const fetched = await this.lark.run(['docs', '+fetch', '--as', 'user', '--doc', candidate.obj_token, '--format', 'json'], { timeoutMs: 30_000 });
+      // 标记在文档元信息引用块里，截断不影响判定，还能省掉大文档的全量驻留
+      const content = String(fetched.data?.document?.content || '').slice(0, 20_000);
+      if (content.includes(marker)) {
+        // node-list 不返回文档 URL，按 wiki 节点惯例拼（本项目只面向 feishu.cn 租户）
+        return { documentId: candidate.obj_token, url: `https://my.feishu.cn/wiki/${candidate.node_token}` };
+      }
+    }
+    return null;
   }
 
   async #execute(job) {

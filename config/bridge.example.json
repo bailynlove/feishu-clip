@@ -4,5 +4,6 @@
   "port": 38479,
   "larkCliPath": "/absolute/path/to/lark-cli",
   "jobFile": "/Users/you/Library/Application Support/FeishuClip/state/jobs.json",
-  "pairingFile": "/Users/you/Library/Application Support/FeishuClip/config/pairing.json"
+  "pairingFile": "/Users/you/Library/Application Support/FeishuClip/config/pairing.json",
+  "sweepIntervalMs": 600000
 }
