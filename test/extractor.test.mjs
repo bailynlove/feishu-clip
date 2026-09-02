@@ -683,3 +683,276 @@ test('canvas 组图：多个容器各自成组，候选与锚点按文档顺序�
   const second = result.markdown.indexOf('[[FEISHU_CLIP_IMAGE:1]]');
   assert.ok(first > -1 && second > first, '锚点应按文档顺序编号排列');
 });
+
+// markmap 大纲转写（#54）：labuladong 的思维导图是 markmap 组件——源 markdown 内嵌在
+// Next.js RSC 流式 payload（内联 script，JSON 转义形态），客户端渲染成内联 svg.markmap-svg。
+// svg 原本随垃圾清理整块丢失；现在按 DOM 顺序与 payload 里的源配对，转写为嵌套无序列表，
+// 锚定在导图原位置（保文字层级，丢图形；不做 SVG 光栅化，已否决）
+const MARKMAP_SOURCE = '---\nmarkmap:\n  pan: false\n  colorFreezeLevel: 2\n---\n\n# 最短路径问题\n\n## 单源最短路径\n\n### Dijkstra 算法\n\n- 由 BFS 算法扩展而来\n- 适用于非负权图\n\n### Bellman-Ford 算法\n\n- 可以处理负权边';
+
+function markmapSvg() {
+  const node = element('svg');
+  node.setAttribute('class', 'markmap-svg markmap');
+  return node;
+}
+
+// RSC payload 夹具：extractor 从 document.querySelectorAll('script') 读 script 的 textContent
+function rscPayload(content) {
+  return { textContent: JSON.stringify({ content }) }; // JSON 转义形态（\n 为字面两字符）
+}
+
+test('markmap 导图：转写为嵌套无序列表，锚定在导图原位置', async () => {
+  const doc = {
+    title: 'markmap 页面',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('div', [markmapSvg()]),
+      element('p', [textNode('导图之后的段落')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === 'script' ? [rscPayload(MARKMAP_SOURCE)] : []),
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  // 转写规则：标题每深一级多一层缩进，标题下的 - 项再深一层；frontmatter 丢弃
+  const outline = [
+    '- 最短路径问题',
+    '  - 单源最短路径',
+    '    - Dijkstra 算法',
+    '      - 由 BFS 算法扩展而来',
+    '      - 适用于非负权图',
+    '    - Bellman-Ford 算法',
+    '      - 可以处理负权边',
+  ];
+  const lines = result.markdown.split('\n');
+  const start = lines.findIndex((line) => line === '- 最短路径问题');
+  assert.ok(start > -1, '应有导图大纲');
+  assert.deepEqual(lines.slice(start, start + outline.length), outline);
+  assert.ok(!result.markdown.includes('pan: false'), 'frontmatter 应丢弃');
+  const before = lines.findIndex((line) => line.includes('足够长的正文内容'));
+  const after = lines.findIndex((line) => line.includes('导图之后的段落'));
+  assert.ok(start > before && start + outline.length <= after, '大纲应锚定在导图原位置（前后段落之间）');
+});
+
+test('一页多个 markmap 导图：按 DOM 顺序与 payload 顺序配对', async () => {
+  const doc = {
+    title: '多导图页面',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('div', [markmapSvg()]),
+      element('p', [textNode('两个导图之间的段落')]),
+      element('div', [markmapSvg()]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === 'script' ? [rscPayload('---\nmarkmap:\n  pan: false\n---\n\n# 甲图\n\n- 甲要点'), rscPayload('---\nmarkmap:\n  pan: false\n---\n\n# 乙图\n\n- 乙要点')] : []),
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  const first = result.markdown.indexOf('- 甲图');
+  const middle = result.markdown.indexOf('两个导图之间的段落');
+  const second = result.markdown.indexOf('- 乙图');
+  assert.ok(first > -1 && second > -1, '两个导图都应转写');
+  assert.ok(first < middle && middle < second, '源应按出现顺序与导图配对');
+  assert.ok(result.markdown.includes('  - 甲要点') && result.markdown.includes('  - 乙要点'));
+});
+
+test('markmap 源数量与导图数量不符：跳过转写，不产生空列表', async () => {
+  const doc = {
+    title: '配对失败',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      element('div', [markmapSvg()]),
+      element('div', [markmapSvg()]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === 'script' ? [rscPayload('---\nmarkmap:\n  pan: false\n---\n\n# 只有一个源')] : []), // 2 个导图 1 个源
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('- 只有一个源'), '配对不可靠时应整体跳过');
+  assert.ok(!result.markdown.includes('markmap'), '不应残留导图内容');
+});
+
+test('markmap 找不到源：导图跳过且不残留 svg 内容', async () => {
+  const doc = {
+    title: '无源导图',
+    body: element('body', [element('p', [textNode(LONG)]), element('div', [markmapSvg()])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('- '), '无源导图不应产生空列表');
+});
+
+test('普通 svg（图标等）不触发 markmap 转写，既有清理行为不变', async () => {
+  const icon = element('svg');
+  icon.setAttribute('class', 'w-4 h-4');
+  const doc = {
+    title: '普通 svg',
+    body: element('body', [element('p', [textNode(LONG), icon, textNode('结尾')])]),
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === 'script' ? [rscPayload('---\nmarkmap:\n  pan: false\n---\n\n# 不应被消费的源')] : []),
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('- 不应被消费的源'), '无 markmap 导图时源不得进入正文');
+  assert.ok(result.markdown.includes('结尾'));
+});
+
+// 高亮块转写（#55）：labuladong 等站点的提示框（前置知识/一句话总结/注意事项）是 Tailwind
+// 容器 div.bg-{color}-50（首子元素为图标 svg + 标题行），平铺渲染会丢掉视觉分组。
+// 转写为 <callout> XML 岛（bridge 的 lark-cli markdown 导入解析 XML 标签，已实测可行）：
+// background-color="light-{color}" border-color="{color}"，emoji 按色名固定映射，无匹配默认 💡。
+// 容器内含 callout 不支持的子块（图片锚点/pre 代码块/表格/嵌套高亮块）时回退平铺渲染
+function calloutBox(color, children) {
+  const box = element('div', children);
+  box.setAttribute('class', `bg-${color}-50 rounded-lg p-4`);
+  return box;
+}
+
+function calloutTitleRow(title) {
+  return element('div', [element('svg'), element('span', [textNode(title)])]); // 图标 svg + 标题文字
+}
+
+test('高亮块：bg-blue-50 容器转写为 callout，标题行保留为首个加粗段落，svg 图标清理', async () => {
+  const doc = {
+    title: '高亮块页面',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      calloutBox('blue', [calloutTitleRow('前置知识'), element('p', [textNode('需要先了解图的基本遍历算法')])]),
+      element('p', [textNode('高亮块之后的段落')]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(result.markdown.includes('<callout emoji="📘" background-color="light-blue" border-color="blue">'), '应转写为 callout 且颜色映射正确');
+  assert.ok(result.markdown.includes('<p><b>前置知识</b></p>'), '标题行应保留为 callout 内首个加粗段落');
+  assert.ok(result.markdown.includes('<p>需要先了解图的基本遍历算法</p>'));
+  assert.ok(result.markdown.includes('</callout>'));
+  assert.ok(result.markdown.indexOf('<callout') > result.markdown.indexOf(LONG.slice(0, 12)), 'callout 应锚定在容器原位置');
+  assert.ok(result.markdown.indexOf('</callout>') < result.markdown.indexOf('高亮块之后的段落'));
+});
+
+test('高亮块 emoji 颜色映射：purple→📌 yellow→⚠️ red→❗ green→✅ 未知色→💡', async () => {
+  const cases = { purple: '📌', yellow: '⚠️', red: '❗', green: '✅', pink: '💡' };
+  for (const [color, emoji] of Object.entries(cases)) {
+    const doc = {
+      title: `${color} 高亮块`,
+      body: element('body', [
+        element('p', [textNode(LONG)]),
+        calloutBox(color, [calloutTitleRow('提示'), element('p', [textNode('内容')])]),
+      ]),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    };
+    const result = await runExtractor(doc);
+    assert.equal(result.error, undefined);
+    assert.ok(result.markdown.includes(`<callout emoji="${emoji}" background-color="light-${color}" border-color="${color}">`), `${color} 应映射为 ${emoji}`);
+  }
+});
+
+test('高亮块内含 pre 代码块：回退平铺渲染，不产生非法 callout', async () => {
+  const doc = {
+    title: '带代码块的高亮块',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      calloutBox('yellow', [calloutTitleRow('注意'), element('pre', [textNode('const x = 1;')])]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('<callout'), '含 pre 的高亮块应回退平铺');
+  assert.ok(result.markdown.includes('```\nconst x = 1;\n```'), '代码块应照常渲染');
+  assert.ok(result.markdown.includes('注意'), '标题文字不丢');
+});
+
+test('高亮块内含图片：回退平铺渲染，图片锚点保留', async () => {
+  const doc = {
+    title: '带图高亮块',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      calloutBox('green', [calloutTitleRow('总结'), element('p', [textNode('见下图'), img('https://example.test/in-callout.png')])]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('<callout'), '含图片锚点的高亮块应回退平铺');
+  assert.ok(result.markdown.includes('[[FEISHU_CLIP_IMAGE:0]]'), '图片锚点应保留');
+});
+
+test('高亮块内含表格：回退平铺渲染', async () => {
+  const table = element('table', [
+    element('tr', [element('th', [textNode('列一')])]),
+    element('tr', [element('td', [textNode('值一')])]),
+  ]);
+  const doc = {
+    title: '带表格高亮块',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      calloutBox('red', [calloutTitleRow('对比'), table]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('<callout'), '含表格的高亮块应回退平铺');
+  assert.ok(result.markdown.includes('| 列一 |'), '表格应照常渲染');
+});
+
+test('高亮块内文本按 XML 规则转义：& < > 不断句', async () => {
+  const doc = {
+    title: '特殊字符高亮块',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      calloutBox('blue', [calloutTitleRow('提示'), element('p', [textNode('a & b 对比：1 < 2 且 3 > 2')])]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(result.markdown.includes('<p>a &amp; b 对比：1 &lt; 2 且 3 &gt; 2</p>'), 'callout 内文本应 XML 转义且不断句');
+});
+
+test('高亮块内的行内格式与列表：转为 XML 标签', async () => {
+  const doc = {
+    title: '富内容高亮块',
+    body: element('body', [
+      element('p', [textNode(LONG)]),
+      calloutBox('purple', [
+        calloutTitleRow('一句话总结'),
+        element('p', [element('strong', [textNode('Dijkstra')]), textNode(' 本质是带优先级的 BFS')]),
+        element('ul', [element('li', [textNode('第一点')]), element('li', [textNode('第二点')])]),
+      ]),
+    ]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(result.markdown.includes('<p><b>Dijkstra</b> 本质是带优先级的 BFS</p>'), '行内加粗应转为 <b>');
+  assert.ok(result.markdown.includes('<ul><li>第一点</li><li>第二点</li></ul>'), '列表应转为 <ul><li>');
+});
+
+test('无背景色类的普通 div：渲染行为不变，不包 callout', async () => {
+  const plain = element('div', [element('p', [textNode('普通容器内容')])]);
+  plain.setAttribute('class', 'prose max-w-none');
+  const doc = {
+    title: '普通 div',
+    body: element('body', [element('p', [textNode(LONG)]), plain]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('<callout'));
+  assert.ok(result.markdown.includes('普通容器内容'));
+});

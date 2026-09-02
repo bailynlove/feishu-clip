@@ -67,6 +67,124 @@
       walk(sourceRoot);
       return tagged;
     }
+
+    // markmap 源收集（#54）：labuladong 的思维导图是 markmap 组件，源 markdown 内嵌在
+    // Next.js RSC 流式 payload（内联 script）里，形如 {"content":"---\nmarkmap:\n...\n# 标题\n..."}
+    // （JSON 转义形态，可能再被外层字符串套一层转义，逐层反转义直到匹配或没有转义可解）
+    function markmapSources() {
+      const sources = [];
+      if (typeof document.querySelectorAll !== 'function') return sources;
+      // 逐层反转义：\uXXXX 是 Next.js 的 XSS 安全编码（< → < 等），单独解码；
+      // 其余按 JSON/JS 字符串转义处理（\" → "、\\n 先解成 \n 留给 JSON.parse、未知转义丢反斜杠）
+      const unescapeOnce = (value) => value.replace(/\\(u[0-9a-fA-F]{4}|[\s\S])/g, (match, char) => {
+        if (char[0] === 'u' && char.length === 5) return String.fromCharCode(parseInt(char.slice(1), 16));
+        return ({ n: '\n', t: '\t', r: '\r' })[char] ?? char;
+      });
+      for (const script of document.querySelectorAll('script')) {
+        let payload = script.textContent || '';
+        for (let round = 0; round < 3; round += 1) {
+          let found = 0;
+          for (const match of payload.matchAll(/"content"\s*:\s*"((?:\\[\s\S]|[^"\\])*)"/g)) {
+            let content = match[1];
+            try { content = JSON.parse(`"${content}"`); } catch { /* 已部分反转义的形态，原样使用 */ }
+            if (/^---\s*\n\s*markmap:/.test(content)) { sources.push(content); found += 1; }
+          }
+          if (found > 0 || !payload.includes('\\')) break;
+          payload = unescapeOnce(payload);
+        }
+      }
+      return sources;
+    }
+
+    // markmap 源 = frontmatter + 标准 markdown 标题树/列表。转写规则：#~###### 标题层级与
+    // -/* 列表统一映射为嵌套无序列表（标题每深一级多一层缩进，标题下的列表项再深一层），
+    // frontmatter 丢弃；正文行按当前标题层级挂为列表项，避免整段丢失
+    function markmapOutline(source) {
+      const lines = source.split('\n');
+      let start = 0;
+      if (lines[0]?.trim() === '---') {
+        const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+        if (end > 0) start = end + 1;
+      }
+      const items = [];
+      let headingDepth = 0; // 最近一个标题的层级，决定后续列表项/正文行的缩进
+      for (const line of lines.slice(start)) {
+        const heading = line.match(/^(#{1,6})\s+(.*)$/);
+        if (heading) {
+          headingDepth = heading[1].length;
+          if (heading[2].trim()) items.push({ depth: headingDepth - 1, text: heading[2].trim() });
+          continue;
+        }
+        const bullet = line.match(/^(\s*)[-*]\s+(.*)$/);
+        if (bullet) {
+          if (bullet[2].trim()) items.push({ depth: headingDepth + Math.floor(bullet[1].length / 2), text: bullet[2].trim() });
+          continue;
+        }
+        const plain = line.trim();
+        if (plain) items.push({ depth: headingDepth, text: plain });
+      }
+      return items;
+    }
+
+    // 把 {depth, text} 序列建成嵌套 UL/LI，交给 render 的既有列表分支输出缩进；
+    // 层级跳变（如 # 直接跳到 ###）压平到当前的下一级，防止出现空的中间层
+    function buildOutlineList(items) {
+      if (!items.length) return null;
+      const rootList = document.createElement('ul');
+      const levels = [{ list: rootList, lastLi: null, parentLi: null }]; // levels[d] 服务深度 d
+      let maxDepth = 0;
+      for (const item of items) {
+        const depth = Math.max(0, Math.min(item.depth, maxDepth + 1));
+        if (depth > 0) {
+          const parent = levels[depth - 1];
+          // 子列表属于父层级当前的最后一个 li；父 li 变了（回到浅层又下来）就新建子列表
+          if (!levels[depth] || levels[depth].parentLi !== parent.lastLi) {
+            const sub = document.createElement('ul');
+            (parent.lastLi || parent.list).append(sub);
+            levels[depth] = { list: sub, lastLi: null, parentLi: parent.lastLi || null };
+          }
+        }
+        levels.length = depth + 1; // 回到浅层时截断更深层级
+        const li = document.createElement('li');
+        li.append(document.createTextNode(item.text));
+        levels[depth].list.append(li);
+        levels[depth].lastLi = li;
+        maxDepth = Math.max(maxDepth, depth);
+      }
+      return rootList;
+    }
+
+    // 高亮块（#55）的 XML 岛工具函数：callout 内是 XML 不是 markdown——文本按 XML 规则转义
+    // （标签本身不转义），常见行内 markdown 转对应 XML 标签（lark-cli markdown 导入会解析）
+    function xmlEscape(value) { return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    function inlineXml(value) {
+      return xmlEscape(value)
+        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2">$1</a>');
+    }
+    // callout 子块只支持文本/标题/列表/待办/引用且禁止裸文本：把 render 出的 markdown
+    // 按空行分块，逐块转成 XML 块（段落 <p>、标题 <hN>、列表 <ul>/<ol>、引用 <blockquote>）
+    function calloutBlocks(markdown) {
+      return markdown.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean).map((block) => {
+        const lines = block.split('\n');
+        if (lines.every((line) => /^\s*[-*]\s+/.test(line))) {
+          return `<ul>${lines.map((line) => `<li>${inlineXml(line.replace(/^\s*[-*]\s+/, '').trim())}</li>`).join('')}</ul>`;
+        }
+        if (lines.every((line) => /^\s*\d+\.\s+/.test(line))) {
+          return `<ol>${lines.map((line) => `<li>${inlineXml(line.replace(/^\s*\d+\.\s+/, '').trim())}</li>`).join('')}</ol>`;
+        }
+        if (lines.every((line) => /^>\s?/.test(line))) {
+          return `<blockquote>${lines.map((line) => `<p>${inlineXml(line.replace(/^>\s?/, '').trim())}</p>`).join('')}</blockquote>`;
+        }
+        if (lines.length === 1) {
+          const heading = block.match(/^(#{1,6})\s+(.*)$/);
+          if (heading) return `<h${heading[1].length}>${inlineXml(heading[2].trim())}</h${heading[1].length}>`;
+        }
+        return `<p>${lines.map((line) => inlineXml(line.trim())).join('<br/>')}</p>`;
+      });
+    }
+
     function render(node, depth = 0) {
       if (node.nodeType === Node.TEXT_NODE) return node.nodeValue.replace(/\s+/g, ' ');
       if (node.nodeType !== Node.ELEMENT_NODE) return '';
@@ -81,6 +199,37 @@
           const rendered = render(child, depth);
           return rendered.includes('[[FEISHU_CLIP_') ? rendered : '';
         }).join('');
+      }
+      // 高亮块（#55）：labuladong 等站点的提示框（前置知识/一句话总结/注意事项）是 Tailwind
+      // 容器 div.bg-{color}-50（首子元素为图标 svg + 标题行），按普通 div 平铺会丢掉视觉分组。
+      // 转写为 <callout> XML 岛，颜色映射 light-{color}/{color}，emoji 按色名固定映射。
+      // 容器内含 callout 不支持的子块（图片/iframe 占位符、pre、表格、嵌套高亮块）时回退平铺渲染
+      if (tag === 'DIV') {
+        const colorMatch = (node.getAttribute('class') || '').match(/(?:^|\s)bg-([a-z]+)-50(?:\s|$)/);
+        if (colorMatch) {
+          const color = colorMatch[1];
+          const nested = [...node.querySelectorAll('div')].some((div) => /(?:^|\s)bg-[a-z]+-50(?:\s|$)/.test(div.getAttribute('class') || ''));
+          const unsupported = nested
+            || node.querySelectorAll('pre').length > 0
+            || node.querySelectorAll('table').length > 0
+            || (node.textContent || '').includes('[[FEISHU_CLIP_'); // 图片锚点/iframe 占位符
+          if (!unsupported) {
+            // 首子元素是图标 svg + 标题行（svg 已被垃圾清理带走），保留为 callout 内首个加粗段落
+            let titleRowSeen = false;
+            let title = '';
+            const rest = [];
+            for (const child of node.childNodes) {
+              if (!titleRowSeen && child.nodeType === Node.ELEMENT_NODE) { titleRowSeen = true; title = text(child); continue; }
+              rest.push(render(child, depth));
+            }
+            const blocks = calloutBlocks(rest.join(''));
+            if (title) blocks.unshift(`<p><b>${inlineXml(title)}</b></p>`);
+            if (blocks.length > 0) {
+              const emoji = { blue: '📘', purple: '📌', yellow: '⚠️', red: '❗', green: '✅' }[color] || '💡';
+              return `\n\n<callout emoji="${emoji}" background-color="light-${color}" border-color="${color}">${blocks.join('')}</callout>\n\n`;
+            }
+          }
+        }
       }
       if (/^H[1-6]$/.test(tag)) return `\n\n${'#'.repeat(Number(tag[1]))} ${text(node)}\n\n`;
       if (tag === 'P' || tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE') return `\n\n${children()}\n\n`;
@@ -211,6 +360,21 @@
         } catch { /* 单组失败（如画布被跨域污染）不拖垮整页提取 */ }
       }
       if (scrollPos && typeof window.scrollTo === 'function') window.scrollTo(scrollPos.x, scrollPos.y);
+
+      // markmap 大纲转写（#54）：导图渲染产物是内联 svg.markmap-svg，垃圾清理会把它整块清掉，
+      // 须在清理前把导图原位替换为源 markdown 转写出的嵌套列表。源（RSC payload 内联 script）
+      // 与导图按各自的出现顺序配对（spike 确认两者顺序一致）；数量不符说明配对不可靠，全部跳过，
+      // 留下的 svg 随垃圾清理移除——不产生空列表或残留。普通 svg（图标等）不受影响
+      const markmapSvgs = [...root.querySelectorAll('svg')].filter((svg) => (svg.getAttribute('class') || '').includes('markmap-svg'));
+      if (markmapSvgs.length > 0) {
+        const sources = markmapSources();
+        if (sources.length === markmapSvgs.length) {
+          for (const [svgIndex, svg] of markmapSvgs.entries()) {
+            const outline = buildOutlineList(markmapOutline(sources[svgIndex]));
+            if (outline) svg.replaceWith(outline); // 空大纲的导图不动，随后按垃圾清掉
+          }
+        }
+      }
 
       // math 也清掉：KaTeX/MathJax 的 MathML 是公式的无障碍副本，正文另有可见渲染（katex-html 等），
       // 保留会让每个公式重复三遍（mrow 文本 + annotation 里的 TeX 源码 + 可见副本）；公式只留可见副本

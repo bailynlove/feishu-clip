@@ -1,5 +1,5 @@
 // 手写 mini-DOM，仅覆盖被测脚本用到的 DOM API（仓库测试零依赖约定，不引 linkedom）。
-// 支持：nodeType/textContent/childNodes/append/cloneNode/querySelectorAll(单标签)/getAttribute/setAttribute/removeAttribute/remove/replaceWith/after/closest(单标签)。
+// 支持：nodeType/textContent/childNodes/children/append/cloneNode/querySelectorAll(单标签、':scope > 标签')/getAttribute/setAttribute/removeAttribute/remove/replaceWith/after/closest(单标签)。
 
 function link(parent, kids) {
   return kids.filter((kid) => kid && typeof kid === 'object').map((kid) => {
@@ -24,6 +24,7 @@ export function element(tag, children = []) {
   const node = {
     nodeType: 1, tagName: tag.toUpperCase(), childNodes: [], parentElement: null, attributes: {},
     get textContent() { return this.childNodes.map((c) => c.textContent ?? '').join(''); },
+    get children() { return this.childNodes.filter((c) => c.nodeType === 1); },
     append(...kids) {
       node.childNodes.push(...link(node, kids));
     },
@@ -37,7 +38,7 @@ export function element(tag, children = []) {
       // 方法（闭包引用原节点）与 textContent（getter）不能拷
       Object.assign(copy, Object.fromEntries(
         Object.entries(node).filter(([key, value]) => typeof value !== 'function'
-          && !['nodeType', 'tagName', 'childNodes', 'parentElement', 'attributes', 'textContent'].includes(key)),
+          && !['nodeType', 'tagName', 'childNodes', 'children', 'parentElement', 'attributes', 'textContent'].includes(key)),
       ));
       if (deep) {
         for (const child of node.childNodes) {
@@ -46,15 +47,23 @@ export function element(tag, children = []) {
       }
       return copy;
     },
-    // 仅支持单标签选择器（如 'frame'/'img'）；组合选择器在测试夹具中约定无匹配
+    // 支持单标签选择器（如 'frame'/'img'）与 ':scope > th, :scope > td' 形式的直接子元素
+    // 选择器（render 的 TABLE 分支用）；其余组合选择器在测试夹具中约定无匹配
     querySelectorAll(selector) {
+      // ':scope > th, :scope > td' 形式（render 的 TABLE 分支用）：取直接子元素中的匹配标签
+      if (/^:scope\s*>/i.test(selector)) {
+        const tags = [...selector.matchAll(/>\s*([a-z]+)/gi)].map((m) => m[1].toUpperCase());
+        return node.childNodes.filter((c) => c.nodeType === 1 && tags.includes(c.tagName));
+      }
       if (!/^[a-z]+$/i.test(selector)) return [];
       const out = [];
       const walk = (n) => {
-        if (n.tagName === selector.toUpperCase()) out.push(n);
-        for (const child of n.childNodes ?? []) walk(child);
+        for (const child of n.childNodes ?? []) {
+          if (child.nodeType === 1 && child.tagName === selector.toUpperCase()) out.push(child);
+          walk(child);
+        }
       };
-      walk(node);
+      walk(node); // 与真实 DOM 一致：只查后代，不含节点自身
       return out;
     },
     querySelector() { return null; },
