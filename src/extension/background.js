@@ -1,6 +1,6 @@
 import { ensurePresets } from './presets.js';
 import { buildContext, renderBody, sanitizeClipTitle } from './templates.js';
-import { isJobForPage, TERMINAL_STATUSES } from './popup-state.js';
+import { isJobForPage } from './popup-state.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 
@@ -104,14 +104,11 @@ async function handle(message) {
     case 'GET_JOB': {
       const result = await bridge(`/v1/jobs/${message.attemptId}`);
       const job = result.job;
-      // 跨页面命中旧 attempt（弹窗在未剪藏过的页面打开）：终态顺手清指针，进行中的保留
-      // （回到原页面仍可恢复），但两种情况都不把 job 返回给弹窗展示
+      // 跨页面命中旧 attempt（弹窗在未剪藏过的页面打开）：不把 job 返回给弹窗展示。
+      // 注意查询永远不清 activeAttempt 指针（终态也不清）：指针只被下一次 CLIP 覆盖。
+      // 清掉会让原页面的成功态无从恢复——用户在别的页面开过弹窗，回到原页面就什么都看不到
       if (job && message.pageUrl && !isJobForPage(job, message.pageUrl)) {
-        if (TERMINAL_STATUSES.has(job.status)) await chrome.storage.local.remove('activeAttempt');
         return { ...result, job: null };
-      }
-      if (job && TERMINAL_STATUSES.has(job.status)) {
-        await chrome.storage.local.remove('activeAttempt');
       }
       return result;
     }
