@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { FAILURE_STAGE, JOB_STATUS } from './job-store.mjs';
+import { FAILURE_STAGE, IMAGE_MODES, JOB_STATUS } from './job-store.mjs';
 import { downloadPublicImage, IMAGE_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
 
 // 尝试标记：写在元信息引用块里（prepareMarkdown），reconcile 靠它在 wiki 里反查认领文档
@@ -240,7 +240,7 @@ export class ClipExecutor {
     };
     try {
       // 任务级图片写入模式：合法三态直用；存量任务只有 includeImages 布尔，false → off，其余 → preview
-      const imageMode = ['preview', 'download', 'off'].includes(job.imageMode) ? job.imageMode : (job.includeImages === false ? 'off' : 'preview');
+      const imageMode = IMAGE_MODES.includes(job.imageMode) ? job.imageMode : (job.includeImages === false ? 'off' : 'preview');
       const prepared = prepareMarkdown(job.snapshot, job.attemptId, { imageMode });
       if (!document) {
         const createStageAt = Date.now();

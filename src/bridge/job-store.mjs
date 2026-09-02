@@ -37,6 +37,9 @@ export const CLEANUP_STATUS = Object.freeze({
   SKIPPED: 'skipped',
 });
 
+// 图片写入模式（#53）：preview 预览优先 / download 下载优先 / off 不保存
+export const IMAGE_MODES = Object.freeze(['preview', 'download', 'off']);
+
 const JOB_STATUSES = new Set(Object.values(JOB_STATUS));
 const FAILURE_STAGES = new Set(Object.values(FAILURE_STAGE));
 const CLEANUP_STATUSES = new Set(Object.values(CLEANUP_STATUS));
