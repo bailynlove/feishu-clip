@@ -6,7 +6,9 @@ import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
+  imageModeHint,
 } from './options-state.js';
+import { resolveImageMode } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -232,9 +234,11 @@ function syncEditor() {
   $('#f-target-text').textContent = describeDestination(preset.destination);
   // 图标随目标类型切换（知识库 / 文档节点），与弹窗 chip 一致
   $('#f-target-icon').textContent = preset.destination?.kind === 'node' ? '📁' : '🗂';
-  const imagesOn = preset.includeImages !== false;
-  $('#f-images').classList.toggle('on', imagesOn);
-  $('#f-images').setAttribute('aria-pressed', String(imagesOn));
+  const imageMode = resolveImageMode(preset);
+  for (const option of document.querySelectorAll('#f-image-mode .ps-seg-opt')) {
+    option.classList.toggle('on', option.dataset.value === imageMode);
+  }
+  $('#f-image-mode-hint').textContent = imageModeHint(imageMode);
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
   for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
@@ -330,11 +334,12 @@ $('#f-name').addEventListener('input', () => {
 $('#f-name').addEventListener('change', () => {
   if (!$('#f-name').value.trim()) $('#f-name').value = editingPreset()?.name ?? '';
 });
-$('#f-images').addEventListener('click', () => {
-  const preset = editingPreset();
-  if (preset) applyMutation(updatePreset(state, editingId, { includeImages: preset.includeImages === false }));
-  syncEditor();
-});
+for (const option of document.querySelectorAll('#f-image-mode .ps-seg-opt')) {
+  option.addEventListener('click', () => {
+    applyMutation(updatePreset(state, editingId, { imageMode: option.dataset.value }));
+    syncEditor();
+  });
+}
 $('#f-title').addEventListener('input', () => {
   applyMutation(updatePreset(state, editingId, { titleTemplate: $('#f-title').value }), { quiet: true });
 });

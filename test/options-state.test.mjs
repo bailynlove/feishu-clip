@@ -5,6 +5,7 @@ import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
   jobStatusTone, jobStatusLabel, formatDuration, jobTotalLabel, formatClock, jobDisplayTitle, jobDetailRows,
+  IMAGE_MODE_OPTIONS, imageModeHint,
 } from '../src/extension/options-state.js';
 
 function makeState(count = 3) {
@@ -88,11 +89,25 @@ test('setDefaultPreset switches the default and ignores unknown ids', () => {
 
 test('updatePreset patches a preset immutably', () => {
   const state = makeState(1);
-  const next = updatePreset(state, state.presets[0].id, { includeImages: false, action: 'file' });
-  assert.equal(next.presets[0].includeImages, false);
+  const next = updatePreset(state, state.presets[0].id, { imageMode: 'off', action: 'file' });
+  assert.equal(next.presets[0].imageMode, 'off');
   assert.equal(next.presets[0].action, 'file');
-  assert.equal(state.presets[0].includeImages, true, '不改原 state');
+  assert.equal(state.presets[0].imageMode, 'preview', '不改原 state');
   assert.equal(updatePreset(state, 'nope', { name: 'x' }), state);
+});
+
+// ——— 图片写入模式（#53）：设置页三态选项与说明文案 ———
+
+test('IMAGE_MODE_OPTIONS lists the three modes in preview/download/off order', () => {
+  assert.deepEqual(IMAGE_MODE_OPTIONS.map((option) => option.value), ['preview', 'download', 'off']);
+  assert.deepEqual(IMAGE_MODE_OPTIONS.map((option) => option.label), ['预览优先', '下载优先', '不保存']);
+});
+
+test('image mode hints spell out the 依赖原站 / 较慢 / 不保存 tradeoffs', () => {
+  assert.match(imageModeHint('preview'), /原站/, '预览优先要说明依赖原站可持续访问');
+  assert.match(imageModeHint('download'), /较慢/, '下载优先要说明较慢');
+  assert.match(imageModeHint('off'), /不保存/, '不保存要说明不处理图片');
+  assert.equal(imageModeHint('bogus'), imageModeHint('preview'), '未知模式回退到默认（预览优先）说明');
 });
 
 // ——— triggers 校验（#32）———

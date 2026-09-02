@@ -7,6 +7,17 @@ import { createDefaultPreset } from './presets.js';
 // 模板变量快捷插入（决议 #30 的 v1 变量集）
 export const TEMPLATE_VARIABLES = ['title', 'url', 'host', 'date', 'time', 'datetime', 'content'];
 
+// 图片写入模式三态（#53）：选项顺序即设置页分段控件顺序；说明文案体现三者的取舍
+export const IMAGE_MODE_OPTIONS = [
+  { value: 'preview', label: '预览优先', hint: '公开图片直接嵌入预览块，最快；依赖原站可持续访问' },
+  { value: 'download', label: '下载优先', hint: '公开图片也下载上传为真实图片，较慢但更持久' },
+  { value: 'off', label: '不保存', hint: '不保存图片，原位保留可读文本与原图链接' },
+];
+
+export function imageModeHint(mode) {
+  return (IMAGE_MODE_OPTIONS.find((option) => option.value === mode) ?? IMAGE_MODE_OPTIONS[0]).hint;
+}
+
 function findIndex(state, id) {
   return state.presets.findIndex((preset) => preset.id === id);
 }

@@ -20,20 +20,20 @@ test('snapshot markers become traceable image anchors and unsafe sources are pla
   assert.match(prepared.markdown, /剪藏尝试：attempt-1/);
 });
 
-test('includeImages：有浏览器字节的图片保留锚点供上传管线定位', () => {
+test('imageMode preview：有浏览器字节的图片保留锚点供上传管线定位', () => {
   const prepared = prepareMarkdown({
     sourceUrl: 'https://example.com/article',
     capturedAt: '2026-08-12T00:00:00.000Z',
     markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]',
     images: [{ label: 'protected', source: 'https://example.com/a.png', bytesBase64: 'AA==' }],
-  }, 'attempt-1', { includeImages: true });
+  }, 'attempt-1', { imageMode: 'preview' });
   assert.match(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:0\]\]/);
   assert.doesNotMatch(prepared.markdown, /原图链接/);
 });
 
 // 图片管线（优先级：预览块 → 下载上传 → 纯链接）：无字节的公开图片保留锚点，
 // 由 bridge 图片阶段建 iframe 预览块（原图 URL 直出）；有字节的同样保留锚点
-test('includeImages：无字节的公开图片保留锚点，由 bridge 建预览块', () => {
+test('imageMode preview：无字节的公开图片保留锚点，由 bridge 建预览块', () => {
   const prepared = prepareMarkdown({
     sourceUrl: 'https://example.com/article',
     capturedAt: '2026-08-12T00:00:00.000Z',
@@ -42,23 +42,46 @@ test('includeImages：无字节的公开图片保留锚点，由 bridge 建预�
       { label: 'pub[lic]', source: 'https://cdn.example.com/a.png' },
       { label: 'protected', source: 'https://example.com/b.png', bytesBase64: 'AA==' },
     ],
-  }, 'attempt-1', { includeImages: true });
+  }, 'attempt-1', { imageMode: 'preview' });
   assert.match(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:0\]\]/, '公开图片保留锚点');
   assert.match(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:1\]\]/, '有字节的图片保留锚点');
   assert.doesNotMatch(prepared.markdown, /!\[/, '不再内联为 Markdown 图片语法');
 });
 
-test('includeImages：无字节且 URL 不安全的图片直接降级为文本，不进上传管线', () => {
+test('imageMode preview：无字节且 URL 不安全的图片直接降级为文本，不进上传管线', () => {
   const prepared = prepareMarkdown({
     sourceUrl: 'https://example.com/article',
     capturedAt: '2026-08-12T00:00:00.000Z',
     markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]',
     images: [{ label: 'blob图', source: 'blob:https://example.com/id' }],
-  }, 'attempt-1', { includeImages: true });
+  }, 'attempt-1', { imageMode: 'preview' });
   assert.match(prepared.markdown, /图片：blob图/);
   assert.doesNotMatch(prepared.markdown, /blob:https/);
   assert.doesNotMatch(prepared.markdown, /FEISHU_CLIP_IMAGE/);
   assert.notEqual(prepared.images[0].inline, true, 'URL 不安全不能内联');
+});
+
+// 图片写入模式（#53）：off 等价于旧 includeImages=false（锚点落成含原图链接的可读文本）；
+// download 与 preview 一样保留锚点，差别在图片阶段是否跳过预览块 pass
+test('imageMode off：锚点直接落成含原图链接的可读文本（同旧 includeImages:false）', () => {
+  const prepared = prepareMarkdown({
+    sourceUrl: 'https://example.com/article',
+    capturedAt: '2026-08-12T00:00:00.000Z',
+    markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'public', source: 'https://cdn.example.com/a.png' }],
+  }, 'attempt-1', { imageMode: 'off' });
+  assert.match(prepared.markdown, /图片：public（\[原图链接\]\(https:\/\/cdn\.example\.com\/a\.png\)）/);
+  assert.doesNotMatch(prepared.markdown, /FEISHU_CLIP_IMAGE/);
+});
+
+test('imageMode download：公开图片同样保留锚点，由 bridge 图片阶段走下载管线', () => {
+  const prepared = prepareMarkdown({
+    sourceUrl: 'https://example.com/article',
+    capturedAt: '2026-08-12T00:00:00.000Z',
+    markdown: '# Heading\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'pub', source: 'https://cdn.example.com/a.png' }],
+  }, 'attempt-1', { imageMode: 'download' });
+  assert.match(prepared.markdown, /\[\[FEISHU_CLIP_IMAGE:0\]\]/, 'download 模式保留锚点');
 });
 
 // 图片阶段集成测试：脚本化假 lark 模拟 CLI 应答，验证新管线——
@@ -96,7 +119,7 @@ function fakeJob({ markdown, images }) {
   return {
     attemptId: 'attempt-pipe',
     document: null,
-    includeImages: true,
+    imageMode: 'preview',
     destination: { kind: 'node', nodeToken: 'node-1' },
     snapshot: {
       title: 'T', sourceUrl: 'https://example.com', capturedAt: '2026-08-24T00:00:00.000Z',
@@ -349,7 +372,7 @@ test('executor records a timeline with stages, per-image entries and cli calls',
 
 test('a failed job still persists the timeline collected so far', async () => {
   const job = fakeJob({ markdown: '# T', images: [] });
-  job.includeImages = false;
+  job.imageMode = 'off';
   const store = fakeStore(job);
   const lark = { async run() { throw new Error('create boom'); } };
   new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
@@ -600,6 +623,109 @@ test('预览块失败且下载也失败：退回纯文本原图链接', async ()
   assert.match(store.completed.warnings[0], /图片 1/);
   assert.ok(lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:0]]')), '应退回 str_replace 文本兜底');
   assert.ok(lark.calls.some((args) => args.includes('原图链接') || args.some((arg) => String(arg).includes('nonexistent.invalid'))), '兜底文案含原图链接');
+});
+
+// 图片写入模式 download（#53）：跳过预览块 pass，公开 URL 图片也一律进下载上传管线
+test('download 模式：公开 URL 图片不建预览块，直接走下载上传', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]\n\n[[FEISHU_CLIP_IMAGE:1]]',
+    images: [
+      { label: 'public', source: 'https://cdn.example.com/a.png', bytesBase64: PNG_BYTES },
+      { label: 'upload', bytesBase64: PNG_BYTES },
+    ],
+  });
+  job.imageMode = 'download';
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0', 'p1']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+    textBlock('p1', 'doc1', '[[FEISHU_CLIP_IMAGE:1]]'),
+  ];
+  const lark = fakeLark({ items });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  const inserts = apiCalls(lark.calls, 'POST', '/children');
+  assert.ok(!inserts.some((args) => args.join(' ').includes('"block_type":26')), 'download 模式不建 iframe 预览块');
+  assert.equal(inserts.filter((args) => args.join(' ').includes('"block_type":27')).length, 2, '两张图都建真实图片块');
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 2, '公开 URL 图片也上传');
+});
+
+test('download 模式：无字节公开图下载失败后退回原图链接文本，不建预览块', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'a', source: 'https://nonexistent.invalid/a.png' }],
+  });
+  job.imageMode = 'download';
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.ok(store.completed, '下载失败不应拖垮任务');
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /图片 1/);
+  assert.ok(!apiCalls(lark.calls, 'POST', '/children').some((args) => args.join(' ').includes('"block_type":26')), 'download 模式不回退到预览块');
+  assert.ok(lark.calls.some((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IMAGE:0]]')), '应退回 str_replace 文本兜底');
+});
+
+// off 等价于旧 includeImages=false：prepareMarkdown 已把锚点落成文本，图片阶段整体跳过
+test('off 模式：不处理图片，不拉块列表、不建块、不上传', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'public', source: 'https://cdn.example.com/a.png' }],
+  });
+  job.imageMode = 'off';
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: [] });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 0);
+  assert.equal(apiCalls(lark.calls, 'POST', '/children').length, 0);
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 0);
+  assert.ok(!store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'images'), 'off 模式没有图片阶段');
+});
+
+// 存量任务兼容（#53）：旧 job 只有 includeImages 布尔——false 按不保存、true 按预览优先
+test('存量 job 无 imageMode 字段：includeImages:false 按不保存处理', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'public', source: 'https://cdn.example.com/a.png' }],
+  });
+  delete job.imageMode;
+  job.includeImages = false;
+  const store = fakeStore(job);
+  const lark = fakeLark({ items: [] });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(apiCalls(lark.calls, 'GET', '/blocks').length, 0, '不进入图片阶段');
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 0);
+});
+
+test('存量 job 无 imageMode 字段：includeImages:true 按预览优先处理', async () => {
+  const job = fakeJob({
+    markdown: '# T\n\n[[FEISHU_CLIP_IMAGE:0]]',
+    images: [{ label: 'preview', source: 'https://cdn.example.com/a.png' }],
+  });
+  delete job.imageMode;
+  job.includeImages = true;
+  const store = fakeStore(job);
+  const items = [
+    containerBlock('doc1', '', 1, ['p0']),
+    textBlock('p0', 'doc1', '[[FEISHU_CLIP_IMAGE:0]]'),
+  ];
+  const lark = fakeLark({ items });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
+  const [insert] = apiCalls(lark.calls, 'POST', '/children');
+  assert.equal(JSON.parse(insert[insert.indexOf('--data') + 1]).children[0].block_type, 26, '公开图建 iframe 预览块');
+  assert.equal(lark.calls.filter((args) => args[1] === '+media-upload').length, 0);
 });
 
 

@@ -70,7 +70,7 @@ export class PersistentJobStore {
     this.#jobTtlMs = jobTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, clientTiming = null }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
 
     return this.#mutate(async (data) => {
@@ -90,6 +90,8 @@ export class PersistentJobStore {
         snapshot,
         destination,
         includeImages,
+        // 图片写入模式（#53）：preview/download/off；缺省由 includeImages 布尔推导
+        imageMode: imageMode ?? (includeImages === false ? 'off' : 'preview'),
         status: JOB_STATUS.QUEUED,
         step: JOB_STEP.CREATE_DOCUMENT,
         document: null,

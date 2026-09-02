@@ -50,7 +50,7 @@ function syncPresetView() {
   $('#page-title').value = presetState.title;
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
   $('#save').textContent = primaryLabel(currentPreset(presetState).action);
-  $('#images').checked = presetState.includeImages;
+  $('#images').checked = presetState.imageMode !== 'off';
   $('#custom-body').value = presetState.customBody;
   $('#preview-title').textContent = presetState.title;
   // ▾ 菜单的「默认 ✓」标记跟随当前预设 action（仅标识，不影响一次性执行）
@@ -322,6 +322,7 @@ async function clipToFeishu() {
       type: 'CLIP',
       destination: presetState.destination,
       includeImages: $('#images').checked,
+      imageMode: presetState.imageMode,
       title: finalTitle(presetState),
       customBody: presetState.customBody,
     });

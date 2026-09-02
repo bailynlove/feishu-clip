@@ -130,3 +130,60 @@ test('GET /v1/jobs lists recent jobs with timing fields and without snapshots; c
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// 图片写入模式（#53）：bridge 接受三态 imageMode 落库；非法/缺省回退旧 includeImages 布尔语义
+test('POST /v1/jobs persists imageMode and derives includeImages; invalid values fall back to the legacy boolean', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-mode-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'mode-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
+    run: async () => ({ ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } }),
+  };
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+    const snapshot = { title: '模式网页', sourceUrl: 'https://example.com/mode', capturedAt: new Date().toISOString(), markdown: '# 正文' };
+    const submit = (id, extra) => call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: id, destination: { nodeToken: 'wikcn-parent' }, snapshot, ...extra }) });
+    const readJob = async (id) => (await (await call(`/v1/jobs/${id}`, { headers: auth })).json()).job;
+
+    assert.equal((await submit('dddddddd-1111-4111-8111-111111111111', { imageMode: 'download' })).status, 202);
+    assert.equal((await submit('eeeeeeee-1111-4111-8111-111111111111', { imageMode: 'off' })).status, 202);
+    assert.equal((await submit('ffffffff-1111-4111-8111-111111111111', { imageMode: 'bogus', includeImages: false })).status, 202);
+    assert.equal((await submit('99999999-1111-4111-8111-111111111111', {})).status, 202);
+
+    const download = await readJob('dddddddd-1111-4111-8111-111111111111');
+    assert.equal(download.imageMode, 'download');
+    assert.equal(download.includeImages, true, 'download 模式派生 includeImages=true');
+    const off = await readJob('eeeeeeee-1111-4111-8111-111111111111');
+    assert.equal(off.imageMode, 'off');
+    assert.equal(off.includeImages, false, 'off 等价于旧 includeImages=false');
+    const legacy = await readJob('ffffffff-1111-4111-8111-111111111111');
+    assert.equal(legacy.imageMode, 'off', '非法 imageMode 回退到 includeImages 布尔迁移');
+    const defaulted = await readJob('99999999-1111-4111-8111-111111111111');
+    assert.equal(defaulted.imageMode, 'preview', '缺省按预览优先');
+    assert.equal(defaulted.includeImages, true);
+
+    // 等任务执行器收尾（异步写 jobs.json）再关服清理，避免 rm 与写盘竞争
+    for (const id of ['dddddddd-1111-4111-8111-111111111111', 'eeeeeeee-1111-4111-8111-111111111111', 'ffffffff-1111-4111-8111-111111111111', '99999999-1111-4111-8111-111111111111']) {
+      for (let i = 0; i < 100; i += 1) {
+        const status = (await readJob(id)).status;
+        if (status !== 'queued' && status !== 'running') break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});

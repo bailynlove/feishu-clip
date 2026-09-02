@@ -52,10 +52,14 @@
       </details>
     </div>
 
-    <button class="ps-switch-row" id="f-images" type="button" aria-pressed="true">
-      <span class="ps-switch-text"><span class="ps-switch-label">包含图片</span><span class="ps-switch-sub">失败时正文仍会保存</span></span>
-      <span class="ps-switch"></span>
-    </button>
+    <div class="ps-field"><span class="ps-label">图片写入模式</span>
+      <div class="ps-seg" id="f-image-mode">
+        <button class="ps-seg-opt" data-value="preview" type="button">预览优先</button>
+        <button class="ps-seg-opt" data-value="download" type="button">下载优先</button>
+        <button class="ps-seg-opt" data-value="off" type="button">不保存</button>
+      </div>
+      <span class="ps-desc" id="f-image-mode-hint"></span>
+    </div>
 
     <label class="ps-field"><span class="ps-label">标题模板</span><input id="f-title" class="ps-input mono" autocomplete="off" placeholder="{{title}}"></label>
     <div class="ps-vars" data-field="f-title"></div>

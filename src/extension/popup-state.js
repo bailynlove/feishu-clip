@@ -1,7 +1,7 @@
 // 弹窗 job 状态的纯归约逻辑。recovered 表示该 attempt 是打开弹窗时从存储恢复的旧会话：
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
-import { createDefaultPreset } from './presets.js';
+import { createDefaultPreset, resolveImageMode } from './presets.js';
 import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
@@ -54,15 +54,16 @@ function renderCurrentTitle(state) {
   return renderTitle(currentPreset(state).titleTemplate, state.titleContext);
 }
 
-// 预设是顶层单位：自带保存目标、includeImages 与 bodyTemplate（#29）。选中预设即应用
-// 其参数；temporary 仅属于用户手动用选择器覆盖的「仅本次」临时目标，预设自带目标不亮徽标
+// 预设是顶层单位：自带保存目标、图片写入模式与 bodyTemplate（#29，#53 起 includeImages 泛化为
+// 三态 imageMode，读取时迁移存量布尔）。选中预设即应用其参数；temporary 仅属于用户手动用选择器
+// 覆盖的「仅本次」临时目标，预设自带目标不亮徽标
 function applyPresetParams(state) {
   const preset = currentPreset(state);
   return {
     ...state,
     destination: preset.destination ?? null,
     temporary: false,
-    includeImages: preset.includeImages !== false,
+    imageMode: resolveImageMode(preset),
     // 自定义正文框预填所选预设的 bodyTemplate：切预设即应用新预设模板，
     // 清除上一次的一次性修改（与目标/图片的切预设语义一致）
     customBody: preset.bodyTemplate ?? '',
@@ -124,7 +125,7 @@ export function isTitleEdited(state) {
   return state.title !== renderCurrentTitle(state);
 }
 
-// 切换预设：应用新预设的保存目标与 includeImages，并清除之前的「仅本次」临时目标
+// 切换预设：应用新预设的保存目标与图片写入模式，并清除之前的「仅本次」临时目标
 // （三级语义：默认预设 → 选中预设 → 仅本次覆盖，换预设即从该预设重新起算）；
 // 标题未手改时按新预设模板重渲，手改过则保留用户内容；
 // 手动切换即脱离 trigger 命中态：提示消失，当次会话不再跑 trigger（重开弹窗重新匹配）
@@ -147,24 +148,27 @@ function sameDestination(a, b) {
 }
 
 // 「本次设置与所选预设不一致」的判定口径：弹窗可改的四项——保存目标（按值比较，
-// 手动覆盖成相同目标不算修改）、包含图片、标题框、自定义正文框。
+// 手动覆盖成相同目标不算修改）、图片写入模式、标题框、自定义正文框。
 // 标题/正文的基线是「预填进框的值」而非模板原始串：标题基线 = 预设 titleTemplate 的
 // 渲染结果（isTitleEdited 本就是这个比较），自定义正文基线 = 预设 bodyTemplate（预填值）。
 export function isSessionModified(state) {
   const preset = currentPreset(state);
   return !sameDestination(state.destination, preset.destination ?? null)
-    || state.includeImages !== (preset.includeImages !== false)
+    || state.imageMode !== resolveImageMode(preset)
     || isTitleEdited(state)
     || isCustomBodyEdited(state);
 }
 
-// 包含图片 switch 的仅本次改动：写回 state 以便 diff 判定与保存时读取
+// 包含图片 checkbox 的仅本次改动：关掉 = 不保存；重新打开回到预设自身模式
+// （预设本就是不保存时落到默认的预览优先）。写回 state 以便 diff 判定与保存时读取
 export function setIncludeImages(state, includeImages) {
-  return { ...state, includeImages: includeImages !== false };
+  if (includeImages === false) return { ...state, imageMode: 'off' };
+  const presetMode = resolveImageMode(currentPreset(state));
+  return { ...state, imageMode: presetMode === 'off' ? 'preview' : presetMode };
 }
 
 // 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖四项——
-// destination/includeImages 用当前值；titleTemplate 在用户改过标题时固化为当前框内容
+// destination/imageMode 用当前值；titleTemplate 在用户改过标题时固化为当前框内容
 // （框里是渲染后的标题，固化成模板是用户自己的选择），没改则沿用源预设；
 // bodyTemplate 恒取当前自定义正文框内容。triggers 拷贝继承（与设置页 duplicatePreset
 // 的副本语义一致），重名允许（以 id 区分）。空名返回 null 由调用方拦截。
@@ -180,7 +184,7 @@ export function saveAsNewPreset(state, name) {
     titleTemplate: isTitleEdited(state) ? state.title : source.titleTemplate,
     bodyTemplate: state.customBody,
     destination: state.destination,
-    includeImages: state.includeImages,
+    imageMode: state.imageMode,
     triggers: [...(source.triggers ?? [])],
   };
   const next = { ...state, presets: [...state.presets, preset], presetId: preset.id, temporary: false, viaTrigger: false };
@@ -191,7 +195,7 @@ export function saveAsNewPreset(state, name) {
 
 // ——— 修改预设（#41）：把本次改动写回当前选中预设 ———
 
-// 与 saveAsNewPreset 同一口径覆盖四项：destination/includeImages 用当前值；
+// 与 saveAsNewPreset 同一口径覆盖四项：destination/imageMode 用当前值；
 // titleTemplate 仅在标题手改过时固化为当前框内容；bodyTemplate 恒取当前自定义正文框。
 // 区别在写回原位（id/name/triggers/action 等保留），不新建、不切换选中。
 // 写回后 session 与预设一致（isSessionModified 变 false），按钮随之消失；
@@ -204,7 +208,7 @@ export function updateCurrentPreset(state) {
     titleTemplate: isTitleEdited(state) ? state.title : source.titleTemplate,
     bodyTemplate: state.customBody,
     destination: state.destination,
-    includeImages: state.includeImages,
+    imageMode: state.imageMode,
   };
   const presets = state.presets.map((preset) => (preset.id === source.id ? updated : preset));
   return { state: { ...state, presets, temporary: false }, preset: updated };

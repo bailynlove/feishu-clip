@@ -144,21 +144,32 @@ test('primary label follows the preset default action', () => {
   assert.equal(primaryLabel('mystery'), '⬇ 保存到飞书', 'unknown actions fall back to the feishu label');
 });
 
-test('init applies the default preset destination and includeImages without the temporary badge', () => {
+test('init applies the default preset destination and image mode without the temporary badge', () => {
   const state = initPopupPresets({ presets, defaultPresetId: 'p2' }, tab, now);
   assert.deepEqual(state.destination, nodeTarget);
-  assert.equal(state.includeImages, false);
+  assert.equal(state.imageMode, 'off', '存量 includeImages:false 预设读取后表现为不保存');
   assert.equal(state.temporary, false, 'preset-owned destination must not wear the 仅本次 badge');
 });
 
-test('switching presets applies the new preset destination and includeImages', () => {
+test('switching presets applies the new preset destination and image mode', () => {
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   assert.deepEqual(state.destination, spaceTarget);
-  assert.equal(state.includeImages, true);
+  assert.equal(state.imageMode, 'preview');
   state = selectPreset(state, 'p2');
   assert.deepEqual(state.destination, nodeTarget);
-  assert.equal(state.includeImages, false);
+  assert.equal(state.imageMode, 'off');
   assert.equal(state.temporary, false);
+});
+
+test('a preset with imageMode download keeps it; imageMode wins over the legacy boolean', () => {
+  const downloaded = [
+    { id: 'p1', name: '归档', titleTemplate: '{{title}}', action: 'feishu', destination: null, imageMode: 'download' },
+    { id: 'p2', name: '混合', titleTemplate: '{{title}}', action: 'feishu', destination: null, imageMode: 'preview', includeImages: false },
+  ];
+  let state = initPopupPresets({ presets: downloaded, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.imageMode, 'download');
+  state = selectPreset(state, 'p2');
+  assert.equal(state.imageMode, 'preview', 'imageMode 优先于存量 includeImages 布尔');
 });
 
 test('a preset without destination falls back to 尚未设置 and still saves-facing null', () => {
@@ -166,7 +177,7 @@ test('a preset without destination falls back to 尚未设置 and still saves-fa
   const state = initPopupPresets({ presets: bare, defaultPresetId: 'p1' }, tab, now);
   assert.equal(state.destination, null);
   assert.equal(state.temporary, false);
-  assert.equal(state.includeImages, true, 'missing includeImages defaults to true');
+  assert.equal(state.imageMode, 'preview', 'missing image mode defaults to preview');
 });
 
 test('switching presets clears a manual 仅本次 override and restarts from the new preset', () => {
@@ -373,11 +384,24 @@ test('isSessionModified compares the four popup-editable fields against their ba
   assert.equal(isSessionModified(editCustomBody(state, '')), false, 'fixture bodyTemplate is empty, so empty box matches the baseline');
 });
 
-test('setIncludeImages stores the per-session switch state', () => {
+test('setIncludeImages maps the session checkbox onto the three-state image mode', () => {
   const state = initPopupPresets({ presets, defaultPresetId: 'p2' }, tab, now);
-  assert.equal(state.includeImages, false);
-  assert.equal(setIncludeImages(state, true).includeImages, true);
-  assert.equal(setIncludeImages(state, true).includeImages, true);
+  assert.equal(state.imageMode, 'off');
+  // 预设是「不保存」时打开开关：落到默认的预览优先
+  assert.equal(setIncludeImages(state, true).imageMode, 'preview');
+  assert.equal(setIncludeImages(state, false).imageMode, 'off');
+});
+
+test('setIncludeImages(true) restores the preset mode instead of forcing preview', () => {
+  const downloaded = [{ id: 'p1', name: '归档', titleTemplate: '{{title}}', action: 'feishu', destination: null, imageMode: 'download' }];
+  let state = initPopupPresets({ presets: downloaded, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.imageMode, 'download');
+  state = setIncludeImages(state, false);
+  assert.equal(state.imageMode, 'off');
+  assert.equal(isSessionModified(state), true, '与预设模式不同即为修改');
+  state = setIncludeImages(state, true);
+  assert.equal(state.imageMode, 'download', '重新打开回到预设的下载优先，不是预览优先');
+  assert.equal(isSessionModified(state), false, '回到预设模式后 session 不再 dirty');
 });
 
 test('saveAsNewPreset inherits the source preset and overrides the two session fields', () => {
@@ -389,7 +413,7 @@ test('saveAsNewPreset inherits the source preset and overrides the two session f
   assert.notEqual(created.id, 'p1');
   assert.equal(created.name, '我的归档', 'name is trimmed');
   assert.deepEqual(created.destination, nodeTarget);
-  assert.equal(created.includeImages, false);
+  assert.equal(created.imageMode, 'off');
   assert.equal(created.titleTemplate, presets[0].titleTemplate, '标题未改时沿用源预设模板');
   assert.equal(created.bodyTemplate, '', 'bodyTemplate 恒取当前自定义正文框内容');
   assert.equal(created.action, 'feishu', '其余字段继承所选预设');
@@ -444,7 +468,7 @@ test('updateCurrentPreset writes the four session fields back to the selected pr
   assert.equal(updated.id, 'p1', 'same preset id, not a copy');
   assert.equal(updated.name, '默认');
   assert.deepEqual(updated.destination, nodeTarget);
-  assert.equal(updated.includeImages, false);
+  assert.equal(updated.imageMode, 'off');
   assert.equal(updated.bodyTemplate, '批注 {{content}}');
   assert.equal(updated.titleTemplate, '{{title}}', '标题未改时沿用原模板');
   assert.equal(updated.action, 'feishu', '其余字段不动');
@@ -468,7 +492,7 @@ test('updateCurrentPreset only writes the fields that diverge, keeping the prese
   state = setIncludeImages(state, false);
   const { preset: updated } = updateCurrentPreset(state);
   assert.deepEqual(updated.triggers, ['https://blog.example.com']);
-  assert.equal(updated.includeImages, false);
+  assert.equal(updated.imageMode, 'off');
   assert.deepEqual(updated.destination, spaceTarget, 'unchanged destination stays as-is');
 });
 
@@ -485,7 +509,7 @@ test('after write-back, reopening the same URL hits the updated preset values', 
   const reopened = initPopupPresets({ presets: saved.presets, defaultPresetId: 't1' }, postTab, now);
   assert.equal(reopened.presetId, 't1');
   assert.equal(reopened.viaTrigger, true);
-  assert.equal(reopened.includeImages, false);
+  assert.equal(reopened.imageMode, 'off');
   assert.equal(reopened.customBody, '固定前缀 {{content}}');
   assert.equal(isSessionModified(reopened), false);
 });

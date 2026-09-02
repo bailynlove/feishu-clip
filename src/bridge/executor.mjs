@@ -23,10 +23,12 @@ function escapeMarkdown(value) {
   return String(value || '').replace(/[\\[\]]/g, '\\$&').replace(/[\r\n]+/g, ' ').slice(0, 300);
 }
 
-export function prepareMarkdown(snapshot, attemptId, { includeImages = false } = {}) {
+// 图片写入模式三态（#53）：off 不处理图片（锚点落成可读文本）；preview/download 都保留锚点，
+// 差别在 bridge 图片阶段——download 跳过预览块 pass，公开图片也直接进下载管线
+export function prepareMarkdown(snapshot, attemptId, { imageMode = 'off' } = {}) {
   const images = Array.isArray(snapshot.images) ? snapshot.images.slice(0, IMAGE_LIMITS.maxImages).map((image) => ({ ...image })) : [];
   let body = String(snapshot.markdown || '').slice(0, 1_500_000);
-  if (!includeImages) {
+  if (imageMode === 'off') {
     // 不处理图片时锚点直接落成可读文本（含原图链接）；处理时保留锚点供 bridge 图片阶段定位
     for (const [index, image] of images.entries()) {
       const label = escapeMarkdown(image.label || `图片 ${index + 1}`);
@@ -237,7 +239,9 @@ export class ClipExecutor {
       }
     };
     try {
-      const prepared = prepareMarkdown(job.snapshot, job.attemptId, { includeImages: job.includeImages });
+      // 任务级图片写入模式：合法三态直用；存量任务只有 includeImages 布尔，false → off，其余 → preview
+      const imageMode = ['preview', 'download', 'off'].includes(job.imageMode) ? job.imageMode : (job.includeImages === false ? 'off' : 'preview');
+      const prepared = prepareMarkdown(job.snapshot, job.attemptId, { imageMode });
       if (!document) {
         const createStageAt = Date.now();
         await this.store.beginCreate(job.attemptId, workerId);
@@ -324,13 +328,13 @@ export class ClipExecutor {
           '--pattern', marker, '--content', replacement, '--format', 'json',
         ], { timeoutMs: 15_000 });
       };
-      if (job.includeImages) {
+      if (imageMode !== 'off') {
         const imagesStageAt = Date.now();
         try {
           // 图片三级降级（优先级：预览块 → 下载上传 → 纯链接，取代 #45 内联导入——
           // 内联靠飞书服务端下载，挂死图会打满 30s 导入预算，且不可达图无救）：
           // 写入分阶段：预览块串行 → 下载并行 → 建块串行 → 上传并行 → 绑定删锚点串行（#46）。
-          // 180s 上限对剩余场景留足余量
+          // download 模式（#53）跳过预览块 pass：公开图片也一律进下载管线。180s 上限对剩余场景留足余量
           const deadline = Date.now() + 180_000;
           const anchorOf = (index) => `[[FEISHU_CLIP_IMAGE:${index}]]`;
           const replaceAnchor = (index, replacement) => replaceMarker(anchorOf(index), replacement);
@@ -349,9 +353,10 @@ export class ClipExecutor {
           // 第一级：预览块。原图 URL 直出为 iframe 块（block_type 26），查看者浏览器渲染，
           // 不下载不上传——最快最稳；服务端/桥都不可达的图（Medium miro）也能显示。
           // 建块是文档操作必须串行；同父块内按下标倒序，对其余锚点下标中性。
-          // 建块失败或锚点定位不到的转入第二级下载管线（锚点仍在原位）
-          const downloadQueue = queue.filter(({ image }) => !safeHttpUrl(image.source));
-          const previewable = queue.filter(({ image }) => safeHttpUrl(image.source));
+          // 建块失败或锚点定位不到的转入第二级下载管线（锚点仍在原位）；
+          // download 模式整级跳过，公开图从下载管线起算
+          const downloadQueue = imageMode === 'download' ? [...queue] : queue.filter(({ image }) => !safeHttpUrl(image.source));
+          const previewable = imageMode === 'download' ? [] : queue.filter(({ image }) => safeHttpUrl(image.source));
           const locatedPreview = previewable.filter(({ index }) => anchors[index])
             .sort((a, b) => (anchors[a.index].parentId === anchors[b.index].parentId ? anchors[b.index].index - anchors[a.index].index : a.index - b.index));
           for (const item of locatedPreview) {
@@ -518,8 +523,8 @@ export class ClipExecutor {
           }
 
           // 全部处理完后统一回退：失败的锚点 str_replace 成可读文案（含原图链接）。
-          // 预览块已是第一级（见上），走到这里的图要么没有公开 URL、要么两级都失败，
-          // 只剩文本兜底
+          // 预览块已是第一级（见上，download 模式跳过），走到这里的图要么没有公开 URL、
+          // 要么预览/下载都失败，只剩文本兜底
           for (const [index, message] of [...failures.entries()].sort((a, b) => a[0] - b[0])) {
             warnings.push(`图片 ${index + 1}：${message}`);
             const image = prepared.images[index];

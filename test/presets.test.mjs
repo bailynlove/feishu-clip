@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDefaultPreset, ensurePresets } from '../src/extension/presets.js';
+import { createDefaultPreset, ensurePresets, resolveImageMode } from '../src/extension/presets.js';
 
 function createStorage(initial = {}) {
   const data = { ...initial };
@@ -26,7 +26,7 @@ test('createDefaultPreset applies v1 defaults and lets callers override', () => 
   assert.match(preset.id, /^[0-9a-f-]{36}$/);
   assert.equal(preset.name, '默认');
   assert.equal(preset.destination, null);
-  assert.equal(preset.includeImages, true);
+  assert.equal(preset.imageMode, 'preview');
   assert.equal(preset.titleTemplate, '{{title}}');
   assert.equal(preset.bodyTemplate, '');
   assert.equal(preset.action, 'feishu');
@@ -83,4 +83,24 @@ test('ensurePresets repairs a dangling defaultPresetId to the first preset', asy
   const storage = createStorage({ presets: [preset], defaultPresetId: 'gone' });
   const { defaultPresetId } = await ensurePresets(storage);
   assert.equal(defaultPresetId, preset.id);
+});
+
+// ——— 图片写入模式（#53）：三态 preview/download/off，读取时迁移存量 includeImages 布尔 ———
+
+test('resolveImageMode passes through a valid stored imageMode', () => {
+  assert.equal(resolveImageMode({ imageMode: 'preview' }), 'preview');
+  assert.equal(resolveImageMode({ imageMode: 'download' }), 'download');
+  assert.equal(resolveImageMode({ imageMode: 'off' }), 'off');
+});
+
+test('resolveImageMode migrates legacy includeImages without rewriting storage', () => {
+  assert.equal(resolveImageMode({ includeImages: false }), 'off', '存量 includeImages:false 映射为不保存');
+  assert.equal(resolveImageMode({ includeImages: true }), 'preview', '其余映射为预览优先');
+  assert.equal(resolveImageMode({}), 'preview', '缺字段按默认预览优先');
+  assert.equal(resolveImageMode(null), 'preview');
+});
+
+test('resolveImageMode prefers imageMode over the legacy boolean and ignores invalid values', () => {
+  assert.equal(resolveImageMode({ imageMode: 'download', includeImages: false }), 'download', 'imageMode 优先于旧布尔');
+  assert.equal(resolveImageMode({ imageMode: 'bogus', includeImages: false }), 'off', '非法 imageMode 回退到旧布尔迁移');
 });

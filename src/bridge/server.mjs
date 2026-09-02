@@ -206,12 +206,15 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         const clientTiming = validateClientTiming(body.clientTiming);
         try { await lark.validateDestination(body.destination); }
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
+        // 图片写入模式（#53）：合法三态直用；非法/缺省回退旧 includeImages 布尔语义（false → off，其余 → preview）
+        const imageMode = ['preview', 'download', 'off'].includes(body.imageMode) ? body.imageMode : (body.includeImages === false ? 'off' : 'preview');
         const submitted = await store.submit({
           attemptId: body.attemptId,
           sourceUrl: body.snapshot.sourceUrl,
           snapshot: body.snapshot,
           destination: body.destination,
-          includeImages: body.includeImages !== false,
+          includeImages: imageMode !== 'off',
+          imageMode,
           clientTiming,
         });
         executor.kick();

@@ -19,8 +19,15 @@ const terminalJob = {
 // chrome/fetch 桩必须在 import background.js 之前就位（模块顶层即用 chrome.storage）
 const storage = { activeAttempt: ATTEMPT, credential: 'cred' };
 const listeners = [];
+let lastJobsBody = null; // CLIP 转发给 bridge 的 POST /v1/jobs 请求体
 globalThis.chrome = {
   runtime: { id: 'ext-id', onMessage: { addListener: (fn) => listeners.push(fn) } },
+  tabs: { query: async () => [{ id: 1, url: PAGE }] },
+  scripting: {
+    executeScript: async () => [{
+      result: { title: '页面标题', sourceUrl: PAGE, capturedAt: '2026-09-02T00:00:00.000Z', markdown: '# 正文', images: [] },
+    }],
+  },
   storage: {
     local: {
       setAccessLevel() {},
@@ -34,10 +41,13 @@ globalThis.chrome = {
     },
   },
 };
-globalThis.fetch = async (url) => ({
-  ok: true,
-  json: async () => (url.includes(`/v1/jobs/${ATTEMPT}`) ? { ok: true, job: terminalJob } : { ok: true }),
-});
+globalThis.fetch = async (url, options) => {
+  if (url.endsWith('/v1/jobs') && options?.method === 'POST') lastJobsBody = JSON.parse(options.body);
+  return {
+    ok: true,
+    json: async () => (url.includes(`/v1/jobs/${ATTEMPT}`) ? { ok: true, job: terminalJob } : { ok: true, job: { attemptId: 'new-attempt' } }),
+  };
+};
 
 await import('../src/extension/background.js');
 const send = (message) => new Promise((resolve, reject) => {
@@ -61,4 +71,14 @@ test('本页查询终态 job：返回 job 且不清指针，重复打开仍提�
   assert.equal(storage.activeAttempt, ATTEMPT, '终态回读也不得清除指针（恢复提示设计）');
   const second = await send({ type: 'GET_JOB', attemptId: ATTEMPT, pageUrl: PAGE });
   assert.equal(second.job?.status, 'succeeded', '重复打开仍能看到成功态');
+});
+
+// 图片写入模式（#53）：弹窗选定的三态模式随 CLIP 透传到 bridge 任务
+test('CLIP 把三态图片写入模式透传给 bridge', async () => {
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, imageMode: 'download', includeImages: true, title: 'T', customBody: '' });
+  assert.equal(lastJobsBody.imageMode, 'download');
+  assert.equal(lastJobsBody.includeImages, true);
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, imageMode: 'off', includeImages: false, title: 'T', customBody: '' });
+  assert.equal(lastJobsBody.imageMode, 'off');
+  assert.equal(lastJobsBody.includeImages, false);
 });

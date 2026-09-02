@@ -34,3 +34,14 @@ test('devmode card exists with toggle off and joblog hidden initially', () => {
   assert.ok(html.includes('id="joblog-refresh"'), '应有刷新按钮');
   assert.ok(html.includes('id="joblog-list"'), '应有任务列表容器');
 });
+
+// 图片写入模式三态（#53）：预设编辑区用分段控件取代旧的「包含图片」开关
+test('preset editor has a three-state image mode segmented control', () => {
+  const seg = html.match(/<div class="ps-seg" id="f-image-mode">([\s\S]*?)<\/div>/);
+  assert.ok(seg, '应有 #f-image-mode 分段控件');
+  const values = [...seg[1].matchAll(/class="ps-seg-opt" data-value="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(values, ['preview', 'download', 'off'], '三态顺序：预览优先/下载优先/不保存');
+  for (const label of ['预览优先', '下载优先', '不保存']) assert.ok(seg[1].includes(label), `缺少选项「${label}」`);
+  assert.ok(html.includes('id="f-image-mode-hint"'), '应有模式说明文案位');
+  assert.ok(!html.includes('id="f-images"'), '旧的「包含图片」开关应移除');
+});

@@ -6,13 +6,22 @@ export function createDefaultPreset(overrides = {}) {
     id: crypto.randomUUID(),
     name: '默认',
     destination: null,
-    includeImages: true,
+    imageMode: 'preview',
     titleTemplate: '{{title}}',
     bodyTemplate: '',
     action: 'feishu',
     triggers: [],
     ...overrides,
   };
+}
+
+// 图片写入模式（#53）：preview 预览优先 / download 下载优先 / off 不保存。
+// 存量预设只有 includeImages 布尔：false → off，其余 → preview；读取时迁移，不强转存储格式。
+export const IMAGE_MODES = ['preview', 'download', 'off'];
+
+export function resolveImageMode(preset) {
+  if (IMAGE_MODES.includes(preset?.imageMode)) return preset.imageMode;
+  return preset?.includeImages === false ? 'off' : 'preview';
 }
 
 // 幂等：service worker 冷启动会反复调用。无 presets 时从旧 destination 迁移；

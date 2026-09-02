@@ -93,7 +93,7 @@ async function handle(message) {
       // ctx 在标题覆盖之后构建，正文模板看到的即最终标题
       snapshot.markdown = renderBody(message.customBody, buildContext(snapshot));
       const attemptId = crypto.randomUUID();
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, clientTiming: { extractMs } } });
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs } } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }
