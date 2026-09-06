@@ -1,0 +1,22 @@
+/* PROTOTYPE — 变体 B 专属样式 */
+.variant-b .vb-pdfbox { border: 1.5px solid var(--brand-line); background: var(--brand-soft); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.variant-b .vb-pdfbox.collapsed { border-style: dashed; background: transparent; padding: 0; border-color: transparent; }
+.variant-b .vb-pdfbox-head { display: flex; flex-direction: column; gap: 2px; font-size: 13px; font-weight: 700; color: var(--brand-ink); }
+.variant-b .vb-pdfbox-head small { font-weight: 400; color: #66707f; font-size: 11px; }
+.variant-b .vb-discover { width: 100%; }
+.variant-b .vb-jobs { display: flex; flex-direction: column; gap: 8px; }
+.variant-b .vb-card { border: 1.5px solid #e2e7ee; border-radius: 12px; padding: 10px 12px; }
+.variant-b .vb-card.done { border-color: var(--brand-line); background: var(--brand-soft); }
+.variant-b .vb-card.failed { border-color: #f0b8ba; background: #fff5f5; }
+.variant-b .vb-card-head { display: flex; align-items: center; gap: 9px; }
+.variant-b .vb-card-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.variant-b .vb-card-title strong { font-size: 13px; }
+.variant-b .vb-card-title small { font-size: 11px; color: #9aa3b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.variant-b .vb-badge { font-size: 10.5px; border-radius: 999px; padding: 3px 9px; background: #eef1f6; color: #66707f; white-space: nowrap; }
+.variant-b .vb-badge.running { background: #e3f0ff; color: #1d5cb8; }
+.variant-b .vb-badge.done { background: #e7f7f0; color: #126847; }
+.variant-b .vb-badge.failed { background: #ffe5e6; color: #962932; }
+.variant-b .vb-card-foot { margin-top: 8px; display: flex; justify-content: flex-end; }
+.variant-b .vb-card-link { border: 1.5px solid var(--brand-line); background: #fff; color: var(--brand-deep); border-radius: 9px; padding: 5px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.variant-b .vb-card-link.warn { border-color: #f0c36d; color: #7a4800; background: #fff8ec; }
+.variant-b .vb-discover { width: 100%; border: 1.5px dashed var(--brand-line); background: var(--brand-soft); color: var(--brand-deep); border-radius: 10px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left; font-family: inherit; }

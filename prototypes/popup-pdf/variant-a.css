@@ -1,0 +1,16 @@
+/* PROTOTYPE — 变体 A 专属样式 */
+.variant-a .va-fold { border: 1.5px solid #e2e7ee; border-radius: 12px; overflow: hidden; }
+.variant-a .va-fold-head { display: flex; justify-content: space-between; width: 100%; border: 0; background: #f6f8fb; padding: 10px 12px; font-size: 12.5px; font-weight: 600; color: #1a2233; cursor: pointer; font-family: inherit; }
+.variant-a .va-fold-head em { font-style: normal; font-weight: 400; color: #9aa3b2; font-size: 11px; }
+.variant-a .va-fold-body { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; }
+.variant-a .va-pdfrow { display: flex; flex-direction: column; gap: 8px; }
+.variant-a .va-discover { border: 1.5px dashed var(--brand-line); background: var(--brand-soft); color: var(--brand-deep); border-radius: 10px; padding: 9px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left; font-family: inherit; }
+.variant-a .va-status { font-variant-numeric: tabular-nums; }
+.variant-a .va-links { display: flex; gap: 8px; }
+.variant-a .va-link { flex: 1; border: 1.5px solid var(--brand-line); background: #fff; color: var(--brand-deep); border-radius: 12px; padding: 10px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.variant-a .va-link.warn { border-color: #f0c36d; color: #7a4800; background: #fff8ec; }
+.variant-a .va-pdftab { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px 0 8px; text-align: center; }
+.variant-a .va-pdficon { font-size: 40px; }
+.variant-a .va-pdftab small { color: #9aa3b2; }
+.variant-a .ps-hero { background: linear-gradient(135deg, var(--brand), var(--brand-2)); padding: 12px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.variant-a .ps-host { color: rgba(11,59,54,.65); }

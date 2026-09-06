@@ -1,0 +1,91 @@
+/* PROTOTYPE — 共享主题基底：动森 Joy-Con 配色（薄荷绿 hero + 天空蓝果冻主按钮），沿用 #23 验收版 variant-c 视觉。 */
+.variant-a, .variant-b, .variant-c { --brand: #7fe3bd; --brand-2: #5fd4ec; --brand-3: #a8f0d4; --brand-soft: rgba(127,227,189,.14); --brand-line: rgba(127,227,189,.45); --brand-ink: #0b3b36; --brand-deep: #0f766e; }
+
+/* ---- 共享组件（ps- 前缀） ---- */
+.ps-hero-top { display: flex; align-items: center; gap: 8px; }
+.ps-logo { width: 26px; height: 26px; display: grid; place-content: center; background: rgba(255,255,255,.5); border-radius: 8px; font-weight: 800; font-size: 14px; flex-shrink: 0; }
+.ps-hero-name { font-weight: 700; font-size: 13px; }
+.ps-pill { margin-left: auto; font-size: 11px; background: rgba(255,255,255,.5); border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
+.ps-gear { border: 0; background: rgba(255,255,255,.5); border-radius: 8px; width: 26px; height: 26px; cursor: pointer; font-size: 16px; line-height: 1; flex-shrink: 0; }
+
+/* 可编辑标题：hero 内的输入框，半透明底、聚焦加亮 */
+.ps-title-wrap { display: flex; align-items: center; gap: 6px; }
+.ps-title-input { flex: 1; min-width: 0; border: 1.5px dashed transparent; background: rgba(255,255,255,.35); border-radius: 10px; padding: 8px 10px; font-size: 16px; font-weight: 800; color: var(--brand-ink); font-family: inherit; transition: border-color .15s, background .15s; }
+.ps-title-input:hover { border-color: rgba(11,59,54,.3); }
+.ps-title-input:focus { outline: none; border-color: var(--brand-ink); background: rgba(255,255,255,.75); }
+.ps-title-reset { border: 0; background: rgba(255,255,255,.6); color: var(--brand-ink); border-radius: 999px; font-size: 11px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+
+/* 预设 chip 选择器 */
+.ps-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ps-chip-opt { border: 1.5px solid var(--brand-line); background: #fff; color: #1a2233; border-radius: 999px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+.ps-chip-opt.on { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); box-shadow: inset 0 1px 2px rgba(255,255,255,.7); }
+.ps-trigger { font-size: 10px; background: #ffe9c7; color: #7a4800; border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
+
+/* 内联状态横幅 */
+.ps-note { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 10px; font-size: 12.5px; line-height: 1.4; }
+.ps-note.info { background: #fef9c3; color: #8a6400; }
+.ps-note.ok { background: #e7f7f0; color: #126847; }
+.ps-note.warn { background: #fff5dd; color: #7a4800; }
+.ps-note.err { background: #fff0f1; color: #962932; }
+
+/* 整行 switch 开关 */
+.ps-switch-row { display: flex; align-items: center; gap: 10px; border: 0; background: none; cursor: pointer; padding: 6px 4px; width: 100%; text-align: left; font-family: inherit; }
+.ps-switch-text { flex: 1; }
+.ps-switch-label { font-size: 13.5px; font-weight: 600; color: #1a2233; }
+.ps-switch-sub { font-size: 11px; color: #9aa3b2; display: block; margin-top: 1px; }
+.ps-switch { width: 44px; height: 26px; border-radius: 999px; background: #d4d9e2; position: relative; flex-shrink: 0; transition: background .15s; }
+.ps-switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: left .15s; }
+.ps-switch-row.on .ps-switch { background: linear-gradient(rgba(255,255,255,.5), rgba(255,255,255,.05) 60%), var(--brand); box-shadow: inset 0 1px 3px rgba(255,255,255,.75), inset 0 -2px 3px rgba(8,80,60,.14); }
+.ps-switch-row.on .ps-switch::after { left: 21px; }
+
+/* 目标行 chip */
+.ps-target { display: flex; align-items: center; gap: 8px; border: 1.5px solid var(--brand-line); background: var(--brand-soft); border-radius: 999px; padding: 9px 14px; cursor: pointer; font-size: 12.5px; width: 100%; font-family: inherit; }
+.ps-target-text { flex: 1; text-align: left; font-weight: 600; color: #1a2233; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-target-edit { color: var(--brand-deep); font-size: 12px; white-space: nowrap; }
+
+/* 追加正文输入框 */
+.ps-append { width: 100%; box-sizing: border-box; border: 1.5px solid #e2e7ee; border-radius: 10px; padding: 9px 12px; font-size: 12.5px; font-family: inherit; }
+.ps-append:focus { outline: none; border-color: var(--brand-2); }
+
+.ps-settings-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* 正文预览 */
+.ps-preview { font-size: 13px; line-height: 1.65; color: #2a3242; }
+.ps-preview h1 { font-size: 17px; line-height: 1.4; margin: 0 0 10px; color: #1a2233; }
+.ps-preview h2 { font-size: 14px; margin: 14px 0 6px; color: #1a2233; }
+.ps-preview p { margin: 8px 0; }
+.ps-preview ul { margin: 8px 0; padding-left: 20px; }
+.ps-preview blockquote { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--brand); background: var(--brand-soft); border-radius: 0 8px 8px 0; font-size: 12px; color: #0f766e; }
+.ps-preview blockquote.pv-note { border-left-color: #f5c069; background: #fff8ec; color: #7a4800; }
+.ps-preview .pv-img { margin: 10px 0; }
+.ps-preview .pv-img-box { height: 88px; display: grid; place-content: center; font-size: 28px; background: linear-gradient(135deg, #e3f7ee, #dcf2fb); border-radius: 10px; }
+.ps-preview figcaption { font-size: 11px; color: #9aa3b2; margin-top: 4px; text-align: center; }
+.ps-preview .pv-img-skip { margin: 10px 0; padding: 12px; border: 1.5px dashed #d4d9e2; border-radius: 10px; font-size: 12px; color: #9aa3b2; text-align: center; }
+
+/* 果冻主按钮（split 版）：主动作 + ▾ */
+.ps-split { position: relative; display: flex; gap: 6px; }
+.ps-split-main { flex: 1; border: 0; border-radius: 20px; padding: 14px; background: linear-gradient(rgba(255,255,255,.75), rgba(255,255,255,.08) 55%), var(--brand-2); color: var(--brand-ink); font-size: 14.5px; font-weight: 800; cursor: pointer; font-family: inherit; box-shadow: inset 0 2px 4px rgba(255,255,255,.85), inset 0 -4px 8px rgba(8,80,100,.14), 0 8px 20px rgba(95,212,236,.55); transition: transform .12s, box-shadow .12s; }
+.ps-split-main:active { transform: translateY(3px) scale(.97); box-shadow: inset 0 2px 3px rgba(255,255,255,.5), inset 0 -2px 4px rgba(8,80,100,.1), 0 2px 6px rgba(95,212,236,.4); }
+.ps-split-main:disabled { background: #aab5c8; color: #fff; box-shadow: none; }
+.ps-split-arrow { width: 46px; border: 0; border-radius: 16px; background: linear-gradient(rgba(255,255,255,.6), rgba(255,255,255,.05) 55%), #4cc0d9; color: var(--brand-ink); font-size: 14px; cursor: pointer; box-shadow: inset 0 2px 4px rgba(255,255,255,.7), inset 0 -3px 6px rgba(8,80,100,.14); transition: transform .12s; }
+.ps-split-arrow:active { transform: translateY(2px); }
+
+/* 弹出菜单（向上展开）与遮罩 */
+.ps-mask { position: absolute; inset: 0; z-index: 10; }
+.ps-menu { position: absolute; z-index: 11; background: #fff; border-radius: 14px; box-shadow: 0 10px 34px rgba(20,30,50,.28); padding: 6px; display: flex; flex-direction: column; min-width: 200px; }
+.ps-menu-up { bottom: calc(100% + 8px); left: 0; right: 0; }
+.ps-menu-row { display: flex; align-items: center; gap: 9px; border: 0; background: none; border-radius: 9px; padding: 10px 12px; font-size: 13px; font-weight: 600; color: #1a2233; cursor: pointer; text-align: left; font-family: inherit; }
+.ps-menu-row:hover { background: var(--brand-soft); }
+.ps-menu-icon { font-size: 14px; }
+.ps-menu-check { margin-left: auto; font-size: 10.5px; color: var(--brand-deep); font-weight: 600; }
+
+.ps-fine { text-align: center; font-size: 11px; color: #b3bac6; }
+
+/* ---- popup-pdf 共享补充：hero/body 容器与进度条 ---- */
+.ps-hero { background: linear-gradient(135deg, var(--brand), var(--brand-2)); padding: 12px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.ps-host { font-size: 11px; color: rgba(11,59,54,.65); }
+.ps-body { padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.ps-progress { height: 6px; border-radius: 999px; background: #e6eaf1; overflow: hidden; }
+.ps-progress > i { display: block; height: 100%; background: var(--brand-deep); border-radius: 999px; }
+.ps-progress.warn > i { background: #d9930d; }
+.ps-progress.err > i { background: #d0453e; }
