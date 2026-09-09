@@ -176,6 +176,24 @@ export function pdfDisplayName(pdf) {
   return '主 PDF';
 }
 
+// ——— PDF 标签页形态（#67）：页面本身是 PDF 时正文区整体换成单面板，不产生剪藏 job ———
+// 状态只携带该形态需要的字段：pdf 识别结果 + 会话目录 chip。预设列表不参与展示，
+// 仅用于取目录初值（trigger 命中预设 > 默认预设的 pdfDrive 目录；未开/未选 = 云盘根目录），
+// 与 #66 网页形态的会话目录口径一致；setPdfFolder/pdfFolderLabel 等会话函数可直接复用
+export function initPdfTabState({ presets, defaultPresetId } = {}, pdfTab) {
+  const list = Array.isArray(presets) && presets.length > 0 ? presets : [createDefaultPreset()];
+  const matchedId = matchTrigger(list, pdfTab?.url);
+  const selected = (matchedId ? list.find((preset) => preset.id === matchedId) : null) ?? list.find((preset) => preset.id === defaultPresetId) ?? list[0];
+  const pdfDrive = resolvePdfDrive(selected);
+  return {
+    pageKind: 'pdf-tab',
+    presets: list,
+    presetId: selected.id,
+    pdf: pdfTab ?? null,
+    pdfFolder: pdfDrive ? { folderToken: pdfDrive.folderToken, folderName: pdfDrive.folderName } : null,
+  };
+}
+
 // ——— 预设选择与可编辑标题（#36）：纯函数，state 只携带数据，DOM 同步由 popup.js 负责 ———
 
 // 标题模板上下文只需 tab 信息 + 当前时间；content 在标题模板里无意义，不为此跑 extractor

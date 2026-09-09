@@ -274,3 +274,72 @@ test('POST /v1/jobs with pdfSource queues a second pdf job; GET returns both job
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// pdf-only 提交（#67：PDF 标签页场景）：无 snapshot/destination 时只校验 pdfSource + 目录，
+// 落一条 pdf job 并返回 { job: null, pdfJob }；clip 语义路径行为不变（由既有用例覆盖）
+test('POST /v1/jobs pdf-only submission queues a single pdf job without snapshot/destination', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-pdfonly-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'pdf-only-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  let validated = 0;
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async () => { validated += 1; throw new Error('不应校验剪藏目标'); },
+    run: async () => ({ ok: true, data: {} }),
+  };
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+    // 字面环回 IP：bridge 侧 SSRF 快速拒绝，pdf job 会落 failed——本测试只验证提交/查询形态
+    const pdfSource = { type: 'url', url: 'http://127.0.0.1:9/paper.pdf', name: 'paper.pdf', sizeBytes: 2048 };
+    const attemptId = '67676767-6767-4767-8767-676767676767';
+
+    const submitted = await call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ attemptId, pdfSource, pdfFolderToken: 'fld-papers', title: 'paper.pdf' }),
+    });
+    assert.equal(submitted.status, 202);
+    const accepted = await submitted.json();
+    assert.equal(accepted.job, null, 'pdf-only 提交不产生 clip job');
+    assert.equal(accepted.pdfJob.kind, 'pdf');
+    assert.equal(accepted.pdfJob.sourceUrl, pdfSource.url, 'sourceUrl 取 PDF 地址本身（弹窗同页恢复用）');
+    assert.equal(accepted.pdfJob.folderToken, 'fld-papers');
+    assert.equal(accepted.pdfJob.pdfSource.url, pdfSource.url);
+    assert.equal(validated, 0, 'pdf-only 路径不校验剪藏目标');
+
+    // 同 attemptId 重复提交：幂等，不产生第二条 job
+    const again = await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId, pdfSource }) });
+    assert.equal(again.status, 200);
+
+    const body = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+    assert.equal(body.jobs.length, 1);
+    assert.equal(body.jobs[0].kind, 'pdf');
+
+    // 等任务收尾（SSRF 拒绝 → failed）再关服清理，避免执行器写盘与 rm 竞争
+    for (let count = 0; count < 100; count += 1) {
+      const current = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+      if (current.jobs[0].status === 'failed') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    // 缺 attemptId / 缺 pdfSource / 非法目录 token 一律 400
+    assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ pdfSource }) })).status, 400, '缺 attemptId');
+    const noSource = await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878' }) });
+    assert.equal(noSource.status, 400);
+    assert.equal((await noSource.json()).code, 'PDF_SOURCE_REQUIRED');
+    assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878', pdfSource, pdfFolderToken: 'bad token!' }) })).status, 400, '目录 token 非法');
+    assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878', pdfSource: { type: 'url', url: 'ftp://example.com/x.pdf' } }) })).status, 400, 'pdfSource 校验与 clip 路径同一套');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});

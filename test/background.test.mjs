@@ -19,16 +19,23 @@ const terminalJob = {
 // chrome/fetch 桩必须在 import background.js 之前就位（模块顶层即用 chrome.storage）
 const storage = { activeAttempt: ATTEMPT, credential: 'cred' };
 const listeners = [];
-let lastJobsBody = null; // CLIP 转发给 bridge 的 POST /v1/jobs 请求体
+let lastJobsBody = null; // CLIP/SAVE_PDF_TAB 转发给 bridge 的 POST /v1/jobs 请求体
 let lastDriveListUrl = null; // LIST_DRIVE_FOLDERS 的请求 URL（#66）
 let lastDriveValidateBody = null; // VALIDATE_DRIVE_FOLDER 的请求体（#66）
 let stubSnapshotPdf = null; // 非 null 时 extractor 桩的快照带 pdf 识别结果（#65）
 let detectPdfResult = { pdf: null }; // pdf-detect.js 桩的探测结果
+let tabUrl = PAGE; // 当前标签页 URL 桩（#67 探测用例会换 URL）
+let pdfTabProbeResult = null; // DETECT_PDF_TAB 探针（func 注入）返回值
+let pdfTabProbeError = null; // 非 null 时探针注入失败（走 URL 后缀兜底）
 globalThis.chrome = {
   runtime: { id: 'ext-id', onMessage: { addListener: (fn) => listeners.push(fn) } },
-  tabs: { query: async () => [{ id: 1, url: PAGE }] },
+  tabs: { query: async () => [{ id: 1, url: tabUrl }] },
   scripting: {
-    executeScript: async ({ files } = {}) => {
+    executeScript: async ({ files, func } = {}) => {
+      if (func) {
+        if (pdfTabProbeError) throw pdfTabProbeError;
+        return [{ result: pdfTabProbeResult }];
+      }
       if (files?.[0] === 'pdf-detect.js') return [{ result: detectPdfResult }];
       return [{
         result: { title: '页面标题', sourceUrl: PAGE, capturedAt: '2026-09-02T00:00:00.000Z', markdown: '# 正文', images: [], ...(stubSnapshotPdf ? { pdf: stubSnapshotPdf } : {}) },
@@ -185,4 +192,89 @@ test('LIST_DRIVE_FOLDERS / VALIDATE_DRIVE_FOLDER 转发到 drive 端点族', asy
   // 根目录校验：null 也显式带在 body 里
   await send({ type: 'VALIDATE_DRIVE_FOLDER', folderToken: null });
   assert.deepEqual(lastDriveValidateBody, { folderToken: null });
+});
+
+// ——— PDF 标签页场景（#67）：contentType 探针主判定 + URL 后缀兜底 + pdf-only 提交 ———
+
+test('DETECT_PDF_TAB：探针命中 application/pdf 即判定（动态 URL 无 .pdf 后缀也覆盖）', async () => {
+  tabUrl = 'https://arxiv.org/pdf/2401.00001';
+  pdfTabProbeResult = { contentType: 'application/pdf', title: '2401.00001.pdf', sizeBytes: 2048 };
+  try {
+    const { pdfTab } = await send({ type: 'DETECT_PDF_TAB' });
+    assert.equal(pdfTab.url, tabUrl);
+    assert.equal(pdfTab.name, '2401.00001.pdf', '查看器 title 即文件名');
+    assert.equal(pdfTab.sizeBytes, 2048);
+  } finally {
+    tabUrl = PAGE; pdfTabProbeResult = null;
+  }
+});
+
+test('DETECT_PDF_TAB：探针 title 为空回退 URL 末段；非 PDF 页面（含 .pdf URL 的 HTML）不误判', async () => {
+  tabUrl = 'https://example.com/download?id=123';
+  pdfTabProbeResult = { contentType: 'application/pdf', title: '', sizeBytes: null };
+  try {
+    const { pdfTab } = await send({ type: 'DETECT_PDF_TAB' });
+    assert.equal(pdfTab.name, 'download', 'title 为空回退 URL 末段');
+    assert.equal(pdfTab.sizeBytes, null, 'HEAD 拿不到大小显示未知');
+
+    // .pdf 后缀但 contentType 是 HTML（登录墙/错误页）：探针为准，不是 PDF 标签页
+    tabUrl = 'https://example.com/paper.pdf';
+    pdfTabProbeResult = { contentType: 'text/html' };
+    assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null);
+
+    pdfTabProbeResult = null;
+    assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null, '探针无结果按非 PDF 处理');
+  } finally {
+    tabUrl = PAGE; pdfTabProbeResult = null;
+  }
+});
+
+test('DETECT_PDF_TAB：注入失败回退 URL 后缀兜底（忽略 query/hash）；非 .pdf 兜底不命中', async () => {
+  pdfTabProbeError = new Error('Cannot access contents of the page');
+  try {
+    tabUrl = 'https://example.com/paper.pdf?dl=1#page=2';
+    const { pdfTab } = await send({ type: 'DETECT_PDF_TAB' });
+    assert.equal(pdfTab.url, tabUrl);
+    assert.equal(pdfTab.name, 'paper.pdf');
+    assert.equal(pdfTab.sizeBytes, null, '兜底路径没有大小信息');
+
+    tabUrl = 'https://example.com/paper.PDF';
+    assert.ok((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, '后缀匹配大小写不敏感');
+
+    tabUrl = 'https://example.com/article';
+    assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null);
+  } finally {
+    tabUrl = PAGE; pdfTabProbeError = null;
+  }
+});
+
+test('DETECT_PDF_TAB：非 http(s) 页面直接返回 null（不注入探针）', async () => {
+  tabUrl = 'chrome://extensions';
+  try {
+    assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null);
+  } finally {
+    tabUrl = PAGE;
+  }
+});
+
+test('SAVE_PDF_TAB：只提交 pdf-only 任务体（无 snapshot/destination），写恢复指针', async () => {
+  const before = storage.activeAttempt;
+  await send({ type: 'SAVE_PDF_TAB', pdfSource: { url: PDF_URL, name: '2401.00001.pdf', sizeBytes: 2048 }, pdfFolderToken: 'fld-papers' });
+  assert.ok(lastJobsBody.attemptId, 'background 生成 attemptId');
+  assert.deepEqual(lastJobsBody.pdfSource, { type: 'url', url: PDF_URL, name: '2401.00001.pdf', sizeBytes: 2048 });
+  assert.equal(lastJobsBody.pdfFolderToken, 'fld-papers');
+  assert.equal(lastJobsBody.snapshot, undefined, 'pdf-only 提交不带快照');
+  assert.equal(lastJobsBody.destination, undefined, 'pdf-only 提交不带剪藏目标');
+  assert.equal(storage.activeAttempt, lastJobsBody.attemptId, '恢复指针指向本次 pdf 尝试');
+
+  // 失败重试：弹窗复用同一 attemptId（bridge 对 failed pdf job 幂等复位重排）
+  await send({ type: 'SAVE_PDF_TAB', attemptId: 'dddddddd-2222-4222-8222-222222222222', pdfSource: { url: PDF_URL } });
+  assert.equal(lastJobsBody.attemptId, 'dddddddd-2222-4222-8222-222222222222');
+  assert.equal(lastJobsBody.pdfFolderToken, null, '缺省目录 = 云盘根目录');
+  storage.activeAttempt = before;
+});
+
+test('SAVE_PDF_TAB：非 http(s) 的 pdfSource 拒绝提交', async () => {
+  await assert.rejects(send({ type: 'SAVE_PDF_TAB', pdfSource: { url: 'file:///Users/x/paper.pdf' } }), /PDF 地址不可用/);
+  await assert.rejects(send({ type: 'SAVE_PDF_TAB' }), /PDF 地址不可用/);
 });

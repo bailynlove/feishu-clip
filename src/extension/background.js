@@ -43,6 +43,48 @@ async function extractActiveTab() {
   return execution.result;
 }
 
+// ——— PDF 标签页识别（#67，调研结论见 #58/research/pdf-tab-detection）———
+// 主判定：注入探针读 document.contentType（Zotero 同款信号，activeTab+scripting 零权限增量），
+// 与 extractActiveTab 的 UNSUPPORTED_PAGE 判定相互独立——PDF 标签页不是"不支持的页面"，是另一种形态。
+// 注入失败（file:// 未授权、特殊页面等）才回退 tab.url 的 .pdf 后缀启发式（忽略 query/hash）。
+
+// 后缀兜底只作"疑似 PDF"判定：探针成功时以 contentType 为准（.pdf URL 返回 HTML 登录墙不算）
+function isPdfUrl(pageUrl) {
+  try { return /\.pdf$/i.test(new URL(pageUrl).pathname); } catch { return false; }
+}
+
+function pdfNameFromUrl(pageUrl) {
+  try {
+    const last = new URL(pageUrl).pathname.split('/').filter(Boolean).pop();
+    return last ? decodeURIComponent(last) : null;
+  } catch { return null; }
+}
+
+// 探针在页面上下文执行（executeScript 序列化 func，须自包含）：命中 PDF 时顺带用 HEAD
+// 拿文件大小（拿不到不阻塞识别，弹窗显示「未知大小」），title 在内嵌查看器里即文件名
+function pdfTabProbe() {
+  if (document.contentType !== 'application/pdf') return { contentType: document.contentType };
+  return fetch(location.href, { method: 'HEAD', credentials: 'same-origin' })
+    .then((response) => {
+      const length = Number(response.headers.get('content-length'));
+      const sizeBytes = response.ok && Number.isFinite(length) && length > 0 ? length : null;
+      return { contentType: document.contentType, title: document.title, sizeBytes };
+    })
+    .catch(() => ({ contentType: document.contentType, title: document.title, sizeBytes: null }));
+}
+
+async function detectPdfTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !/^https?:/.test(tab.url || '')) return { pdfTab: null };
+  try {
+    const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pdfTabProbe });
+    if (execution?.result?.contentType !== 'application/pdf') return { pdfTab: null };
+    return { pdfTab: { url: tab.url, name: execution.result.title || pdfNameFromUrl(tab.url), sizeBytes: execution.result.sizeBytes ?? null } };
+  } catch {
+    return { pdfTab: isPdfUrl(tab.url) ? { url: tab.url, name: pdfNameFromUrl(tab.url), sizeBytes: null } : null };
+  }
+}
+
 async function handle(message) {
   switch (message.type) {
     case 'PAIR': {
@@ -113,6 +155,21 @@ async function handle(message) {
       // pdf 目标目录（#66）：弹窗 chip 选定的 folderToken（null = 云盘根目录），随 job 透传
       const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
       const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource, pdfFolderToken } });
+      await chrome.storage.local.set({ activeAttempt: attemptId });
+      return result;
+    }
+    // PDF 标签页判定（#67）：弹窗打开时先于一切剪藏逻辑调用；命中即整体切换为 pdf-tab 单面板
+    case 'DETECT_PDF_TAB': return detectPdfTab();
+    // PDF 标签页保存（#67）：只提交 kind:'pdf' 的 job——不走 extractor、不建剪藏文档；
+    // 字节默认走 bridge 按 URL 下载（url 型 pdfSource，凭据回退归 #68）。
+    // attemptId 复用支持失败后重试（bridge 对 failed pdf job 幂等复位重排）
+    case 'SAVE_PDF_TAB': {
+      const source = message.pdfSource;
+      if (!source?.url || !/^https?:/.test(source.url)) throw Object.assign(new Error('PDF 地址不可用'), { code: 'PDF_SOURCE_REQUIRED' });
+      const attemptId = message.attemptId ?? crypto.randomUUID();
+      const pdfSource = { type: 'url', url: source.url, name: source.name ?? null, sizeBytes: source.sizeBytes ?? null };
+      const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, pdfSource, pdfFolderToken } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }

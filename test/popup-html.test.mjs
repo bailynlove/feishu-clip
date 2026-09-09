@@ -50,3 +50,28 @@ test('CTA 区有并排的「打开飞书文档 / 打开云盘 PDF」与 ghost �
   assert.ok(links[0].includes('id="open"') && links[0].includes('id="open-pdf"'), '文档与 PDF 链接并排');
   assert.ok(html.includes('id="retry-pdf"'), 'PDF 失败时提供重试入口');
 });
+
+// PDF 标签页单面板（#67）：#pdf-tab-panel 初始 hidden，由 popup.js 在探针命中后整体切换；
+// #web-panel 包住全部网页剪藏 UI（预设 chips/折叠区/CTA），pdf-tab 形态下整体隐藏
+test('pdf-tab panel starts hidden with name/size/folder/save slots and the pdf-only note (#67)', () => {
+  assert.ok(classAttr('pdf-tab-panel').includes('hidden'), '#pdf-tab-panel 初始应为 hidden');
+  const panel = html.match(/<section id="pdf-tab-panel"[\s\S]*?<\/section>/);
+  assert.ok(panel, '应有 #pdf-tab-panel 单面板');
+  for (const id of ['pdf-tab-name', 'pdf-tab-meta', 'pdf-tab-folder', 'pdf-tab-folder-name', 'pdf-tab-save']) {
+    assert.ok(panel[0].includes(`id="${id}"`), `面板应有 #${id}`);
+  }
+  assert.ok(panel[0].includes('📕'), '面板有 PDF 图标');
+  assert.ok(panel[0].includes('⬇ 保存 PDF 到云盘'), '主按钮初始为保存');
+  assert.ok(panel[0].includes('仅上传云盘，不创建剪藏文档'), '面板注明不创建剪藏文档');
+});
+
+test('web clip UI is wrapped in #web-panel so pdf-tab mode can hide it wholesale', () => {
+  const wrap = html.match(/<div id="web-panel">[\s\S]*?<\/div>\s*<section id="pdf-tab-panel"/);
+  assert.ok(wrap, '#web-panel 应包住网页剪藏 UI 并紧邻 #pdf-tab-panel');
+  for (const id of ['presets', 'settings-toggle', 'preview-toggle', 'save', 'pdf-row', 'pdf-discover']) {
+    assert.ok(wrap[0].includes(`id="${id}"`), `#web-panel 应包含 #${id}`);
+  }
+  const statusIndex = html.indexOf('id="status"');
+  const wrapIndex = html.indexOf('id="web-panel"');
+  assert.ok(statusIndex !== -1 && statusIndex < wrapIndex, '#status 在两种形态间共用，须在 #web-panel 之外');
+});

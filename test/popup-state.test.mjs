@@ -770,3 +770,42 @@ test('saveAsNewPreset / updateCurrentPreset 把会话目录写回 pdfDrive（fol
   const { preset: rootBack } = updateCurrentPreset(state);
   assert.deepEqual(rootBack.pdfDrive, { enabled: true, folderToken: null, folderName: null });
 });
+
+// ——— PDF 标签页形态（#67）：initPdfTabState 只携带单面板需要的字段 ———
+
+import { initPdfTabState } from '../src/extension/popup-state.js';
+
+const PDF_TAB = { url: 'https://arxiv.org/pdf/2401.00001', name: '2401.00001.pdf', sizeBytes: 2048 };
+
+test('initPdfTabState：pdf-tab 形态携带识别结果；会话目录取预设 pdfDrive，未开则根目录', () => {
+  const state = initPdfTabState({ presets: folderPreset, defaultPresetId: 'p1' }, PDF_TAB);
+  assert.equal(state.pageKind, 'pdf-tab');
+  assert.deepEqual(state.pdf, PDF_TAB);
+  assert.deepEqual(state.pdfFolder, { folderToken: 'fld-papers', folderName: '论文' });
+  assert.equal(pdfFolderLabel(state), '论文');
+  assert.equal(pdfDisplayName(state.pdf), '2401.00001.pdf');
+  assert.equal(formatPdfSize(state.pdf.sizeBytes), '2 KB');
+
+  const plain = initPdfTabState({ presets, defaultPresetId: 'p1' }, PDF_TAB);
+  assert.equal(plain.pdfFolder, null, '预设没开 PDF → 会话目录为 null');
+  assert.equal(pdfFolderLabel(plain), '云盘根目录（我的空间）');
+});
+
+test('initPdfTabState：trigger 命中预设优先于默认预设取目录；无预设兜底默认预设', () => {
+  const triggered = [
+    { id: 't1', name: '论文', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: FOLDER_DRIVE, triggers: ['https://arxiv.org'] },
+    { id: 't2', name: '默认', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: { enabled: true, folderToken: null, folderName: null } },
+  ];
+  const hit = initPdfTabState({ presets: triggered, defaultPresetId: 't2' }, PDF_TAB);
+  assert.equal(hit.presetId, 't1');
+  assert.deepEqual(hit.pdfFolder, { folderToken: 'fld-papers', folderName: '论文' });
+
+  const fallback = initPdfTabState({}, PDF_TAB);
+  assert.equal(fallback.presets.length, 1);
+  assert.equal(fallback.pdfFolder, null);
+
+  // 目录 chip 的会话选择直接复用 setPdfFolder（仅本次，不回写预设）
+  const moved = setPdfFolder(hit, { folderToken: null, folderName: null });
+  assert.equal(pdfFolderLabel(moved), '云盘根目录（我的空间）');
+  assert.equal(hit.presets[0].pdfDrive.folderToken, 'fld-papers', '会话选择不改预设本身');
+});

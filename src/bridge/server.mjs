@@ -250,6 +250,27 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
 
       if (request.method === 'POST' && request.url === '/v1/jobs') {
         const body = await readJson(request);
+        // pdf-only 提交（#67：PDF 标签页场景）：无 snapshot/destination，只校验 attemptId +
+        // pdfSource + 目标目录，落一条 pdf job；下方 clip 语义路径（snapshot/destination 校验）保持不变
+        if (body.snapshot === undefined || body.snapshot === null) {
+          if (!body.attemptId) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
+          const pdfSource = validatePdfSource(body.pdfSource);
+          const pdfFolderToken = body.pdfFolderToken === undefined || body.pdfFolderToken === null ? null : body.pdfFolderToken;
+          if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
+            return send(response, 400, { ok: false, code: 'PDF_FOLDER_INVALID', message: 'pdfFolderToken 不合法' }, origin);
+          }
+          // sourceUrl 取 PDF 地址本身：弹窗按它做同页 job 恢复（isJobForPage）
+          const submitted = await store.submit({
+            attemptId: body.attemptId,
+            sourceUrl: pdfSource.url,
+            kind: JOB_KIND.PDF,
+            pdfSource,
+            title: typeof body.title === 'string' && body.title ? body.title : null,
+            folderToken: pdfFolderToken,
+          });
+          executor.kick();
+          return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: null, pdfJob: jobView(submitted.job) }, origin);
+        }
         const isSpaceTarget = body.destination?.kind === 'space';
         if (!body.attemptId || !(isSpaceTarget ? body.destination?.spaceId : body.destination?.nodeToken)) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
         validateSnapshot(body.snapshot);

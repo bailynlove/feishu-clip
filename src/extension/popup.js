@@ -1,7 +1,7 @@
 import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireDrivePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
 import { createDrivePicker } from './drive-picker.js';
-import { describeAttemptView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName } from './popup-state.js';
+import { describeAttemptView, initPopupPresets, initPdfTabState, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -239,8 +239,9 @@ $('#dp-confirm').addEventListener('click', async () => {
   const saved = await drivePicker.saveSelection();
   if (saved) {
     presetState = setPdfFolder(presetState, { folderToken: saved.folderToken ?? null, folderName: saved.title });
-    syncPdfView();
-    syncModifiedButtons();
+    // pdf-tab 形态（#67）：目录 chip 只影响单面板展示与本次提交，不参与预设 dirty 判定
+    if (presetState.pageKind === 'pdf-tab') syncPdfTabView();
+    else { syncPdfView(); syncModifiedButtons(); }
     closeDrivePicker();
     show(`本次 PDF 将存到：${(saved.path ?? []).concat(saved.title).join(' / ')}。预设目录不变。`);
   } else {
@@ -249,16 +250,99 @@ $('#dp-confirm').addEventListener('click', async () => {
   }
 });
 
+// ——— PDF 标签页单面板（#67）：页面本身是 PDF 时正文区整体换形态，不产生剪藏 job ———
+// 主按钮三态：保存（可点）→ 上传中（禁用）→ 打开云盘 PDF ↗（pdfTabDone 置位后跳转）
+let pdfTabDone = false;
+
+function enterPdfTabMode() {
+  document.querySelector('.title-wrap').classList.add('hidden');
+  $('#web-panel').classList.add('hidden');
+  $('#pdf-tab-panel').classList.remove('hidden');
+  syncPdfTabView();
+}
+
+function syncPdfTabView() {
+  const pdf = presetState.pdf;
+  $('#pdf-tab-name').textContent = pdfDisplayName(pdf);
+  $('#pdf-tab-meta').textContent = formatPdfSize(pdf?.sizeBytes);
+  $('#pdf-tab-folder-name').textContent = pdfFolderLabel(presetState);
+}
+
+// 单面板的 job 视图落地：复用 describeAttemptView 的 pdf-only 分支（进度/成功/失败）
+function applyPdfTabView(view) {
+  const button = $('#pdf-tab-save');
+  if (view.kind === 'success' || view.kind === 'warning') {
+    show(view.message, view.kind);
+    if (view.pdfUrl) {
+      pdfTabDone = true;
+      button.disabled = false;
+      button.textContent = '打开云盘 PDF ↗';
+      button.dataset.url = view.pdfUrl;
+    }
+    recoveredAttempt = false;
+  } else if (view.kind === 'failure') {
+    show(view.message, 'error');
+    // 失败后主按钮回到保存态：再点一次 = 复用同一 attemptId 重试（bridge 复位重排 pdf job）
+    button.disabled = false;
+    button.textContent = '⬇ 保存 PDF 到云盘';
+    recoveredAttempt = false;
+  } else {
+    show(view.message);
+    button.disabled = true;
+    button.textContent = '上传中…';
+    pollTimer = setTimeout(poll, 900);
+  }
+}
+
+async function savePdfTab() {
+  if (pdfTabDone) {
+    chrome.tabs.create({ url: $('#pdf-tab-save').dataset.url });
+    return;
+  }
+  const button = $('#pdf-tab-save');
+  button.disabled = true;
+  show('正在提交 PDF 上传…');
+  try {
+    const result = await message({
+      type: 'SAVE_PDF_TAB',
+      // 恢复指针可能属于别的页面（跨页恢复），不能当 attemptId 复用——同键异 URL 会被
+      // job-store 拒绝。只有本会话发起过、或 poll 已确认同页归属后才复用（失败重试重排）
+      attemptId: recoveredAttempt ? null : attemptId,
+      pdfSource: presetState.pdf,
+      pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
+    });
+    attemptId = result.pdfJob?.attemptId ?? attemptId;
+    recoveredAttempt = false;
+    poll();
+  } catch (error) {
+    show(error.message, 'error');
+    button.disabled = false;
+  }
+}
+$('#pdf-tab-save').addEventListener('click', savePdfTab);
+$('#pdf-tab-folder').addEventListener('click', () => {
+  if ($('#drive-picker-panel').classList.contains('hidden')) openDrivePicker();
+  else closeDrivePicker();
+});
+
 async function inspect() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabUrl = tab?.url || null;
   try { $('#page-host').textContent = new URL(tab.url).host; } catch { $('#page-host').textContent = ''; }
   const settings = await message({ type: 'GET_SETTINGS' });
-  presetState = initPopupPresets(settings, tab);
   defaultPresetId = settings.defaultPresetId ?? null;
-  syncPresetView();
   attemptId = settings.activeAttempt || null;
   recoveredAttempt = Boolean(attemptId);
+  // PDF 标签页判定（#67）先于网页剪藏初始化：命中即整体切换单面板形态，
+  // 不跑 trigger/标题渲染，也不再发 #65 的主 PDF 探测（该探测面向网页内 PDF）
+  const { pdfTab } = await message({ type: 'DETECT_PDF_TAB' }).catch(() => ({ pdfTab: null }));
+  if (pdfTab) {
+    presetState = initPdfTabState(settings, pdfTab);
+    enterPdfTabMode();
+  } else {
+    presetState = initPopupPresets(settings, tab);
+    syncPresetView();
+  }
   try {
     let status = await message({ type: 'STATUS' });
     // 重载扩展后首次查询可能赶上 lark-cli 冷启动/网络抖动，未就绪时延迟重试一次再下结论
@@ -273,7 +357,9 @@ async function inspect() {
     show(error.code === 'BRIDGE_OFFLINE' ? '本地 Bridge 未运行，请启动服务后重试。' : '请打开设置完成扩展配对。', 'error');
   }
   if (attemptId) poll();
-  // 主 PDF 轻量探测（#65）：异步补齐识别结果，不阻塞弹窗首屏；探测失败按未识别处理
+  // 主 PDF 轻量探测（#65）：异步补齐识别结果，不阻塞弹窗首屏；探测失败按未识别处理。
+  // pdf-tab 形态（#67）不跑：页面本身就是 PDF，没有"网页内主 PDF"可探测
+  if (presetState.pageKind === 'pdf-tab') return;
   message({ type: 'DETECT_PDF' }).then(({ pdf }) => {
     if (!pdf) return;
     presetState = setPdfDetected(presetState, pdf);
@@ -289,6 +375,11 @@ async function poll() {
     if (!jobs || jobs.length === 0) { attemptId = null; recoveredAttempt = false; return; }
     const view = describeAttemptView(jobs, { recovered: recoveredAttempt });
     if (!view) return;
+    // PDF 标签页形态（#67）：view 落到单面板主按钮/状态条，不触碰网页形态的 CTA 区
+    if (presetState.pageKind === 'pdf-tab') {
+      applyPdfTabView(view);
+      return;
+    }
     if (view.kind === 'success' || view.kind === 'warning') {
       show(view.message, view.kind);
       if (view.documentUrl) { $('#open').classList.remove('hidden'); $('#open').dataset.url = view.documentUrl; }
