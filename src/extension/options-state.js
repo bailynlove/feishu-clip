@@ -195,7 +195,7 @@ export function jobDisplayTitle(job) {
 }
 
 // stage 的 name 是机器标识，展示用中文名
-const STAGE_LABELS = { create_document: '创建文档', images: '图片处理' };
+const STAGE_LABELS = { create_document: '创建文档', images: '图片处理', pdf_download: '下载 PDF' };
 
 // 展开明细行：页面提取（扩展侧 clientTiming）+ bridge timeline 按原顺序平铺。
 // 每行 { label, value, indent, failed }；indent 用于缩进层级（stage 0 / image 1 / cli 2）。

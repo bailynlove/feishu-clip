@@ -9,10 +9,10 @@ import { element, textNode } from './helpers/mini-dom.mjs';
 
 const extractorCode = await readFile(new URL('../src/extension/extractor.js', import.meta.url), 'utf8');
 
-function runExtractor(doc) {
+function runExtractor(doc, locationUrl = 'https://example.test/') {
   const context = vm.createContext({
     document: { createTextNode: (value) => textNode(value), createElement: (tag) => (tag === 'canvas' ? fakeCompositeCanvas() : element(tag)), ...doc },
-    location: new URL('https://example.test/'),
+    location: new URL(locationUrl),
     URL,
     Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
     fetch: async () => { throw new Error('no network in test'); },
@@ -955,4 +955,63 @@ test('无背景色类的普通 div：渲染行为不变，不包 callout', async
   assert.equal(result.error, undefined);
   assert.ok(!result.markdown.includes('<callout'));
   assert.ok(result.markdown.includes('普通容器内容'));
+});
+
+// ——— 主 PDF 识别（#65）：arXiv 站点规则 + citation_pdf_url meta；识别结果随快照带出 ———
+
+// citation_pdf_url meta 夹具：extractor 只用 querySelector 取这一个 meta
+function citationMeta(url) {
+  return url === null ? null : { getAttribute: (name) => (name === 'content' ? url : null) };
+}
+
+function pdfDoc({ citation = null, bodyChildren = null } = {}) {
+  return {
+    title: '论文页面',
+    body: element('body', [element('p', [textNode(LONG)]), ...(bodyChildren ?? [])]),
+    querySelector: (selector) => (selector === 'meta[name="citation_pdf_url"]' ? citationMeta(citation) : null),
+    querySelectorAll: () => [],
+  };
+}
+
+test('arXiv abs 页：按站点规则识别主 PDF（/abs/<id> → /pdf/<id>）', async () => {
+  const result = await runExtractor(pdfDoc(), 'https://arxiv.org/abs/2401.00001');
+  assert.equal(result.error, undefined);
+  assert.equal(result.pdf.url, 'https://arxiv.org/pdf/2401.00001');
+  assert.equal(result.pdf.name, '2401.00001.pdf');
+});
+
+test('arXiv 新版编号与子域也命中；非 abs 路径不误报', async () => {
+  const modern = await runExtractor(pdfDoc(), 'https://arxiv.org/abs/2401.00001v2');
+  assert.equal(modern.pdf.url, 'https://arxiv.org/pdf/2401.00001v2');
+  const subdomain = await runExtractor(pdfDoc(), 'https://www.arxiv.org/abs/1706.03762');
+  assert.equal(subdomain.pdf.url, 'https://www.arxiv.org/pdf/1706.03762');
+  const listing = await runExtractor(pdfDoc(), 'https://arxiv.org/list/cs.AI/recent');
+  assert.equal(listing.pdf, null, '列表页没有主 PDF');
+});
+
+test('citation_pdf_url meta：命中并按页面 URL resolve 相对路径', async () => {
+  const result = await runExtractor(pdfDoc({ citation: '/files/paper%20final.pdf' }), 'https://journal.example/articles/42');
+  assert.equal(result.pdf.url, 'https://journal.example/files/paper%20final.pdf');
+  assert.equal(result.pdf.name, 'paper final.pdf', '文件名按 URL 末段解码');
+});
+
+test('非 http(s) 的 citation_pdf_url（如 ftp://）不识别', async () => {
+  const result = await runExtractor(pdfDoc({ citation: 'ftp://example.com/x.pdf' }));
+  assert.equal(result.pdf, null);
+});
+
+test('正文里有随机 .pdf 链接但无 meta/站点规则：不误报主 PDF', async () => {
+  const link = element('a', [textNode('下载附录')]);
+  link.setAttribute('href', 'https://example.test/attachments/appendix.pdf');
+  const result = await runExtractor(pdfDoc({ bodyChildren: [element('p', [link])] }));
+  assert.equal(result.error, undefined);
+  assert.equal(result.pdf, null, '不做全量 PDF 链接扫描（#58 结论）');
+  assert.ok(result.markdown.includes('[下载附录](https://example.test/attachments/appendix.pdf)'), '链接仍是普通正文');
+});
+
+test('普通页面无 meta：pdf 为 null，不影响正文提取', async () => {
+  const result = await runExtractor(pdfDoc());
+  assert.equal(result.error, undefined);
+  assert.equal(result.pdf, null);
+  assert.ok(result.markdown.includes('足够长的正文内容'));
 });

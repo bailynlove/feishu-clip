@@ -808,3 +808,114 @@ test('iframe 阶段整体性失败（块列表拉取抛错）：占位符全部�
   const fix = lark.calls.find((args) => args[1] === '+update' && args.includes('str_replace') && args.includes('[[FEISHU_CLIP_IFRAME:0]]'));
   assert.ok(fix, '占位符应降级为链接');
 });
+
+// ——— PDF 存云盘消费者（#65）：下载 → 落盘 scratch → lark-cli drive +upload → complete ———
+
+import { pdfFileName } from '../src/bridge/executor.mjs';
+
+test('pdfFileName：标题渲染结果 + .pdf；清洗文件名非法字符，逐级回退', () => {
+  assert.equal(pdfFileName({ title: 'Attention Is All You Need', url: 'https://arxiv.org/pdf/1706.03762' }), 'Attention Is All You Need.pdf');
+  assert.equal(pdfFileName({ title: 'a/b\\c:d*e?f"g<h>i|j', url: 'https://example.com/x' }), 'a-b-c-d-e-f-g-h-i-j.pdf', '非法字符替换为连字符');
+  assert.equal(pdfFileName({ title: '', url: 'https://example.com/x', fallback: 'paper.pdf' }), 'paper.pdf', '空标题回退 pdfSource.name（不重复 .pdf）');
+  assert.equal(pdfFileName({ title: '   ', url: 'https://arxiv.org/pdf/2401.00001' }), '2401.00001.pdf', '无标题无 name 回退 URL 末段');
+  assert.equal(pdfFileName({ title: '', url: 'https://example.com/' }), 'clip.pdf', '全部落空时用通用占位');
+  assert.equal(pdfFileName({ title: '标题结束...', url: 'https://example.com/x' }), '标题结束.pdf', '结尾点号剥除');
+  assert.equal(pdfFileName({ title: '长'.repeat(300), url: 'https://example.com/x' }).length, 240 + 4, '标题截断 240 字符留足 .pdf 后缀');
+});
+
+// pdf 管道的假 store：记录 claim/complete/fail 的 kind 与产物；list 一次性吐出 pdf job
+function pdfFakeStore(job) {
+  let drained = false;
+  let onSettled;
+  const settled = new Promise((resolve) => { onSettled = resolve; });
+  const store = {
+    completed: null,
+    failed: null,
+    settled,
+    claims: [],
+    async list() { return drained ? [] : [job]; },
+    async claim(attemptId, workerId, kind) { store.claims.push({ attemptId, workerId, kind }); store.workerId = workerId; },
+    async get(attemptId, kind) { return kind === 'pdf' ? { status: 'running', workerId: store.workerId } : null; },
+    async complete(_id, _worker, result, kind) { store.completed = { ...result, kind }; drained = true; onSettled(); },
+    async fail(_id, _worker, result, kind) { store.failed = { ...result, kind }; drained = true; onSettled(); },
+  };
+  return store;
+}
+
+const PDF_JOB = {
+  attemptId: 'attempt-pdf',
+  kind: 'pdf',
+  title: 'Attention Is All You Need',
+  sourceUrl: 'https://arxiv.org/abs/1706.03762',
+  pdfSource: { type: 'url', url: 'https://arxiv.org/pdf/1706.03762', name: '1706.03762.pdf', sizeBytes: 2048 },
+};
+
+test('pdf job：下载后原格式落盘，经 drive +upload 上传云盘根目录，complete 带 fileToken/url', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB });
+  const uploads = [];
+  const downloads = [];
+  const lark = {
+    async uploadDriveFile(options) {
+      uploads.push(options);
+      return { fileToken: 'ft-pdf', url: 'https://example.feishu.cn/file/ft-pdf' };
+    },
+  };
+  const downloadPdf = async (url) => {
+    downloads.push(url);
+    return { buffer: Buffer.from('%PDF-1.7 fake', 'latin1'), source: url, sizeBytes: 15 };
+  };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+
+  assert.deepEqual(downloads, ['https://arxiv.org/pdf/1706.03762'], '按 pdfSource.url 下载');
+  assert.equal(store.claims.length, 1);
+  assert.equal(store.claims[0].kind, 'pdf', 'claim 带 pdf kind');
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].fileName, 'Attention Is All You Need.pdf', '文件名 = 标题渲染结果 + .pdf');
+  assert.equal(uploads[0].name, 'Attention Is All You Need.pdf');
+  assert.equal(uploads[0].folderToken, null, '本切片固定云盘根目录，不传 folderToken');
+  assert.ok(uploads[0].cwd, '落盘在 scratch 目录上传（--file 只接受 cwd 内相对路径）');
+  assert.ok(!path.isAbsolute(uploads[0].fileName), 'fileName 必须是相对路径');
+  assert.equal(store.completed.kind, 'pdf');
+  assert.deepEqual(store.completed.document, { fileToken: 'ft-pdf', url: 'https://example.feishu.cn/file/ft-pdf' });
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'pdf_download'), '下载阶段计时');
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'cli' && entry.name === 'drive +upload'), '上传计时');
+  assert.equal(store.failed, null);
+});
+
+test('pdf job：空标题时文件名回退 pdfSource.name', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, title: null });
+  const uploads = [];
+  const lark = { async uploadDriveFile(options) { uploads.push(options); return { fileToken: 'f', url: 'https://u' }; } };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.equal(uploads[0].fileName, '1706.03762.pdf');
+});
+
+test('pdf job：下载超限/类型不符映射为中文失败文案，上传歧义一律按失败（fail 落 failed）', async () => {
+  for (const [code, expected] of [
+    ['PDF_SIZE_REJECTED', /超过大小上限/],
+    ['PDF_TYPE_REJECTED', /不是 PDF 文件/],
+    ['PDF_SSRF_REJECTED', /地址不安全/],
+  ]) {
+    const store = pdfFakeStore({ ...PDF_JOB, attemptId: `pdf-${code}` });
+    const lark = { async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; } };
+    const downloadPdf = async () => { throw Object.assign(new Error(code), { code }); };
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+    await store.settled;
+    assert.equal(store.failed?.kind, 'pdf');
+    assert.equal(store.failed?.stage, 'pdf', 'pdf 失败阶段固定为 pdf（下载上传不加区分）');
+    assert.match(store.failed?.error, expected);
+    assert.equal(store.completed, null);
+  }
+
+  // 上传侧失败（含超时歧义）：不查重不 reconcile，直接 failed
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-upload-fail' });
+  const lark = { async uploadDriveFile() { throw new Error('socket hang up'); } };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.equal(store.failed?.stage, 'pdf');
+  assert.equal(store.failed?.error, 'socket hang up', '未识别的上传错误透传原始消息');
+});

@@ -11,6 +11,8 @@ export function createDefaultPreset(overrides = {}) {
     bodyTemplate: '',
     action: 'feishu',
     triggers: [],
+    // PDF 存云盘（#65）：null | { enabled, folderToken, folderName }；folderToken 为 null 即云盘根目录
+    pdfDrive: null,
     ...overrides,
   };
 }
@@ -22,6 +24,18 @@ export const IMAGE_MODES = ['preview', 'download', 'off'];
 export function resolveImageMode(preset) {
   if (IMAGE_MODES.includes(preset?.imageMode)) return preset.imageMode;
   return preset?.includeImages === false ? 'off' : 'preview';
+}
+
+// PDF 存云盘聚合字段（#62/#65）：读取时迁移——缺字段/非法值一律归一为 null；
+// enabled:true + folderToken:null = 存云盘根目录（合法态）。folderName 冗余存展示名（picker 归 #66）
+export function resolvePdfDrive(preset) {
+  const value = preset?.pdfDrive;
+  if (!value || typeof value !== 'object' || value.enabled !== true) return null;
+  return {
+    enabled: true,
+    folderToken: typeof value.folderToken === 'string' && value.folderToken ? value.folderToken : null,
+    folderName: typeof value.folderName === 'string' && value.folderName ? value.folderName : null,
+  };
 }
 
 // 幂等：service worker 冷启动会反复调用。无 presets 时从旧 destination 迁移；

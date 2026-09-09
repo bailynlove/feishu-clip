@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { LarkClient } from './lark.mjs';
 import { PairingStore } from './pairing.mjs';
-import { IMAGE_MODES, PersistentJobStore } from './job-store.mjs';
+import { IMAGE_MODES, JOB_KIND, PersistentJobStore } from './job-store.mjs';
 import { ClipExecutor } from './executor.mjs';
 
 const JSON_LIMIT = 52 * 1024 * 1024;
@@ -42,6 +42,26 @@ function validateSnapshot(snapshot) {
   if (snapshot.markdown.length > 1_500_000) throw new Error('SNAPSHOT_TOO_LARGE');
   if (snapshot.images && (!Array.isArray(snapshot.images) || snapshot.images.length > 30)) throw new Error('TOO_MANY_IMAGES');
   if (snapshot.iframes && (!Array.isArray(snapshot.iframes) || snapshot.iframes.length > 10)) throw new Error('TOO_MANY_IFRAMES');
+}
+
+// pdfSource（#65）：本切片只接受 url 型（bytes 型凭据通道归 #61）。
+// name/sizeBytes 是识别侧带出的展示信息，可选；校验失败直接 400
+function validatePdfSource(value) {
+  const bad = (code) => Object.assign(new Error(code), { status: 400, code });
+  if (!value || typeof value !== 'object' || value.type !== 'url') throw bad('PDF_SOURCE_REQUIRED');
+  let url;
+  try { url = new URL(value.url); } catch { throw bad('PDF_SOURCE_URL_REJECTED'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw bad('PDF_SOURCE_URL_REJECTED');
+  const pdfSource = { type: 'url', url: url.href };
+  if (value.name !== undefined && value.name !== null) {
+    if (typeof value.name !== 'string' || value.name.length > 250) throw bad('PDF_SOURCE_INVALID');
+    pdfSource.name = value.name;
+  }
+  if (value.sizeBytes !== undefined && value.sizeBytes !== null) {
+    if (!Number.isInteger(value.sizeBytes) || value.sizeBytes <= 0) throw bad('PDF_SOURCE_INVALID');
+    pdfSource.sizeBytes = value.sizeBytes;
+  }
+  return pdfSource;
 }
 
 function jobView(job) {
@@ -190,7 +210,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         // 任务列表给排查耗时用：新的在前，剥掉 snapshot 全文，只留标题与耗时字段
         const jobs = (await store.list()).reverse().slice(0, limit).map((job) => ({
           ...jobView(job),
-          title: typeof job.snapshot?.title === 'string' ? job.snapshot.title : null,
+          title: typeof job.snapshot?.title === 'string' ? job.snapshot.title : (job.title ?? null),
           timeline: job.timeline ?? [],
           totalMs: job.totalMs ?? null,
           clientTiming: job.clientTiming ?? null,
@@ -204,6 +224,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         if (!body.attemptId || !(isSpaceTarget ? body.destination?.spaceId : body.destination?.nodeToken)) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
         validateSnapshot(body.snapshot);
         const clientTiming = validateClientTiming(body.clientTiming);
+        const pdfSource = body.pdfSource === undefined || body.pdfSource === null ? null : validatePdfSource(body.pdfSource);
         try { await lark.validateDestination(body.destination); }
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
         // 图片写入模式（#53）：合法三态直用；非法/缺省回退旧 includeImages 布尔语义（false → off，其余 → preview）
@@ -217,14 +238,28 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           imageMode,
           clientTiming,
         });
+        // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名
+        let pdfSubmitted = null;
+        if (pdfSource) {
+          pdfSubmitted = await store.submit({
+            attemptId: body.attemptId,
+            sourceUrl: body.snapshot.sourceUrl,
+            kind: JOB_KIND.PDF,
+            pdfSource,
+            title: body.snapshot.title,
+          });
+        }
         executor.kick();
-        return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: jobView(submitted.job) }, origin);
+        return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: jobView(submitted.job), pdfJob: pdfSubmitted ? jobView(pdfSubmitted.job) : null }, origin);
       }
 
       const match = request.method === 'GET' && request.url?.match(/^\/v1\/jobs\/([0-9a-f-]{36})$/i);
       if (match) {
-        const job = await store.get(match[1]);
-        return job ? send(response, 200, { ok: true, job: jobView(job) }, origin) : send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
+        // get(attemptId) 语义升为「一次尝试」（#60）：返回该 attempt 的全部 job，弹窗侧做聚合呈现
+        const jobs = await store.get(match[1]);
+        return jobs.length
+          ? send(response, 200, { ok: true, jobs: jobs.map(jobView) }, origin)
+          : send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
       }
 
       return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);

@@ -92,10 +92,29 @@ async function handle(message) {
       // 正文合成（#37，#40 起有效模板 = 弹窗自定义正文框内容）：与弹窗预览同调 renderBody；
       // ctx 在标题覆盖之后构建，正文模板看到的即最终标题
       snapshot.markdown = renderBody(message.customBody, buildContext(snapshot));
-      const attemptId = crypto.randomUUID();
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs } } });
+      // 重试 PDF（#65）：弹窗「重试 PDF」复用同一 attemptId，bridge 侧 clip job 幂等命中、
+      // pdf job 失败态复位重跑；正常保存总是新 attemptId
+      const attemptId = message.attemptId ?? crypto.randomUUID();
+      // pdfSource 以保存时快照的识别结果为准（比弹窗打开时的探测更新），探测结果兜底
+      const detected = message.pdfEnabled === true ? (snapshot.pdf ?? message.pdfSource ?? null) : null;
+      const pdfSource = detected?.url && /^https?:/.test(detected.url)
+        ? { type: 'url', url: detected.url, name: detected.name ?? null, sizeBytes: detected.sizeBytes ?? null }
+        : null;
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
+    }
+    // 弹窗打开时的主 PDF 轻量探测（#65）：注入 pdf-detect.js（只读 meta/location + 一次 HEAD），
+    // 不跑正文提取；失败按未识别处理，弹窗不出现 PDF 入口
+    case 'DETECT_PDF': {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id || !/^https?:/.test(tab.url || '')) return { pdf: null };
+        const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['pdf-detect.js'] });
+        return execution?.result ?? { pdf: null };
+      } catch {
+        return { pdf: null };
+      }
     }
     // 任务日志（开发者模式）：bridge 侧统一记录耗时时间线，设置页透传展示
     case 'LIST_JOBS': return bridge('/v1/jobs?limit=20');
@@ -103,14 +122,15 @@ async function handle(message) {
     case 'EXTRACT': return extractActiveTab();
     case 'GET_JOB': {
       const result = await bridge(`/v1/jobs/${message.attemptId}`);
-      const job = result.job;
+      // 双 job（#60）：bridge 返回该 attempt 的全部 job；兼容老 bridge 的单 job 形态
+      const jobs = result.jobs ?? (result.job ? [result.job] : []);
       // 跨页面命中旧 attempt（弹窗在未剪藏过的页面打开）：不把 job 返回给弹窗展示。
       // 注意查询永远不清 activeAttempt 指针（终态也不清）：指针只被下一次 CLIP 覆盖。
       // 清掉会让原页面的成功态无从恢复——用户在别的页面开过弹窗，回到原页面就什么都看不到
-      if (job && message.pageUrl && !isJobForPage(job, message.pageUrl)) {
-        return { ...result, job: null };
+      if (jobs.length > 0 && message.pageUrl && !jobs.some((job) => isJobForPage(job, message.pageUrl))) {
+        return { ...result, job: null, jobs: [] };
       }
-      return result;
+      return { ...result, jobs };
     }
     default: throw new Error('UNKNOWN_MESSAGE');
   }

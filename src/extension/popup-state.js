@@ -1,10 +1,13 @@
 // 弹窗 job 状态的纯归约逻辑。recovered 表示该 attempt 是打开弹窗时从存储恢复的旧会话：
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
-import { createDefaultPreset, resolveImageMode } from './presets.js';
+import { createDefaultPreset, resolveImageMode, resolvePdfDrive } from './presets.js';
 import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
+
+// pdf job 用最小状态集（#60）：无 reconciling/needs_attention
+const PDF_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'expired']);
 
 // job 恢复只属于发起它的页面：跨页面恢复会把旧文档的成功态（含「查看飞书文档」按钮）
 // 铺到无关页面上，看起来像"没点保存就存好了"。忽略 hash 差异（同页锚点跳转不算换页）；
@@ -39,6 +42,111 @@ export function describeJobView(job, { recovered = false } = {}) {
   };
 }
 
+// ——— 双 job 聚合呈现（#60 弹窗协议，#59 变体 A 文案）：输入一次尝试的全部 job，
+// 输出单条进度/结论视图；双 job 各自独立成败，UI 上不强调"两个 job"，只呈现结果组合 ———
+
+function clipSucceeded(job) {
+  return job.status === 'succeeded' || job.status === 'succeeded_with_warnings';
+}
+
+function pdfPhase(pdf) {
+  if (!pdf) return null;
+  if (pdf.status === 'succeeded') return 'PDF ✓';
+  if (PDF_TERMINAL_STATUSES.has(pdf.status)) return 'PDF 上传失败';
+  return 'PDF 上传中…';
+}
+
+function clipPhase(clip) {
+  if (!clip) return null;
+  if (clipSucceeded(clip)) return '文档 ✓';
+  if (TERMINAL_STATUSES.has(clip.status)) return '文档失败';
+  return '文档保存中…';
+}
+
+// 返回 { kind, message, swapPrimary, documentUrl, pdfUrl, pdfRetry }；jobs 为空返回 null。
+// 单 clip job（未开 PDF 的剪藏）与旧 describeJobView 行为完全一致
+export function describeAttemptView(jobs, { recovered = false } = {}) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const clip = list.find((job) => (job.kind ?? 'clip') === 'clip') ?? null;
+  const pdf = list.find((job) => job.kind === 'pdf') ?? null;
+  if (!clip && !pdf) return null;
+  if (!pdf) {
+    const view = describeJobView(clip, { recovered });
+    return { ...view, pdfUrl: null, pdfRetry: false };
+  }
+
+  const docOk = clip ? clipSucceeded(clip) : false;
+  const clipTerminal = clip ? TERMINAL_STATUSES.has(clip.status) : false;
+  const pdfOk = pdf.status === 'succeeded';
+  const pdfFailed = PDF_TERMINAL_STATUSES.has(pdf.status) && !pdfOk;
+  const documentUrl = clip?.document?.url || null;
+  const pdfUrl = pdf.document?.url || null;
+
+  // 双产物就位：一行结论 + 两个链接并排（变体 A）
+  if (docOk && pdfOk) {
+    return { kind: 'success', message: '已保存 ✓ 文档与 PDF 均已入库。', swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false };
+  }
+  // PDF 失败：文档不受影响，警告横幅 + [打开文档][重试 PDF]
+  if (docOk && pdfFailed) {
+    return { kind: 'warning', message: `文档已保存 ✓，PDF 上传失败（${pdf.error || '未知错误'}）。文档不受影响。`, swapPrimary: false, documentUrl, pdfUrl: null, pdfRetry: true };
+  }
+  // 文档失败：错误横幅 + [重试文档]（主按钮保持可点），PDF 成功时链接仍可打开
+  if (clip && clipTerminal && !docOk) {
+    if (pdfFailed) {
+      return { kind: 'failure', message: `${clip.error || '剪藏未完成'}；PDF 上传也失败（${pdf.error || '未知错误'}）。`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: true };
+    }
+    if (pdfOk) {
+      return { kind: 'failure', message: clip.error || '剪藏未完成，请修复后重新发起。', swapPrimary: false, documentUrl: null, pdfUrl, pdfRetry: false };
+    }
+  }
+  // pdf-only 尝试（PDF 标签页等，本切片不产生但协议允许）：直接呈现 pdf job 状态
+  if (!clip) {
+    if (pdfOk) return { kind: 'success', message: 'PDF 已存云盘 ✓', swapPrimary: !recovered, documentUrl: null, pdfUrl, pdfRetry: false };
+    if (pdfFailed) return { kind: 'failure', message: pdf.error || 'PDF 上传失败。', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: true };
+    return { kind: 'progress', message: 'PDF 上传中…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false };
+  }
+  // 运行中：单条进度 + 阶段文案轮替
+  return { kind: 'progress', message: `${clipPhase(clip)} · ${pdfPhase(pdf)}`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false };
+}
+
+// ——— PDF 存云盘会话开关（#65）：识别结果与会话开关都是仅本次状态，不回写预设 ———
+
+// 识别结果（弹窗打开时 DETECT_PDF 探测）：null 表示本页没有主 PDF
+export function setPdfDetected(state, pdf) {
+  return { ...state, pdf: pdf ?? null };
+}
+
+export function setPdfOn(state, on) {
+  return { ...state, pdfOn: Boolean(on) };
+}
+
+// 预设默认开关态（读取时迁移：缺字段/非法 pdfDrive 一律视为关）
+export function presetPdfEnabled(state) {
+  return resolvePdfDrive(currentPreset(state))?.enabled === true;
+}
+
+// 「仅本次」徽标：会话开关与预设默认不一致即标注
+export function isPdfSessionOnly(state) {
+  return state.pdfOn !== presetPdfEnabled(state);
+}
+
+// 文件大小显示（#65）：拿不到 Content-Length 显示「未知大小」，不阻塞主流程
+export function formatPdfSize(sizeBytes) {
+  if (!Number.isInteger(sizeBytes) || sizeBytes <= 0) return '未知大小';
+  if (sizeBytes < 1024 * 1024) return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+  return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// 文件名显示：识别名缺失时回退 URL 末段，再退通用占位
+export function pdfDisplayName(pdf) {
+  if (pdf?.name) return pdf.name;
+  try {
+    const last = new URL(pdf.url).pathname.split('/').filter(Boolean).pop();
+    if (last) return decodeURIComponent(last);
+  } catch { /* 落到占位 */ }
+  return '主 PDF';
+}
+
 // ——— 预设选择与可编辑标题（#36）：纯函数，state 只携带数据，DOM 同步由 popup.js 负责 ———
 
 // 标题模板上下文只需 tab 信息 + 当前时间；content 在标题模板里无意义，不为此跑 extractor
@@ -64,6 +172,9 @@ function applyPresetParams(state) {
     destination: preset.destination ?? null,
     temporary: false,
     imageMode: resolveImageMode(preset),
+    // PDF 存云盘（#65）：会话开关初值 = 预设默认；识别结果（state.pdf）随后由弹窗探测填入
+    pdfOn: resolvePdfDrive(preset)?.enabled === true,
+    pdf: state.pdf ?? null,
     // 自定义正文框预填所选预设的 bodyTemplate：切预设即应用新预设模板，
     // 清除上一次的一次性修改（与目标/图片的切预设语义一致）
     customBody: preset.bodyTemplate ?? '',
@@ -147,14 +258,15 @@ function sameDestination(a, b) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
-// 「本次设置与所选预设不一致」的判定口径：弹窗可改的四项——保存目标（按值比较，
-// 手动覆盖成相同目标不算修改）、图片写入模式、标题框、自定义正文框。
+// 「本次设置与所选预设不一致」的判定口径：弹窗可改的五项——保存目标（按值比较，
+// 手动覆盖成相同目标不算修改）、图片写入模式、PDF 存云盘开关、标题框、自定义正文框。
 // 标题/正文的基线是「预填进框的值」而非模板原始串：标题基线 = 预设 titleTemplate 的
 // 渲染结果（isTitleEdited 本就是这个比较），自定义正文基线 = 预设 bodyTemplate（预填值）。
 export function isSessionModified(state) {
   const preset = currentPreset(state);
   return !sameDestination(state.destination, preset.destination ?? null)
     || state.imageMode !== resolveImageMode(preset)
+    || isPdfSessionOnly(state)
     || isTitleEdited(state)
     || isCustomBodyEdited(state);
 }
@@ -167,8 +279,14 @@ export function setIncludeImages(state, includeImages) {
   return { ...state, imageMode: presetMode === 'off' ? 'preview' : presetMode };
 }
 
-// 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖四项——
-// destination/imageMode 用当前值；titleTemplate 在用户改过标题时固化为当前框内容
+// 会话 PDF 开关 → 预设 pdfDrive 字段（#65）：本切片目录固定云盘根目录（folderToken 恒 null，
+// picker 归 #66）；关闭态归一为 null（与存量预设缺省同形）
+function sessionPdfDrive(state) {
+  return state.pdfOn ? { enabled: true, folderToken: null, folderName: null } : null;
+}
+
+// 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖五项——
+// destination/imageMode/pdfDrive 用当前值；titleTemplate 在用户改过标题时固化为当前框内容
 // （框里是渲染后的标题，固化成模板是用户自己的选择），没改则沿用源预设；
 // bodyTemplate 恒取当前自定义正文框内容。triggers 拷贝继承（与设置页 duplicatePreset
 // 的副本语义一致），重名允许（以 id 区分）。空名返回 null 由调用方拦截。
@@ -185,6 +303,7 @@ export function saveAsNewPreset(state, name) {
     bodyTemplate: state.customBody,
     destination: state.destination,
     imageMode: state.imageMode,
+    pdfDrive: sessionPdfDrive(state),
     triggers: [...(source.triggers ?? [])],
   };
   const next = { ...state, presets: [...state.presets, preset], presetId: preset.id, temporary: false, viaTrigger: false };
@@ -195,7 +314,7 @@ export function saveAsNewPreset(state, name) {
 
 // ——— 修改预设（#41）：把本次改动写回当前选中预设 ———
 
-// 与 saveAsNewPreset 同一口径覆盖四项：destination/imageMode 用当前值；
+// 与 saveAsNewPreset 同一口径覆盖五项：destination/imageMode/pdfDrive 用当前值；
 // titleTemplate 仅在标题手改过时固化为当前框内容；bodyTemplate 恒取当前自定义正文框。
 // 区别在写回原位（id/name/triggers/action 等保留），不新建、不切换选中。
 // 写回后 session 与预设一致（isSessionModified 变 false），按钮随之消失；
@@ -209,6 +328,7 @@ export function updateCurrentPreset(state) {
     bodyTemplate: state.customBody,
     destination: state.destination,
     imageMode: state.imageMode,
+    pdfDrive: sessionPdfDrive(state),
   };
   const presets = state.presets.map((preset) => (preset.id === source.id ? updated : preset));
   return { state: { ...state, presets, temporary: false }, preset: updated };
@@ -275,14 +395,16 @@ export function setMenuOpen(state, open) {
   return { ...state, menuOpen: Boolean(open) };
 }
 
-// 主按钮文字跟随当前预设默认动作；图标与设置页分段控件（#35）保持一致
+// 主按钮文字跟随当前预设默认动作；图标与设置页分段控件（#35）保持一致。
+// 保存到飞书且本会话开了 PDF（且本页识别到主 PDF）时 CTA 变为「保存到飞书 + PDF」（#59 变体 A）
 const PRIMARY_LABELS = {
   feishu: '⬇ 保存到飞书',
   clipboard: '⧉ 复制到剪贴板',
   file: '💾 保存为文件',
 };
 
-export function primaryLabel(action) {
+export function primaryLabel(action, session = null) {
+  if ((action ?? 'feishu') === 'feishu' && session?.pdfOn && session?.pdf) return '⬇ 保存到飞书 + PDF';
   return PRIMARY_LABELS[action] ?? PRIMARY_LABELS.feishu;
 }
 

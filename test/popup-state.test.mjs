@@ -557,3 +557,147 @@ test('isJobForPage 只对发起页面恢复 job，跨页面不恢复', () => {
   assert.equal(isJobForPage({ sourceUrl: null }, 'https://blog.example.com/a'), false, '缺 sourceUrl 宁可不恢复');
   assert.equal(isJobForPage(job, 'not-a-url'), false, '非法页面 URL 不恢复');
 });
+
+// ——— 双 job 聚合呈现（#60/#65）：describeAttemptView 把一次尝试的 clip+pdf 收成单条视图 ———
+
+import {
+  describeAttemptView,
+  formatPdfSize,
+  isPdfSessionOnly,
+  pdfDisplayName,
+  presetPdfEnabled,
+  setPdfDetected,
+  setPdfOn,
+} from '../src/extension/popup-state.js';
+
+const clipOk = { kind: 'clip', status: 'succeeded', warnings: [], document: { url: 'https://example.feishu.cn/wiki/docx-1' } };
+const pdfOk = { kind: 'pdf', status: 'succeeded', document: { url: 'https://example.feishu.cn/file/ft1' } };
+const pdfFailed = { kind: 'pdf', status: 'failed', error: 'PDF 超过大小上限' };
+const clipFailed = { kind: 'clip', status: 'failed', error: '目标已失效' };
+
+test('describeAttemptView：双成功 → success，文档与 PDF 链接并排', () => {
+  const view = describeAttemptView([clipOk, pdfOk]);
+  assert.equal(view.kind, 'success');
+  assert.equal(view.documentUrl, clipOk.document.url);
+  assert.equal(view.pdfUrl, pdfOk.document.url);
+  assert.equal(view.pdfRetry, false);
+  assert.equal(view.swapPrimary, true, '当次剪藏应换「打开文档」主按钮');
+  const recovered = describeAttemptView([clipOk, pdfOk], { recovered: true });
+  assert.equal(recovered.swapPrimary, false, '恢复的旧会话不劫持主按钮');
+});
+
+test('describeAttemptView：clip 成功 + pdf 失败 → warning + 重试 PDF 入口，文档链接可用', () => {
+  const view = describeAttemptView([clipOk, pdfFailed]);
+  assert.equal(view.kind, 'warning');
+  assert.match(view.message, /文档已保存 ✓/);
+  assert.match(view.message, /PDF 超过大小上限/);
+  assert.equal(view.documentUrl, clipOk.document.url);
+  assert.equal(view.pdfUrl, null);
+  assert.equal(view.pdfRetry, true);
+  assert.equal(view.swapPrimary, false, '警告态不换主按钮（重试走 ghost 按钮）');
+});
+
+test('describeAttemptView：clip 失败 + pdf 成功 → failure，PDF 链接仍可打开', () => {
+  const view = describeAttemptView([clipFailed, pdfOk]);
+  assert.equal(view.kind, 'failure');
+  assert.equal(view.message, '目标已失效');
+  assert.equal(view.documentUrl, null);
+  assert.equal(view.pdfUrl, pdfOk.document.url);
+  assert.equal(view.pdfRetry, false);
+});
+
+test('describeAttemptView：双失败 → failure + 重试 PDF', () => {
+  const view = describeAttemptView([clipFailed, pdfFailed]);
+  assert.equal(view.kind, 'failure');
+  assert.match(view.message, /目标已失效/);
+  assert.match(view.message, /PDF 上传也失败/);
+  assert.equal(view.pdfRetry, true);
+});
+
+test('describeAttemptView：运行中 → 单条进度 + 阶段文案', () => {
+  const view = describeAttemptView([{ kind: 'clip', status: 'running' }, { kind: 'pdf', status: 'queued' }]);
+  assert.equal(view.kind, 'progress');
+  assert.equal(view.message, '文档保存中… · PDF 上传中…');
+  assert.equal(view.pdfRetry, false);
+  const half = describeAttemptView([clipOk, { kind: 'pdf', status: 'running' }]);
+  assert.equal(half.kind, 'progress');
+  assert.equal(half.message, '文档 ✓ · PDF 上传中…');
+});
+
+test('describeAttemptView：pdf-only 尝试防御性处理；空数组返回 null', () => {
+  assert.equal(describeAttemptView([]), null);
+  assert.equal(describeAttemptView(null), null);
+  const ok = describeAttemptView([pdfOk]);
+  assert.equal(ok.kind, 'success');
+  assert.equal(ok.pdfUrl, pdfOk.document.url);
+  const running = describeAttemptView([{ kind: 'pdf', status: 'running' }]);
+  assert.equal(running.kind, 'progress');
+  const failed = describeAttemptView([pdfFailed]);
+  assert.equal(failed.kind, 'failure');
+  assert.equal(failed.pdfRetry, true);
+});
+
+test('describeAttemptView：单 clip job 与旧 describeJobView 行为一致（kind 缺省按 clip）', () => {
+  const legacy = { status: 'succeeded', warnings: [], document: { url: 'https://example.feishu.cn/wiki/x' } };
+  const view = describeAttemptView([legacy]);
+  assert.deepEqual(view, { ...describeJobView(legacy), pdfUrl: null, pdfRetry: false });
+});
+
+// ——— PDF 存云盘会话开关（#65）：仅本次状态，不回写预设；保存/改预设时写 pdfDrive ———
+
+test('会话 PDF 开关：初值 = 预设默认，偏离预设即「仅本次」并计入修改检测', () => {
+  const pdfPreset = [{ id: 'p1', name: '论文', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: { enabled: true, folderToken: null, folderName: null } }];
+  const on = initPopupPresets({ presets: pdfPreset, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(on.pdfOn, true, '预设开了 PDF → 会话开关初值开');
+  assert.equal(presetPdfEnabled(on), true);
+  assert.equal(isPdfSessionOnly(on), false);
+  assert.equal(isSessionModified(on), false);
+
+  const off = setPdfOn(on, false);
+  assert.equal(isPdfSessionOnly(off), true, '与预设默认不一致即「仅本次」');
+  assert.equal(isSessionModified(off), true, 'PDF 开关变化计入「本次设置已修改」');
+
+  const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(plain.pdfOn, false, '预设没开 PDF → 会话开关初值关');
+  assert.equal(isPdfSessionOnly(setPdfOn(plain, true)), true);
+});
+
+test('saveAsNewPreset / updateCurrentPreset 把会话 PDF 开关写回预设 pdfDrive（folderToken 恒 null，picker 归 #66）', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  const { preset: created } = saveAsNewPreset(setPdfOn(state, true), '论文');
+  assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: null, folderName: null });
+
+  const { preset: updated } = updateCurrentPreset(setPdfOn(state, true));
+  assert.deepEqual(updated.pdfDrive, { enabled: true, folderToken: null, folderName: null });
+
+  const pdfPreset = [{ id: 'p1', name: '论文', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: { enabled: true, folderToken: null, folderName: null } }];
+  state = initPopupPresets({ presets: pdfPreset, defaultPresetId: 'p1' }, tab, now);
+  const { preset: turnedOff } = updateCurrentPreset(setPdfOn(state, false));
+  assert.equal(turnedOff.pdfDrive, null, '关闭态归一为 null（与存量预设缺省同形）');
+});
+
+test('识别结果 setPdfDetected 是仅本次状态，不影响修改检测', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = setPdfDetected(state, { url: 'https://arxiv.org/pdf/2401.00001', name: '2401.00001.pdf', sizeBytes: 1024 });
+  assert.equal(state.pdf.url, 'https://arxiv.org/pdf/2401.00001');
+  assert.equal(isSessionModified(state), false, '识别结果本身不算用户修改');
+});
+
+test('primaryLabel：开了 PDF 且本页识别到主 PDF 时 CTA 带 PDF', () => {
+  assert.equal(primaryLabel('feishu', { pdfOn: true, pdf: { url: 'https://x/y.pdf' } }), '⬇ 保存到飞书 + PDF');
+  assert.equal(primaryLabel('feishu', { pdfOn: true, pdf: null }), '⬇ 保存到飞书', '未识别到 PDF 不加后缀');
+  assert.equal(primaryLabel('feishu', { pdfOn: false, pdf: { url: 'https://x/y.pdf' } }), '⬇ 保存到飞书', '开关关不加后缀');
+  assert.equal(primaryLabel('clipboard', { pdfOn: true, pdf: { url: 'https://x/y.pdf' } }), '⧉ 复制到剪贴板', '非保存动作不受影响');
+  assert.equal(primaryLabel('feishu'), '⬇ 保存到飞书', '无会话参数保持旧行为');
+});
+
+test('formatPdfSize / pdfDisplayName 展示兜底', () => {
+  assert.equal(formatPdfSize(524288), '512 KB');
+  assert.equal(formatPdfSize(15_728_640), '15.0 MB');
+  assert.equal(formatPdfSize(null), '未知大小', 'HEAD 拿不到 Content-Length 显示未知大小');
+  assert.equal(formatPdfSize(0), '未知大小');
+  assert.equal(pdfDisplayName({ url: 'https://arxiv.org/pdf/2401.00001', name: 'paper.pdf' }), 'paper.pdf');
+  assert.equal(pdfDisplayName({ url: 'https://arxiv.org/pdf/2401.00001' }), '2401.00001', 'name 缺失回退 URL 末段');
+  assert.equal(pdfDisplayName({ url: 'https://example.com/' }), '主 PDF', '全部落空用通用占位');
+  assert.equal(pdfDisplayName(null), '主 PDF');
+});

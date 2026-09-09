@@ -58,7 +58,8 @@ test('Bridge enforces Origin+credential, validates target, queues and completes 
     assert.equal(submitted.status, 202);
     let job;
     for (let count = 0; count < 30; count += 1) {
-      job = (await (await call(`/v1/jobs/${attemptId}`, { headers: { Authorization: `Bearer ${paired.credential}` } })).json()).job;
+      const body = await (await call(`/v1/jobs/${attemptId}`, { headers: { Authorization: `Bearer ${paired.credential}` } })).json();
+      job = body.jobs?.find((j) => (j.kind ?? 'clip') === 'clip') ?? body.jobs?.[0];
       if (job.status === 'succeeded') break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -155,7 +156,10 @@ test('POST /v1/jobs persists imageMode and derives includeImages; invalid values
     const auth = { Authorization: `Bearer ${paired.credential}` };
     const snapshot = { title: '模式网页', sourceUrl: 'https://example.com/mode', capturedAt: new Date().toISOString(), markdown: '# 正文' };
     const submit = (id, extra) => call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: id, destination: { nodeToken: 'wikcn-parent' }, snapshot, ...extra }) });
-    const readJob = async (id) => (await (await call(`/v1/jobs/${id}`, { headers: auth })).json()).job;
+    const readJob = async (id) => {
+      const body = await (await call(`/v1/jobs/${id}`, { headers: auth })).json();
+      return body.jobs?.find((j) => (j.kind ?? 'clip') === 'clip') ?? body.jobs?.[0];
+    };
 
     assert.equal((await submit('dddddddd-1111-4111-8111-111111111111', { imageMode: 'download' })).status, 202);
     assert.equal((await submit('eeeeeeee-1111-4111-8111-111111111111', { imageMode: 'off' })).status, 202);
@@ -181,6 +185,89 @@ test('POST /v1/jobs persists imageMode and derives includeImages; invalid values
         if (status !== 'queued' && status !== 'running') break;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// 双 job 提交（#60/#65）：POST /v1/jobs 带 pdfSource 时同 attemptId 再落一条 pdf job，
+// 响应带 pdfJob；GET /v1/jobs/:attemptId 返回该次尝试的全部 job；pdfSource 非法 400
+test('POST /v1/jobs with pdfSource queues a second pdf job; GET returns both jobs', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-pdf-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'pdf-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
+    run: async () => ({ ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } }),
+  };
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+    const snapshot = { title: 'Attention Is All You Need', sourceUrl: 'https://arxiv.org/abs/1706.03762', capturedAt: new Date().toISOString(), markdown: '# 正文' };
+    // 字面环回 IP：bridge 侧 SSRF 快速拒绝，pdf job 会落 failed——本测试只验证提交/查询形态
+    const pdfSource = { type: 'url', url: 'http://127.0.0.1:9/paper.pdf', name: '1706.03762.pdf', sizeBytes: 2048 };
+
+    const attemptId = '12121212-1212-4212-8212-121212121212';
+    const submitted = await call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ attemptId, destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot, pdfSource }),
+    });
+    assert.equal(submitted.status, 202);
+    const accepted = await submitted.json();
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.job.kind ?? 'clip', 'clip');
+    assert.equal(accepted.pdfJob.kind, 'pdf', '响应带第二条 pdf job');
+    assert.equal(accepted.pdfJob.title, 'Attention Is All You Need');
+    assert.equal(accepted.pdfJob.pdfSource.url, pdfSource.url);
+    assert.equal(accepted.pdfJob.snapshot, undefined, 'pdf job 不携带正文快照');
+
+    // 同 attemptId 重复提交（弹窗重试 PDF）：幂等，不产生第三条 job
+    const again = await call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ attemptId, destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot, pdfSource }),
+    });
+    assert.equal(again.status, 200, '幂等命中返回 200');
+
+    const body = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+    assert.equal(body.jobs.length, 2, '一次尝试返回全部 job');
+    assert.deepEqual(body.jobs.map((job) => job.kind).sort(), ['clip', 'pdf']);
+    assert.ok(!JSON.stringify(body).includes('# 正文'), '快照正文不得泄露');
+
+    // 等两条 job 收尾再关服清理，避免执行器写盘与 rm 竞争
+    for (let count = 0; count < 100; count += 1) {
+      const current = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+      if (current.jobs.every((job) => ['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled'].includes(job.status))) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const settled = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+    assert.equal(settled.jobs.find((job) => job.kind === 'clip').status, 'succeeded');
+    assert.equal(settled.jobs.find((job) => job.kind === 'pdf').status, 'failed', '环回地址被 SSRF 拒绝，pdf 落 failed 而不拖垮 clip');
+
+    // 非法 pdfSource 一律 400
+    for (const bad of [
+      { type: 'bytes', url: 'https://example.com/x.pdf' },
+      { type: 'url', url: 'not-a-url' },
+      { type: 'url', url: 'ftp://example.com/x.pdf' },
+      { type: 'url', url: 'https://user:pass@example.com/x.pdf' },
+      { type: 'url', url: 'https://example.com/x.pdf', sizeBytes: -1 },
+    ]) {
+      const rejected = await call('/v1/jobs', {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({ attemptId: '34343434-3434-4434-8434-343434343434', destination: { nodeToken: 'wikcn-parent' }, snapshot, pdfSource: bad }),
+      });
+      assert.equal(rejected.status, 400, `pdfSource=${JSON.stringify(bad)} 应被拒绝`);
     }
   } finally {
     await new Promise((resolve) => server.close(resolve));

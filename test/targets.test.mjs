@@ -210,7 +210,8 @@ test('space destination validates and creates the document at the space root', a
     assert.equal(submitted.status, 202);
     let job;
     for (let count = 0; count < 30; count += 1) {
-      job = (await (await bridge.call(`/v1/jobs/${attemptId}`)).json()).job;
+      const body = await (await bridge.call(`/v1/jobs/${attemptId}`)).json();
+      job = body.jobs?.find((j) => (j.kind ?? 'clip') === 'clip') ?? body.jobs?.[0];
       if (['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention'].includes(job.status)) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -222,4 +223,33 @@ test('space destination validates and creates the document at the space root', a
   } finally {
     await bridge.close();
   }
+});
+
+// Drive 原格式上传（#65）：argv 契约 + 根目录省略 --folder-token + 产物字段校验
+test('LarkClient.uploadDriveFile builds the drive +upload argv and maps file_token/url', async () => {
+  const calls = [];
+  const client = new LarkClient({ cliPath: '/fake' });
+  client.run = async (args, options) => {
+    calls.push({ args, options });
+    return { ok: true, data: { file_token: 'ft-1', url: 'https://example.feishu.cn/file/ft-1' } };
+  };
+
+  const root = await client.uploadDriveFile({ fileName: 'paper.pdf', name: '论文标题.pdf', folderToken: null, cwd: '/tmp/scratch' });
+  assert.deepEqual(calls[0].args, ['drive', '+upload', '--as', 'user', '--file', 'paper.pdf', '--name', '论文标题.pdf', '--format', 'json']);
+  assert.equal(calls[0].options.cwd, '/tmp/scratch', '--file 相对路径依赖 cwd 落盘目录');
+  assert.deepEqual(root, { fileToken: 'ft-1', url: 'https://example.feishu.cn/file/ft-1' });
+
+  const subfolder = await client.uploadDriveFile({ fileName: 'paper.pdf', folderToken: 'fldcnX', cwd: '/tmp/scratch' });
+  assert.ok(calls[1].args.includes('--folder-token') && calls[1].args.includes('fldcnX'), '有目录时带 --folder-token');
+  assert.ok(calls[1].args.includes('paper.pdf'), '--name 缺省回退 fileName');
+  assert.equal(subfolder.fileToken, 'ft-1');
+});
+
+test('LarkClient.uploadDriveFile rejects envelopes without file_token/url（上传歧义按失败）', async () => {
+  const client = new LarkClient({ cliPath: '/fake' });
+  client.run = async () => ({ ok: true, data: {} });
+  await assert.rejects(
+    () => client.uploadDriveFile({ fileName: 'paper.pdf', cwd: '/tmp' }),
+    /LARK_UPLOAD_MISSING_FILE/,
+  );
 });

@@ -2,8 +2,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { FAILURE_STAGE, IMAGE_MODES, JOB_STATUS } from './job-store.mjs';
-import { downloadPublicImage, IMAGE_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
+import { FAILURE_STAGE, IMAGE_MODES, JOB_KIND, JOB_STATUS } from './job-store.mjs';
+import { downloadPublicImage, downloadPublicPdf, IMAGE_LIMITS, PDF_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
 
 // 尝试标记：写在元信息引用块里（prepareMarkdown），reconcile 靠它在 wiki 里反查认领文档
 const ATTEMPT_MARKER_PREFIX = '剪藏尝试：';
@@ -17,6 +17,33 @@ function safeHttpUrl(value) {
     const url = new URL(value);
     return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
   } catch { return null; }
+}
+
+// 云盘 PDF 文件名（#65）：标题模板渲染结果 + .pdf；空标题回退 pdfSource.name、再退 URL 末段。
+// 飞书文件名上限 250 字符（#57 事实），截断留足 .pdf 后缀
+const FILENAME_UNSAFE = /[/\\:*?"<>|\u0000-\u001f\u007f]/g;
+
+function safeFileBase(value) {
+  return String(value || '').replace(FILENAME_UNSAFE, '-').replace(/[\r\n\t]+/g, ' ').trim().replace(/\.+$/, '').slice(0, 240);
+}
+
+export function pdfFileName({ title, url, fallback = null }) {
+  let base = safeFileBase(title);
+  if (!base && fallback) base = safeFileBase(String(fallback).replace(/\.pdf$/i, ''));
+  if (!base) {
+    try {
+      base = safeFileBase(decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || '').replace(/\.pdf$/i, ''));
+    } catch { base = ''; }
+  }
+  return `${base || 'clip'}.pdf`;
+}
+
+// pdf 失败的弹窗文案：机器码翻译成可读提示，其余透传原始消息
+function pdfErrorMessage(error) {
+  if (error?.code === 'PDF_SIZE_REJECTED') return `PDF 超过大小上限（${Math.round(PDF_LIMITS.maxBytes / 1024 / 1024)} MiB），未上传`;
+  if (error?.code === 'PDF_TYPE_REJECTED') return '下载到的内容不是 PDF 文件';
+  if (error?.code === 'PDF_SSRF_REJECTED') return 'PDF 地址不安全，已拒绝下载';
+  return error?.message || 'PDF 上传失败';
 }
 
 function escapeMarkdown(value) {
@@ -124,10 +151,12 @@ function isServerTimeout(error) {
 }
 
 export class ClipExecutor {
-  constructor({ store, lark, logger = console }) {
+  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf }) {
     this.store = store;
     this.lark = lark;
     this.logger = logger;
+    // pdf 下载函数可注入（测试 stub；生产默认走 image-policy 的 SSRF 校验下载）
+    this.downloadPdf = downloadPdf;
     this.running = false;
     this.reconcileRunning = false;
   }
@@ -145,7 +174,44 @@ export class ClipExecutor {
     for (;;) {
       const [job] = await this.store.list({ statuses: [JOB_STATUS.QUEUED] });
       if (!job) return;
-      await this.#execute(job).catch((error) => this.logger.error('clip worker failed', error));
+      const execute = job.kind === JOB_KIND.PDF ? () => this.#executePdf(job) : () => this.#execute(job);
+      await execute().catch((error) => this.logger.error('clip worker failed', error));
+    }
+  }
+
+  // pdf job 消费者（#65）：按 pdfSource.url 下载（image-policy 的 SSRF/逐跳校验 + 100 MiB 硬上限），
+  // 落到任务目录后经 lark-cli drive +upload 原格式上传云盘；省略 folderToken 即根目录。
+  // 上传歧义一律按失败处理（#60）：不查重不 reconcile——同名复传合法并存、孤儿文件无害（#57 实测）
+  async #executePdf(job) {
+    const workerId = randomUUID();
+    await this.store.claim(job.attemptId, workerId, JOB_KIND.PDF);
+    const scratch = await mkdtemp(path.join(tmpdir(), 'feishu-clip-pdf-'));
+    const startedAt = Date.now();
+    const timeline = [];
+    const timing = () => ({ timeline, totalMs: Date.now() - startedAt });
+    try {
+      const name = pdfFileName({ title: job.title, url: job.pdfSource.url, fallback: job.pdfSource.name });
+      const downloadAt = Date.now();
+      const fetched = await this.downloadPdf(job.pdfSource.url);
+      timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
+      await writeFile(path.join(scratch, name), fetched.buffer);
+      const uploadAt = Date.now();
+      const uploaded = await this.lark.uploadDriveFile({
+        fileName: name,
+        name,
+        folderToken: null, // 本切片目录固定云盘根目录（picker 归 #66）；省略 --folder-token
+        cwd: scratch,
+      });
+      timeline.push({ kind: 'cli', name: 'drive +upload', ms: Date.now() - uploadAt });
+      await this.store.complete(job.attemptId, workerId, { document: uploaded, ...timing() }, JOB_KIND.PDF);
+    } catch (error) {
+      const current = await this.store.get(job.attemptId, JOB_KIND.PDF);
+      if (current?.status === JOB_STATUS.RUNNING && current.workerId === workerId) {
+        await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF);
+      }
+      this.logger.error('pdf job failed', { attemptId: job.attemptId, error });
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
     }
   }
 
@@ -604,7 +670,7 @@ export class ClipExecutor {
       }
       await this.store.complete(job.attemptId, workerId, { warnings, ...timing() });
     } catch (error) {
-      const current = await this.store.get(job.attemptId);
+      const current = await this.store.get(job.attemptId, JOB_KIND.CLIP);
       if (current?.status === JOB_STATUS.RUNNING && current.workerId === workerId) {
         await this.store.fail(job.attemptId, workerId, {
           stage: current.document ? FAILURE_STAGE.IMAGES : FAILURE_STAGE.CREATE_DOCUMENT,

@@ -20,13 +20,18 @@ const terminalJob = {
 const storage = { activeAttempt: ATTEMPT, credential: 'cred' };
 const listeners = [];
 let lastJobsBody = null; // CLIP 转发给 bridge 的 POST /v1/jobs 请求体
+let stubSnapshotPdf = null; // 非 null 时 extractor 桩的快照带 pdf 识别结果（#65）
+let detectPdfResult = { pdf: null }; // pdf-detect.js 桩的探测结果
 globalThis.chrome = {
   runtime: { id: 'ext-id', onMessage: { addListener: (fn) => listeners.push(fn) } },
   tabs: { query: async () => [{ id: 1, url: PAGE }] },
   scripting: {
-    executeScript: async () => [{
-      result: { title: '页面标题', sourceUrl: PAGE, capturedAt: '2026-09-02T00:00:00.000Z', markdown: '# 正文', images: [] },
-    }],
+    executeScript: async ({ files } = {}) => {
+      if (files?.[0] === 'pdf-detect.js') return [{ result: detectPdfResult }];
+      return [{
+        result: { title: '页面标题', sourceUrl: PAGE, capturedAt: '2026-09-02T00:00:00.000Z', markdown: '# 正文', images: [], ...(stubSnapshotPdf ? { pdf: stubSnapshotPdf } : {}) },
+      }];
+    },
   },
   storage: {
     local: {
@@ -81,4 +86,61 @@ test('CLIP 把三态图片写入模式透传给 bridge', async () => {
   await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, imageMode: 'off', includeImages: false, title: 'T', customBody: '' });
   assert.equal(lastJobsBody.imageMode, 'off');
   assert.equal(lastJobsBody.includeImages, false);
+});
+
+// ——— PDF 存云盘（#65）：CLIP 的 pdfSource 组装 + DETECT_PDF 探测 + 重试复用 attemptId ———
+
+const PDF_URL = 'https://arxiv.org/pdf/2401.00001';
+
+test('CLIP 带 pdfEnabled：pdfSource 以快照识别结果为准、探测结果兜底，随任务上报 bridge', async () => {
+  try {
+    // 快照无 pdf：用弹窗传入的探测结果兜底
+    await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL, name: '2401.00001.pdf', sizeBytes: 2048 } });
+    assert.deepEqual(lastJobsBody.pdfSource, { type: 'url', url: PDF_URL, name: '2401.00001.pdf', sizeBytes: 2048 });
+
+    // 快照识别结果优先于探测兜底（保存时重跑提取，更新鲜）
+    stubSnapshotPdf = { url: 'https://arxiv.org/pdf/2401.00002', name: '2401.00002.pdf' };
+    await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL } });
+    assert.equal(lastJobsBody.pdfSource.url, 'https://arxiv.org/pdf/2401.00002', 'snapshot.pdf 优先于 message.pdfSource');
+
+    // 非 http(s) 的识别结果丢弃
+    stubSnapshotPdf = { url: 'javascript:alert(1)' };
+    await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL } });
+    assert.equal(lastJobsBody.pdfSource, null, '快照识别不安全时不得回退到旧探测结果');
+  } finally {
+    stubSnapshotPdf = null;
+  }
+});
+
+test('CLIP 未开 pdfEnabled：不上报 pdfSource', async () => {
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: false, pdfSource: { url: PDF_URL } });
+  assert.equal(lastJobsBody.pdfSource, null);
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' } });
+  assert.equal(lastJobsBody.pdfSource, null, '缺省等同关闭');
+});
+
+test('重试 PDF：弹窗复用同一 attemptId 重发 CLIP，原样透传给 bridge（bridge 侧幂等复位重排）', async () => {
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, attemptId: 'aaaaaaaa-1111-4111-8111-111111111111', pdfEnabled: true, pdfSource: { url: PDF_URL } });
+  assert.equal(lastJobsBody.attemptId, 'aaaaaaaa-1111-4111-8111-111111111111');
+});
+
+test('DETECT_PDF：注入 pdf-detect.js 返回探测结果；未识别/异常按 null 处理', async () => {
+  try {
+    detectPdfResult = { pdf: { url: PDF_URL, name: '2401.00001.pdf', sizeBytes: 2048 } };
+    const detected = await send({ type: 'DETECT_PDF' });
+    assert.equal(detected.pdf.url, PDF_URL);
+    assert.equal(detected.pdf.sizeBytes, 2048);
+
+    detectPdfResult = { pdf: null };
+    assert.equal((await send({ type: 'DETECT_PDF' })).pdf, null);
+  } finally {
+    detectPdfResult = { pdf: null };
+  }
+});
+
+test('GET_JOB 兼容老 bridge 单 job 形态，并聚合新 bridge 的 jobs 数组', async () => {
+  // 老形态（fetch 桩默认返回 { job }）：同页可恢复
+  const legacy = await send({ type: 'GET_JOB', attemptId: ATTEMPT, pageUrl: PAGE });
+  assert.equal(legacy.job?.status, 'succeeded');
+  assert.deepEqual(legacy.jobs.map((job) => job.status), ['succeeded'], '老形态包成单元素数组');
 });

@@ -104,3 +104,46 @@ test('resolveImageMode prefers imageMode over the legacy boolean and ignores inv
   assert.equal(resolveImageMode({ imageMode: 'download', includeImages: false }), 'download', 'imageMode 优先于旧布尔');
   assert.equal(resolveImageMode({ imageMode: 'bogus', includeImages: false }), 'off', '非法 imageMode 回退到旧布尔迁移');
 });
+
+// ——— PDF 存云盘预设字段（#62/#65）：读取时迁移，非法值一律归一为 null ———
+
+import { resolvePdfDrive } from '../src/extension/presets.js';
+
+test('createDefaultPreset 的 pdfDrive 缺省为 null（关闭态）', () => {
+  assert.equal(createDefaultPreset().pdfDrive, null);
+});
+
+test('resolvePdfDrive：缺字段/非法值一律归一为 null', () => {
+  for (const preset of [
+    {},
+    { pdfDrive: null },
+    { pdfDrive: 'on' },
+    { pdfDrive: { enabled: false } },
+    { pdfDrive: { enabled: 'yes' } },
+    { pdfDrive: { enabled: true, folderToken: 42 } }, // folderToken 非字符串 → 归一为根目录
+    null,
+    undefined,
+  ]) {
+    if (preset?.pdfDrive?.enabled === true) {
+      assert.deepEqual(resolvePdfDrive(preset), { enabled: true, folderToken: null, folderName: null });
+    } else {
+      assert.equal(resolvePdfDrive(preset), null, JSON.stringify(preset));
+    }
+  }
+});
+
+test('resolvePdfDrive：enabled:true + folderToken:null = 云盘根目录（合法态）', () => {
+  assert.deepEqual(resolvePdfDrive({ pdfDrive: { enabled: true, folderToken: null, folderName: null } }), {
+    enabled: true,
+    folderToken: null,
+    folderName: null,
+  });
+});
+
+test('resolvePdfDrive：完整结构透传 folderToken 与 folderName（picker 归 #66）', () => {
+  assert.deepEqual(resolvePdfDrive({ pdfDrive: { enabled: true, folderToken: 'fldcnABC', folderName: '论文' } }), {
+    enabled: true,
+    folderToken: 'fldcnABC',
+    folderName: '论文',
+  });
+});

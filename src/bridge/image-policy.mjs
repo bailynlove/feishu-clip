@@ -49,14 +49,14 @@ export function isPublicIp(address) {
   return false;
 }
 
-export async function resolvePublicHost(hostname, lookup = dns.lookup) {
+export async function resolvePublicHost(hostname, lookup = dns.lookup, code = 'IMAGE_SSRF_REJECTED') {
   if (net.isIP(hostname)) {
-    if (!isPublicIp(hostname)) throw Object.assign(new Error('IMAGE_SSRF_REJECTED'), { code: 'IMAGE_SSRF_REJECTED' });
+    if (!isPublicIp(hostname)) throw Object.assign(new Error(code), { code });
     return { address: hostname, family: net.isIP(hostname) };
   }
   const records = await lookup(hostname, { all: true, verbatim: true });
   if (!records.length || records.some((record) => !isPublicIp(record.address))) {
-    throw Object.assign(new Error('IMAGE_SSRF_REJECTED'), { code: 'IMAGE_SSRF_REJECTED' });
+    throw Object.assign(new Error(code), { code });
   }
   return records[0];
 }
@@ -133,15 +133,18 @@ export function pinnedLookup(record) {
   };
 }
 
-function requestOnce(url, record, limits) {
+// 带 SSRF 钉孔（pinned lookup）的单次 GET：Content-Length 预检 + 流式字节累计双重超限快速失败。
+// label 决定错误码前缀（IMAGE_*/PDF_*）；record 由 resolvePublicHost 给出，逐跳重解析
+export function requestPublicBytes(url, record, { accept, maxBytes, label, timeouts = {} }) {
+  const { connectMs = 5_000, responseMs = 10_000, totalMs = 20_000 } = timeouts;
   const client = url.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
     const request = client.request(url, {
       method: 'GET',
-      headers: { Accept: 'image/jpeg,image/png,image/gif,image/webp', 'User-Agent': 'FeishuClip/0.1' },
+      headers: { Accept: accept, 'User-Agent': 'FeishuClip/0.1' },
       lookup: pinnedLookup(record),
       servername: url.hostname,
-      timeout: 5_000,
+      timeout: connectMs,
     }, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
@@ -150,29 +153,29 @@ function requestOnce(url, record, limits) {
       }
       if (response.statusCode !== 200) {
         response.resume();
-        reject(Object.assign(new Error(`IMAGE_HTTP_${response.statusCode}`), { code: 'IMAGE_FETCH_FAILED' }));
+        reject(Object.assign(new Error(`${label}_HTTP_${response.statusCode}`), { code: `${label}_FETCH_FAILED` }));
         return;
       }
       const advertised = Number(response.headers['content-length'] || 0);
-      if (advertised > limits.maxImageBytes) {
+      if (advertised > maxBytes) {
         response.destroy();
-        reject(Object.assign(new Error('IMAGE_SIZE_REJECTED'), { code: 'IMAGE_SIZE_REJECTED' }));
+        reject(Object.assign(new Error(`${label}_SIZE_REJECTED`), { code: `${label}_SIZE_REJECTED` }));
         return;
       }
       const chunks = [];
       let bytes = 0;
-      response.setTimeout(10_000, () => response.destroy(new Error('IMAGE_RESPONSE_TIMEOUT')));
+      response.setTimeout(responseMs, () => response.destroy(new Error(`${label}_RESPONSE_TIMEOUT`)));
       response.on('data', (chunk) => {
         bytes += chunk.length;
-        if (bytes > limits.maxImageBytes) response.destroy(Object.assign(new Error('IMAGE_SIZE_REJECTED'), { code: 'IMAGE_SIZE_REJECTED' }));
+        if (bytes > maxBytes) response.destroy(Object.assign(new Error(`${label}_SIZE_REJECTED`), { code: `${label}_SIZE_REJECTED` }));
         else chunks.push(chunk);
       });
       response.on('end', () => resolve({ buffer: Buffer.concat(chunks), mimeType: response.headers['content-type'] }));
       response.on('error', reject);
     });
-    request.on('timeout', () => request.destroy(Object.assign(new Error('IMAGE_CONNECT_TIMEOUT'), { code: 'IMAGE_FETCH_FAILED' })));
+    request.on('timeout', () => request.destroy(Object.assign(new Error(`${label}_CONNECT_TIMEOUT`), { code: `${label}_FETCH_FAILED` })));
     request.on('error', reject);
-    request.setTimeout(20_000, () => request.destroy(Object.assign(new Error('IMAGE_TOTAL_TIMEOUT'), { code: 'IMAGE_FETCH_FAILED' })));
+    request.setTimeout(totalMs, () => request.destroy(Object.assign(new Error(`${label}_TOTAL_TIMEOUT`), { code: `${label}_FETCH_FAILED` })));
     request.end();
   });
 }
@@ -182,9 +185,45 @@ export async function downloadPublicImage(source, { limits = IMAGE_LIMITS, looku
   for (let redirects = 0; redirects <= limits.maxRedirects; redirects += 1) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error('IMAGE_URL_REJECTED'), { code: 'IMAGE_URL_REJECTED' });
     const record = await resolvePublicHost(url.hostname, lookup);
-    const result = await requestOnce(url, record, limits);
+    const result = await requestPublicBytes(url, record, { accept: 'image/jpeg,image/png,image/gif,image/webp', maxBytes: limits.maxImageBytes, label: 'IMAGE' });
     if (result.redirect) { url = result.redirect; continue; }
     return { ...result, source: url.href, metadata: validateImageBytes(result.buffer, result.mimeType, limits) };
   }
   throw Object.assign(new Error('IMAGE_REDIRECT_LIMIT'), { code: 'IMAGE_FETCH_FAILED' });
+}
+
+// PDF 下载（#65）：与图片管线同一套 SSRF/逐跳校验，差异只在 Accept、上限与超时档位。
+// 大小硬上限 100 MiB：远低于分片档租户限额（认证后 10 GB 起，#57 事实），目的是把失控下载
+// 挡在 Bridge 本地；租户档位收紧时下调此常量即可
+export const PDF_LIMITS = Object.freeze({
+  maxBytes: 100 * 1024 * 1024,
+  maxRedirects: 4,
+});
+
+const PDF_MAGIC = Buffer.from('%PDF-', 'latin1');
+
+// 魔数校验（PDF 规范允许 %PDF- 出现在文件头 1024 字节内）：200 但回的是 HTML 错误页时
+// 快速失败，不把垃圾当 PDF 传进云盘
+export function assertPdfBytes(buffer) {
+  if (!buffer.subarray(0, 1024).includes(PDF_MAGIC)) {
+    throw Object.assign(new Error('PDF_TYPE_REJECTED'), { code: 'PDF_TYPE_REJECTED' });
+  }
+}
+
+export async function downloadPublicPdf(source, { limits = PDF_LIMITS, lookup = dns.lookup } = {}) {
+  let url = new URL(source);
+  for (let redirects = 0; redirects <= limits.maxRedirects; redirects += 1) {
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error('PDF_URL_REJECTED'), { code: 'PDF_URL_REJECTED' });
+    const record = await resolvePublicHost(url.hostname, lookup, 'PDF_SSRF_REJECTED');
+    const result = await requestPublicBytes(url, record, {
+      accept: 'application/pdf',
+      maxBytes: limits.maxBytes,
+      label: 'PDF',
+      timeouts: { connectMs: 15_000, responseMs: 30_000, totalMs: 120_000 },
+    });
+    if (result.redirect) { url = result.redirect; continue; }
+    assertPdfBytes(result.buffer);
+    return { buffer: result.buffer, source: url.href, sizeBytes: result.buffer.length };
+  }
+  throw Object.assign(new Error('PDF_REDIRECT_LIMIT'), { code: 'PDF_FETCH_FAILED' });
 }

@@ -1,6 +1,6 @@
 import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeJobView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen } from './popup-state.js';
+import { describeAttemptView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, presetPdfEnabled, isPdfSessionOnly, formatPdfSize, pdfDisplayName } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -49,7 +49,7 @@ function renderPresetChips() {
 function syncPresetView() {
   $('#page-title').value = presetState.title;
   $('#title-reset').classList.toggle('hidden', !isTitleEdited(presetState));
-  $('#save').textContent = primaryLabel(currentPreset(presetState).action);
+  $('#save').textContent = primaryLabel(currentPreset(presetState).action, presetState);
   $('#images').checked = presetState.imageMode !== 'off';
   $('#custom-body').value = presetState.customBody;
   $('#preview-title').textContent = presetState.title;
@@ -59,8 +59,28 @@ function syncPresetView() {
   });
   syncDestinationView();
   renderPresetChips();
+  syncPdfView();
   syncModifiedButtons();
   refreshPreview();
+}
+
+// ——— PDF 存云盘（#65，#59 变体 A）：识别到主 PDF 才出现相关 UI ———
+// 折叠区内开关行（副标题 = 文件名 · 大小，与预设默认不一致时标「仅本次」）；
+// 预设未开且本次未启用时，折叠区外显示虚线发现性入口，点击即本次启用（不回写预设）
+function syncPdfView() {
+  const detected = presetState.pdf;
+  $('#pdf-row').classList.toggle('hidden', !detected);
+  if (detected) {
+    $('#pdf').checked = presetState.pdfOn;
+    $('#pdf-sub').textContent = `${pdfDisplayName(detected)} · ${formatPdfSize(detected.sizeBytes)}`;
+    $('#pdf-temp-badge').classList.toggle('hidden', !isPdfSessionOnly(presetState));
+  }
+  const discoverable = detected && !presetState.pdfOn && !presetPdfEnabled(presetState);
+  $('#pdf-discover').classList.toggle('hidden', !discoverable);
+  if (discoverable) {
+    $('#pdf-discover').textContent = `📕 本页包含 PDF（${formatPdfSize(detected.sizeBytes)}）—— 本次顺带存入云盘 ›`;
+  }
+  $('#save').textContent = primaryLabel(currentPreset(presetState).action, presetState);
 }
 
 // ——— dirty 按钮显隐（#40 保存为新预设 / #41 修改预设）：两个按钮共用 isSessionModified
@@ -180,23 +200,36 @@ async function inspect() {
     show(error.code === 'BRIDGE_OFFLINE' ? '本地 Bridge 未运行，请启动服务后重试。' : '请打开设置完成扩展配对。', 'error');
   }
   if (attemptId) poll();
+  // 主 PDF 轻量探测（#65）：异步补齐识别结果，不阻塞弹窗首屏；探测失败按未识别处理
+  message({ type: 'DETECT_PDF' }).then(({ pdf }) => {
+    if (!pdf) return;
+    presetState = setPdfDetected(presetState, pdf);
+    syncPdfView();
+  }).catch(() => {});
 }
 
 async function poll() {
   clearTimeout(pollTimer);
   try {
-    const { job } = await message({ type: 'GET_JOB', attemptId, pageUrl: currentTabUrl });
-    // job 为 null = 该 attempt 属于别的页面（跨页恢复）：静默丢弃，不展示任何状态
-    if (!job) { attemptId = null; recoveredAttempt = false; return; }
-    const view = describeJobView(job, { recovered: recoveredAttempt });
+    const { jobs } = await message({ type: 'GET_JOB', attemptId, pageUrl: currentTabUrl });
+    // 空数组 = 该 attempt 属于别的页面（跨页恢复）：静默丢弃，不展示任何状态
+    if (!jobs || jobs.length === 0) { attemptId = null; recoveredAttempt = false; return; }
+    const view = describeAttemptView(jobs, { recovered: recoveredAttempt });
+    if (!view) return;
     if (view.kind === 'success' || view.kind === 'warning') {
       show(view.message, view.kind);
       if (view.documentUrl) { $('#open').classList.remove('hidden'); $('#open').dataset.url = view.documentUrl; }
+      if (view.pdfUrl) { $('#open-pdf').classList.remove('hidden'); $('#open-pdf').dataset.url = view.pdfUrl; }
+      // PDF 失败时给出只重跑 pdf job 的重试入口（#60：双 job 各自独立成败）
+      if (view.pdfRetry) $('#retry-pdf').classList.remove('hidden');
       // 仅本次会话发起的保存成功才切换主按钮；恢复的旧成功态保留「保存到飞书」以便直接发起新剪藏
       if (view.swapPrimary) setSaveVisible(false);
       recoveredAttempt = false;
     } else if (view.kind === 'failure') {
       show(view.message, 'error'); $('#save').disabled = false;
+      // 文档失败但 PDF 已存云盘：PDF 产物链接仍可打开（变体 A）
+      if (view.pdfUrl) { $('#open-pdf').classList.remove('hidden'); $('#open-pdf').dataset.url = view.pdfUrl; }
+      if (view.pdfRetry) $('#retry-pdf').classList.remove('hidden');
       recoveredAttempt = false;
     } else {
       show(view.message);
@@ -246,6 +279,19 @@ $('#tp-confirm').addEventListener('click', async () => {
 $('#images').addEventListener('change', (event) => {
   presetState = setIncludeImages(presetState, event.target.checked);
   syncModifiedButtons();
+});
+// PDF 存云盘（#65）：折叠区内开关与折叠区外发现性入口都是仅本次改动，不回写预设；
+// 想固化由用户显式点「修改预设」（与其他会话字段同一语义）
+$('#pdf').addEventListener('change', (event) => {
+  presetState = setPdfOn(presetState, event.target.checked);
+  syncPdfView();
+  syncModifiedButtons();
+});
+$('#pdf-discover').addEventListener('click', () => {
+  presetState = setPdfOn(presetState, true);
+  syncPdfView();
+  syncModifiedButtons();
+  show('已开启本次「PDF 存云盘」，不影响预设默认值。');
 });
 // ——— 保存为新预设（#40）：内联命名条，空名不允许（确认键禁用），重名允许（以 id 区分）———
 function syncSaveAsConfirm() {
@@ -325,14 +371,43 @@ async function clipToFeishu() {
       imageMode: presetState.imageMode,
       title: finalTitle(presetState),
       customBody: presetState.customBody,
+      // PDF 存云盘（#65）：本次开了开关且识别到主 PDF 时附带 pdfSource，bridge 建双 job
+      pdfEnabled: presetState.pdfOn && Boolean(presetState.pdf),
+      pdfSource: presetState.pdf,
     });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
-    $('#open').classList.add('hidden'); setSaveVisible(true);
+    $('#open').classList.add('hidden'); $('#open-pdf').classList.add('hidden'); $('#retry-pdf').classList.add('hidden');
+    setSaveVisible(true);
     poll();
   }
   catch (error) { show(error.code === 'INVALID_TARGET' ? '保存目标已失效，请重新选择。' : error.message, 'error'); $('#save').disabled = false; }
 }
+
+// 重试 PDF（#65）：复用同一 attemptId 重新提交——bridge 侧 clip job 幂等命中不动，
+// 仅 failed 的 pdf job 复位重跑；与主按钮的新剪藏（新 attempt）互不干扰
+async function retryPdf() {
+  $('#retry-pdf').classList.add('hidden');
+  show('正在重试 PDF 上传…');
+  try {
+    await message({
+      type: 'CLIP',
+      attemptId,
+      destination: presetState.destination,
+      includeImages: $('#images').checked,
+      imageMode: presetState.imageMode,
+      title: finalTitle(presetState),
+      customBody: presetState.customBody,
+      pdfEnabled: true,
+      pdfSource: presetState.pdf,
+    });
+    poll();
+  } catch (error) {
+    show(error.message, 'error');
+    $('#retry-pdf').classList.remove('hidden');
+  }
+}
+$('#retry-pdf').addEventListener('click', retryPdf);
 
 // 导出动作（#38）：复制到剪贴板 / 保存为文件。完全在扩展侧完成——不过 Bridge、
 // 不创建 job、不影响 job 恢复；内容与保存/预览共用 composeClip 路径
@@ -406,6 +481,7 @@ document.addEventListener('keydown', (event) => {
   }
 });
 $('#open').addEventListener('click', () => chrome.tabs.create({ url: $('#open').dataset.url }));
+$('#open-pdf').addEventListener('click', () => chrome.tabs.create({ url: $('#open-pdf').dataset.url }));
 // 手动编辑标题：不立即重写输入框（避免光标跳动），只更新状态与 ↺ 可见性
 $('#page-title').addEventListener('input', (event) => {
   presetState = editTitle(presetState, event.target.value);

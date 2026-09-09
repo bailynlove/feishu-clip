@@ -8,7 +8,7 @@ import {
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
 } from './options-state.js';
-import { resolveImageMode } from './presets.js';
+import { resolveImageMode, resolvePdfDrive } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -239,6 +239,10 @@ function syncEditor() {
     option.classList.toggle('on', option.dataset.value === imageMode);
   }
   $('#f-image-mode-hint').textContent = imageModeHint(imageMode);
+  // PDF 存云盘开关（#65）：读取时迁移——缺字段/非法 pdfDrive 一律显示为关
+  const pdfEnabled = resolvePdfDrive(preset)?.enabled === true;
+  $('#f-pdf-drive').classList.toggle('on', pdfEnabled);
+  $('#f-pdf-drive').setAttribute('aria-pressed', String(pdfEnabled));
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
   for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
@@ -352,6 +356,15 @@ for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
     syncEditor();
   });
 }
+// PDF 存云盘开关（#65）：开启写完整聚合结构（folderToken 恒 null = 云盘根目录，picker 归 #66），
+// 关闭归一为 null；随预设整体经 SAVE_PRESETS 写回
+$('#f-pdf-drive').addEventListener('click', () => {
+  const enabled = !(resolvePdfDrive(editingPreset())?.enabled === true);
+  applyMutation(updatePreset(state, editingId, {
+    pdfDrive: enabled ? { enabled: true, folderToken: null, folderName: null } : null,
+  }));
+  syncEditor();
+});
 
 // 变量快捷插入：在光标处插入 {{xxx}}，并沿用字段自身的保存路径
 for (const row of document.querySelectorAll('.ps-vars')) {

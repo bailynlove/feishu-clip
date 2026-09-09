@@ -103,4 +103,16 @@ export class LarkClient {
       objType: node.obj_type || null,
     };
   }
+
+  // Drive 原格式上传（#65，命令契约见 docs/research/drive-upload-facts.md）：
+  // ≤20MB 一次性、>20MB CLI 自动分片；省略 folderToken 即根目录；同名复传合法并存。
+  // --file 只接受 cwd 下的相对路径（与图片 media-upload 同一约束），调用方须先落盘到 cwd
+  async uploadDriveFile({ fileName, name, folderToken, cwd, timeoutMs = 300_000 }) {
+    const args = ['drive', '+upload', '--as', 'user', '--file', fileName, '--name', name || fileName, '--format', 'json'];
+    if (folderToken) args.push('--folder-token', folderToken);
+    const result = await this.run(args, { cwd, timeoutMs });
+    const data = result.data || {};
+    if (!data.file_token || !data.url) throw new Error('LARK_UPLOAD_MISSING_FILE');
+    return { fileToken: data.file_token, url: data.url };
+  }
 }

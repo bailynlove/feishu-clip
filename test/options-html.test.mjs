@@ -45,3 +45,13 @@ test('preset editor has a three-state image mode segmented control', () => {
   assert.ok(html.includes('id="f-image-mode-hint"'), '应有模式说明文案位');
   assert.ok(!html.includes('id="f-images"'), '旧的「包含图片」开关应移除');
 });
+
+// PDF 存云盘预设开关（#65）：预设表单提供「识别到论文主 PDF 时顺带存入云盘」开关，
+// 初始关；本切片目录固定云盘根目录（picker 归 #66），文案须写明根目录
+test('preset editor has a PDF-drive switch, initially off', () => {
+  const row = html.match(/<button[^>]*id="f-pdf-drive"[^>]*>([\s\S]*?)<\/button>/);
+  assert.ok(row, '应有 #f-pdf-drive 开关');
+  assert.ok(row[0].includes('aria-pressed="false"'), '#f-pdf-drive 初始应为关');
+  assert.ok(!classAttr('f-pdf-drive').includes('on'), '#f-pdf-drive 初始不带 on 类');
+  assert.ok(row[1].includes('云盘根目录'), '说明文案应写明本切片固定存云盘根目录');
+});

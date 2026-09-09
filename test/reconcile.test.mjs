@@ -77,7 +77,7 @@ test('正文带本尝试标记的同名文档被采纳：记录 document 并重�
     {
       setup: () => ({ nodes: [docNode()], contents: { 'docx-found': '<title>测试页</title><blockquote>剪藏尝试：attempt-hit</blockquote>' } }),
       assert: async ({ store }) => {
-        const job = await store.get('attempt-hit');
+        const job = await store.get('attempt-hit', 'clip');
         assert.equal(job.status, 'queued');
         assert.equal(job.step, 'write_body');
         assert.deepEqual(job.document, { documentId: 'docx-found', url: 'https://my.feishu.cn/wiki/node-found' });
@@ -93,7 +93,7 @@ test('目标下无同名节点：确认未建，重排 create_document', async (
     {
       setup: () => ({ nodes: [docNode({ title: '别的文档', obj_token: 'docx-other' })] }),
       assert: async ({ store, lark }) => {
-        const job = await store.get('attempt-absent');
+        const job = await store.get('attempt-absent', 'clip');
         assert.equal(job.status, 'queued');
         assert.equal(job.step, 'create_document');
         assert.equal(job.document, null);
@@ -110,7 +110,7 @@ test('同名文档但标记属于别的尝试：无法确证归属，按未建�
     {
       setup: () => ({ nodes: [docNode()], contents: { 'docx-found': '<blockquote>剪藏尝试：attempt-other</blockquote>' } }),
       assert: async ({ store }) => {
-        const job = await store.get('attempt-mine');
+        const job = await store.get('attempt-mine', 'clip');
         assert.equal(job.status, 'queued');
         assert.equal(job.step, 'create_document');
         assert.equal(job.document, null);
@@ -125,7 +125,7 @@ test('同名文档正文没有标记（空文档）：按未建重排 create，�
     {
       setup: () => ({ nodes: [docNode()], contents: { 'docx-found': '' } }),
       assert: async ({ store }) => {
-        const job = await store.get('attempt-empty');
+        const job = await store.get('attempt-empty', 'clip');
         assert.equal(job.status, 'queued');
         assert.equal(job.step, 'create_document');
         assert.equal(job.document, null);
@@ -140,7 +140,7 @@ test('取消等待查证的任务：查到文档后落 cancelled_with_document �
     {
       setup: () => ({ nodes: [docNode()], contents: { 'docx-found': '剪藏尝试：attempt-cancel' } }),
       assert: async ({ store }) => {
-        const job = await store.get('attempt-cancel');
+        const job = await store.get('attempt-cancel', 'clip');
         assert.equal(job.status, 'cancelled_with_document');
         assert.equal(job.step, 'done');
         assert.equal(job.document.url, 'https://my.feishu.cn/wiki/node-found');
@@ -155,7 +155,7 @@ test('查证过程 lark 报错：任务保持 reconciling 等下轮 sweep，不�
     {
       setup: () => ({ failOn: () => true }),
       assert: async ({ store }) => {
-        const job = await store.get('attempt-error');
+        const job = await store.get('attempt-error', 'clip');
         assert.equal(job.status, 'reconciling');
       },
     },
@@ -168,7 +168,7 @@ test('space 目标在空间根层反查（不带 parent-node-token）', async ()
     {
       setup: () => ({ nodes: [docNode()], contents: { 'docx-found': '剪藏尝试：attempt-space' } }),
       assert: async ({ store, lark }) => {
-        const job = await store.get('attempt-space');
+        const job = await store.get('attempt-space', 'clip');
         assert.equal(job.step, 'write_body');
         const [listCall] = lark.calls.filter((args) => args[1] === '+node-list');
         assert.ok(listCall.includes('--space-id') && listCall.includes('space-9'));
@@ -184,7 +184,7 @@ test('非 docx 同名节点（如知识库快捷方式）不作为候选', async
     {
       setup: () => ({ nodes: [docNode({ obj_type: 'shortcut', obj_token: 'docx-short' })] }),
       assert: async ({ store, lark }) => {
-        const job = await store.get('attempt-shortcut');
+        const job = await store.get('attempt-shortcut', 'clip');
         assert.equal(job.step, 'create_document', 'shortcut 不算命中，重排 create');
         assert.ok(!lark.calls.some((args) => args[1] === '+fetch'));
       },
@@ -215,7 +215,7 @@ test('bridge 周期 sweep：reconciling 任务无需重启即被查证、续跑�
     await seedAmbiguous(store, { attemptId });
     let job;
     for (let count = 0; count < 80; count += 1) {
-      job = await store.get(attemptId);
+      job = await store.get(attemptId, 'clip');
       if (job.status === 'succeeded') break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -235,7 +235,7 @@ test('同名节点但创建时间在任务窗口之外：不拉正文，按未�
         nodeDetails: { 'node-found': { obj_create_time: String(Math.floor(Date.now() / 1000) - 86400) } },
       }),
       assert: async ({ store, lark }) => {
-        const job = await store.get('attempt-stale');
+        const job = await store.get('attempt-stale', 'clip');
         assert.equal(job.step, 'create_document');
         assert.ok(!lark.calls.some((args) => args[1] === '+fetch'), '窗口外的候选不该拉正文');
       },
@@ -262,11 +262,11 @@ test('确认未建后重排 create：kick 跑完建档成功，且不重复建�
     await executor.reconcile();
     executor.kick();
     for (let count = 0; count < 80; count += 1) {
-      const job = await store.get('attempt-recreate');
+      const job = await store.get('attempt-recreate', 'clip');
       if (['succeeded', 'succeeded_with_warnings', 'failed'].includes(job.status)) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    const job = await store.get('attempt-recreate');
+    const job = await store.get('attempt-recreate', 'clip');
     assert.equal(job.status, 'succeeded');
     assert.equal(job.document.documentId, 'docx-new');
     assert.equal(lark.calls.filter((args) => args[1] === '+create').length, 1, '只建一次文档');
@@ -295,7 +295,7 @@ test('bridge 周期 sweep：查证持续失败的任务超 jobTtlMs 后无需重
     await seedAmbiguous(store, { attemptId });
     let job;
     for (let count = 0; count < 80; count += 1) {
-      job = await store.get(attemptId);
+      job = await store.get(attemptId, 'clip');
       if (job.status === 'needs_attention') break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }

@@ -112,3 +112,85 @@ test('parseImageDimensions returns null for garbage or truncated input', () => {
   truncatedPng.writeUInt32BE(0x0d0a1a0a, 4);
   assert.equal(parseImageDimensions(truncatedPng), null);
 });
+
+// ——— PDF 下载策略（#65）：与图片同一套 SSRF/逐跳校验，差异只在 Accept/上限/超时 ———
+
+import http from 'node:http';
+import { assertPdfBytes, downloadPublicPdf, requestPublicBytes } from '../src/bridge/image-policy.mjs';
+
+const LOCAL_RECORD = { address: '127.0.0.1', family: 4 };
+
+async function withHttpServer(handler, run) {
+  const server = http.createServer(handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await run(`http://127.0.0.1:${server.address().port}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test('requestPublicBytes: Content-Length 预检超限快速失败', async () => {
+  let responded = 0;
+  await withHttpServer((request, response) => {
+    responded += 1;
+    response.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': 4096 });
+    response.end('%PDF-');
+  }, async (base) => {
+    await assert.rejects(
+      () => requestPublicBytes(new URL(`${base}/big.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      /PDF_SIZE_REJECTED/,
+    );
+  });
+  assert.equal(responded, 1, '预检失败直接断开，不重试');
+});
+
+test('requestPublicBytes: 无 Content-Length 时流式累计超限同样快速失败', async () => {
+  await withHttpServer((request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/pdf' });
+    response.write(Buffer.alloc(2048)); // 超过 maxBytes=1024
+    response.end();
+  }, async (base) => {
+    await assert.rejects(
+      () => requestPublicBytes(new URL(`${base}/chunked.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      /PDF_SIZE_REJECTED/,
+    );
+  });
+});
+
+test('requestPublicBytes: 正常响应带 buffer 与 content-type', async () => {
+  await withHttpServer((request, response) => {
+    assert.equal(request.headers.accept, 'application/pdf', 'PDF 通道用 PDF 的 Accept');
+    response.writeHead(200, { 'Content-Type': 'application/pdf' });
+    response.end('%PDF-1.7');
+  }, async (base) => {
+    const result = await requestPublicBytes(new URL(`${base}/ok.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' });
+    assert.equal(result.buffer.toString('latin1'), '%PDF-1.7');
+    assert.equal(result.mimeType, 'application/pdf');
+  });
+});
+
+test('downloadPublicPdf 拒绝解析到私网地址的主机（PDF_SSRF_REJECTED）', async () => {
+  const privateLookup = async () => [{ address: '10.0.0.8', family: 4 }];
+  await assert.rejects(
+    () => downloadPublicPdf('http://internal.example/paper.pdf', { lookup: privateLookup }),
+    /PDF_SSRF_REJECTED/,
+  );
+  await assert.rejects(
+    () => downloadPublicPdf('http://127.0.0.1/paper.pdf'),
+    /PDF_SSRF_REJECTED/,
+    '字面环回 IP 不经 DNS 也要被拒',
+  );
+});
+
+test('downloadPublicPdf 拒绝非 http(s) 与带凭据的 URL', async () => {
+  await assert.rejects(() => downloadPublicPdf('ftp://example.com/x.pdf'), /PDF_URL_REJECTED/);
+  await assert.rejects(() => downloadPublicPdf('https://user:pass@example.com/x.pdf'), /PDF_URL_REJECTED/);
+});
+
+test('assertPdfBytes: %PDF- 魔数须在文件头 1024 字节内', () => {
+  assert.doesNotThrow(() => assertPdfBytes(Buffer.from('%PDF-1.7\nbody', 'latin1')));
+  assert.doesNotThrow(() => assertPdfBytes(Buffer.concat([Buffer.alloc(100), Buffer.from('%PDF-1.4', 'latin1')])), '规范允许魔数前有少量前导字节');
+  assert.throws(() => assertPdfBytes(Buffer.from('<html><body>404</body></html>', 'latin1')), /PDF_TYPE_REJECTED/, 'HTML 错误页不得当 PDF');
+  assert.throws(() => assertPdfBytes(Buffer.concat([Buffer.alloc(2000), Buffer.from('%PDF-', 'latin1')])), /PDF_TYPE_REJECTED/, '魔数超出 1024 字节窗口同样拒绝');
+});
