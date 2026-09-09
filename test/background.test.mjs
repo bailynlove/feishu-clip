@@ -20,6 +20,8 @@ const terminalJob = {
 const storage = { activeAttempt: ATTEMPT, credential: 'cred' };
 const listeners = [];
 let lastJobsBody = null; // CLIP 转发给 bridge 的 POST /v1/jobs 请求体
+let lastDriveListUrl = null; // LIST_DRIVE_FOLDERS 的请求 URL（#66）
+let lastDriveValidateBody = null; // VALIDATE_DRIVE_FOLDER 的请求体（#66）
 let stubSnapshotPdf = null; // 非 null 时 extractor 桩的快照带 pdf 识别结果（#65）
 let detectPdfResult = { pdf: null }; // pdf-detect.js 桩的探测结果
 globalThis.chrome = {
@@ -48,9 +50,16 @@ globalThis.chrome = {
 };
 globalThis.fetch = async (url, options) => {
   if (url.endsWith('/v1/jobs') && options?.method === 'POST') lastJobsBody = JSON.parse(options.body);
+  if (url.endsWith('/v1/drive/folders/validate')) lastDriveValidateBody = JSON.parse(options.body);
+  else if (url.includes('/v1/drive/folders')) lastDriveListUrl = url;
   return {
     ok: true,
-    json: async () => (url.includes(`/v1/jobs/${ATTEMPT}`) ? { ok: true, job: terminalJob } : { ok: true, job: { attemptId: 'new-attempt' } }),
+    json: async () => {
+      if (url.includes(`/v1/jobs/${ATTEMPT}`)) return { ok: true, job: terminalJob };
+      if (url.endsWith('/v1/drive/folders/validate')) return { ok: true, folder: { folderToken: lastDriveValidateBody.folderToken ?? null, name: '论文' } };
+      if (url.includes('/v1/drive/folders')) return { ok: true, folders: [{ folderToken: 'fld-a', name: '论文' }], hasMore: false, nextPageToken: null };
+      return { ok: true, job: { attemptId: 'new-attempt' } };
+    },
   };
 };
 
@@ -143,4 +152,37 @@ test('GET_JOB 兼容老 bridge 单 job 形态，并聚合新 bridge 的 jobs 数
   const legacy = await send({ type: 'GET_JOB', attemptId: ATTEMPT, pageUrl: PAGE });
   assert.equal(legacy.job?.status, 'succeeded');
   assert.deepEqual(legacy.jobs.map((job) => job.status), ['succeeded'], '老形态包成单元素数组');
+});
+
+// ——— Drive 目录选择器消息（#66）———
+
+test('CLIP 透传 pdfFolderToken；缺省/非法值归一为 null（根目录）', async () => {
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL }, pdfFolderToken: 'fld-papers' });
+  assert.equal(lastJobsBody.pdfFolderToken, 'fld-papers');
+
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL } });
+  assert.equal(lastJobsBody.pdfFolderToken, null, '缺省 = 云盘根目录');
+
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL }, pdfFolderToken: 42 });
+  assert.equal(lastJobsBody.pdfFolderToken, null, '非字符串 token 不下发');
+});
+
+test('LIST_DRIVE_FOLDERS / VALIDATE_DRIVE_FOLDER 转发到 drive 端点族', async () => {
+  lastDriveListUrl = null;
+  const root = await send({ type: 'LIST_DRIVE_FOLDERS' });
+  assert.ok(lastDriveListUrl.endsWith('/v1/drive/folders'), '省略 folderToken 列根层，不带查询参数');
+  assert.equal(root.folders[0].folderToken, 'fld-a');
+
+  await send({ type: 'LIST_DRIVE_FOLDERS', folderToken: 'fld-a', cursor: 'c2', limit: 20 });
+  assert.ok(lastDriveListUrl.includes('parentFolderToken=fld-a'));
+  assert.ok(lastDriveListUrl.includes('cursor=c2'));
+  assert.ok(lastDriveListUrl.includes('limit=20'));
+
+  const validated = await send({ type: 'VALIDATE_DRIVE_FOLDER', folderToken: 'fld-a' });
+  assert.deepEqual(lastDriveValidateBody, { folderToken: 'fld-a' });
+  assert.deepEqual(validated.folder, { folderToken: 'fld-a', name: '论文' });
+
+  // 根目录校验：null 也显式带在 body 里
+  await send({ type: 'VALIDATE_DRIVE_FOLDER', folderToken: null });
+  assert.deepEqual(lastDriveValidateBody, { folderToken: null });
 });

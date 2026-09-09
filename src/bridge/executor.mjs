@@ -180,7 +180,8 @@ export class ClipExecutor {
   }
 
   // pdf job 消费者（#65）：按 pdfSource.url 下载（image-policy 的 SSRF/逐跳校验 + 100 MiB 硬上限），
-  // 落到任务目录后经 lark-cli drive +upload 原格式上传云盘；省略 folderToken 即根目录。
+  // 落到任务目录后经 lark-cli drive +upload 原格式上传云盘；job.folderToken（#66）是 picker/
+  // 弹窗选定的目标目录，null 即根目录（省略 --folder-token）。
   // 上传歧义一律按失败处理（#60）：不查重不 reconcile——同名复传合法并存、孤儿文件无害（#57 实测）
   async #executePdf(job) {
     const workerId = randomUUID();
@@ -199,7 +200,7 @@ export class ClipExecutor {
       const uploaded = await this.lark.uploadDriveFile({
         fileName: name,
         name,
-        folderToken: null, // 本切片目录固定云盘根目录（picker 归 #66）；省略 --folder-token
+        folderToken: job.folderToken ?? null, // #66：picker/弹窗选定的目录；null 走根目录
         cwd: scratch,
       });
       timeline.push({ kind: 'cli', name: 'drive +upload', ms: Date.now() - uploadAt });

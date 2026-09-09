@@ -101,11 +101,13 @@ export class PersistentJobStore {
     this.#jobTtlMs = jobTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
     if (!JOB_KINDS.has(kind)) throw new TypeError(`Unknown job kind: ${kind}`);
-    // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名
+    // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名；
+    // folderToken（#66）是目标云盘目录，null 即根目录
     const normalizedPdfSource = kind === JOB_KIND.PDF ? normalizePdfSource(pdfSource) : null;
+    const normalizedFolderToken = typeof folderToken === 'string' && folderToken ? folderToken : null;
 
     return this.#mutate(async (data) => {
       const existing = data.jobs.find((job) => job.attemptId === attemptId && jobKind(job) === kind);
@@ -117,12 +119,14 @@ export class PersistentJobStore {
           throw new Error(`attemptId ${attemptId} is already bound to another pdf source`);
         }
         // pdf 失败重试（#65 弹窗「重试 PDF」）：终态 failed 的 pdf job 被同键重新提交时
-        // 复位重排队，幂等复用同一 job 记录；clip 侧维持原语义（终态重发不复活）
+        // 复位重排队，幂等复用同一 job 记录；clip 侧维持原语义（终态重发不复活）。
+        // 重试可能换了目录（用户在弹窗重选），folderToken 以本次提交为准
         if (kind === JOB_KIND.PDF && existing.status === JOB_STATUS.FAILED) {
           existing.status = JOB_STATUS.QUEUED;
           existing.error = null;
           existing.workerId = null;
           existing.leaseExpiresAt = null;
+          existing.folderToken = normalizedFolderToken;
           existing.retryCount += 1;
           existing.updatedAt = this.#now();
           return { result: { created: false, retried: true, job: structuredClone(existing) }, changed: true };
@@ -141,6 +145,7 @@ export class PersistentJobStore {
           sourceUrl,
           title: typeof title === 'string' && title ? title : null,
           pdfSource: normalizedPdfSource,
+          folderToken: normalizedFolderToken,
           snapshot: null,
           destination: null,
           status: JOB_STATUS.QUEUED,
@@ -490,8 +495,10 @@ export class PersistentJobStore {
         job.timeline ??= [];
         job.totalMs ??= null;
         job.clientTiming ??= null;
-        // 双 job 模型（#60/#65）：存量 job 没有 kind，一律按 clip 读取
+        // 双 job 模型（#60/#65）：存量 job 没有 kind，一律按 clip 读取；
+        // 存量 pdf job 没有 folderToken（#66 前目录固定根目录），读取时补 null
         job.kind = jobKind(job);
+        if (job.kind === JOB_KIND.PDF) job.folderToken ??= null;
       }
       return data;
     } catch (error) {

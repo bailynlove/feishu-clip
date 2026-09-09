@@ -63,9 +63,31 @@
 
     <div class="ps-field"><span class="ps-label">PDF 存云盘</span>
       <button class="ps-switch-row" id="f-pdf-drive" type="button" aria-pressed="false">
-        <span class="ps-switch-text"><span class="ps-switch-label">识别到论文主 PDF 时顺带存入云盘</span><span class="ps-switch-sub">arXiv 等论文页的主 PDF 将上传到云盘根目录；弹窗可按次临时覆盖</span></span>
+        <span class="ps-switch-text"><span class="ps-switch-label">识别到论文主 PDF 时顺带存入云盘</span><span class="ps-switch-sub">arXiv 等论文页的主 PDF 将上传到所选云盘目录；弹窗可按次临时覆盖</span></span>
         <span class="ps-switch"></span>
       </button>
+      <button class="ps-target hidden" id="f-pdf-folder" type="button">
+        <span id="f-pdf-folder-icon">🗂</span><span class="ps-target-text" id="f-pdf-folder-text">云盘根目录（我的空间）</span><span class="ps-target-edit">更改 ›</span>
+      </button>
+    </div>
+    <div id="drive-picker-panel" class="hidden">
+      <div id="drive-picker">
+        <nav id="dp-crumbs" class="crumbs hidden"></nav>
+        <div id="dp-status" class="picker-status"></div>
+        <ul id="dp-list" class="picker-list"></ul>
+        <button id="dp-more" class="link hidden" type="button">加载更多</button>
+        <div class="picker-actions">
+          <button id="dp-back" class="link hidden" type="button">返回上级</button>
+          <button id="dp-retry" class="link hidden" type="button">重试</button>
+          <button id="dp-save" class="ps-btn primary picker-confirm" type="button" disabled>设为该预设的 PDF 目录</button>
+        </div>
+      </div>
+      <details id="drive-advanced">
+        <summary>高级设置：手动输入目录 token</summary>
+        <p class="ps-desc">与可视化选择使用同一套 Bridge 验证语义；留空表示云盘根目录。</p>
+        <label class="ps-field"><span class="ps-label">云盘目录 token</span><input id="drive-token" class="ps-input" placeholder="fldcn…"></label>
+        <button id="save-drive-target" class="ps-btn primary pair-submit" type="button">验证并保存</button>
+      </details>
     </div>
 
     <label class="ps-field"><span class="ps-label">标题模板</span><input id="f-title" class="ps-input mono" autocomplete="off" placeholder="{{title}}"></label>

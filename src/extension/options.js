@@ -1,7 +1,8 @@
 // 设置页（#35）：标签页式预设管理（C 版设计）。归约逻辑全在 options-state.js（纯函数），
 // 本文件只负责 DOM 渲染与 chrome 消息。所有变更经 SAVE_PRESETS 整体写回持久化。
 import { createPopupPicker } from './popup-picker.js';
-import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
+import { createDrivePicker } from './drive-picker.js';
+import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireDrivePicker } from './picker-view.js';
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
@@ -42,6 +43,7 @@ function toast(text, kind = 'info') {
 let state = { presets: [], defaultPresetId: null };
 let editingId = null;
 let picker = null;
+let drivePicker = null;
 let confirmDeleteId = null;
 // triggers 校验失败时阻止保存：非法草稿按预设 id 留在内存里，切回该预设的 tab 时恢复并继续
 // 报错，修复合法写回成功后清除。内存态即可，重开设置页页面后丢弃。
@@ -71,6 +73,7 @@ function applyMutation(next, { quiet = false } = {}) {
   if (!editingPreset()) {
     editingId = state.presets[0]?.id ?? null;
     closePicker();
+    closeDrivePicker();
     syncEditor();
   }
   renderTabs();
@@ -148,6 +151,7 @@ function renderTabs() {
 function selectTab(id) {
   editingId = id;
   closePicker();
+  closeDrivePicker();
   renderTabs();
   syncEditor();
 }
@@ -239,10 +243,15 @@ function syncEditor() {
     option.classList.toggle('on', option.dataset.value === imageMode);
   }
   $('#f-image-mode-hint').textContent = imageModeHint(imageMode);
-  // PDF 存云盘开关（#65）：读取时迁移——缺字段/非法 pdfDrive 一律显示为关
-  const pdfEnabled = resolvePdfDrive(preset)?.enabled === true;
+  // PDF 存云盘开关（#65）：读取时迁移——缺字段/非法 pdfDrive 一律显示为关。
+  // 目录行（#66）：开关开启才显示；folderToken 为 null 即云盘根目录，folderName 冗余存展示名
+  const pdfDrive = resolvePdfDrive(preset);
+  const pdfEnabled = pdfDrive?.enabled === true;
   $('#f-pdf-drive').classList.toggle('on', pdfEnabled);
   $('#f-pdf-drive').setAttribute('aria-pressed', String(pdfEnabled));
+  $('#f-pdf-folder').classList.toggle('hidden', !pdfEnabled);
+  $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
+  if (!pdfEnabled) closeDrivePicker();
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
   for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
@@ -281,6 +290,78 @@ function closePicker() {
   $('#picker-panel').classList.add('hidden');
   picker = null;
 }
+
+// ——— PDF 云盘目录 picker（#66）：与 wiki 目标同一面板形态，数据源是 drive 端点族；
+// 确认只验证不落库，目录随预设整体经 SAVE_PRESETS 写回 ———
+const DRIVE_EDITOR_LABELS = {
+  saveRoot: '将该预设的 PDF 存到云盘根目录',
+  saveFolder: '设为该预设的 PDF 目录',
+  saving: '正在验证并保存…',
+};
+
+function drivePickerElements() {
+  return {
+    status: $('#dp-status'),
+    list: $('#dp-list'),
+    crumbs: $('#dp-crumbs'),
+    more: $('#dp-more'),
+    back: $('#dp-back'),
+    retry: $('#dp-retry'),
+    save: $('#dp-save'),
+  };
+}
+
+async function openDrivePicker() {
+  $('#drive-picker-panel').classList.remove('hidden');
+  const current = resolvePdfDrive(editingPreset());
+  drivePicker = createDrivePicker({
+    listFolders: ({ folderToken, cursor, limit }) => message({ type: 'LIST_DRIVE_FOLDERS', folderToken, cursor, limit }),
+    validateFolder: async ({ folderToken }) => (await message({ type: 'VALIDATE_DRIVE_FOLDER', folderToken })).folder,
+    initialDestination: current ? { folderToken: current.folderToken, title: current.folderName ?? '我的空间' } : null,
+  });
+  const els = drivePickerElements();
+  drivePicker.subscribe((pickerState) => renderDrivePicker(drivePicker, pickerState, els, DRIVE_EDITOR_LABELS));
+  wireDrivePicker(drivePicker, els);
+  await drivePicker.start();
+}
+
+function closeDrivePicker() {
+  $('#drive-picker-panel').classList.add('hidden');
+  drivePicker = null;
+}
+
+// 选择器/手贴 token 验证成功后，目录写入当前预设的 pdfDrive 并整体持久化
+function applyPdfDrive(saved) {
+  if (!editingId || !saved) return;
+  applyMutation(updatePreset(state, editingId, {
+    pdfDrive: { enabled: true, folderToken: saved.folderToken ?? null, folderName: saved.title ?? null },
+  }));
+  syncEditor();
+  closeDrivePicker();
+}
+
+$('#f-pdf-folder').addEventListener('click', () => {
+  if ($('#drive-picker-panel').classList.contains('hidden')) openDrivePicker();
+  else closeDrivePicker();
+});
+
+$('#dp-save').addEventListener('click', async () => {
+  if (!drivePicker) return;
+  const saved = await drivePicker.saveSelection();
+  if (saved) toast(`PDF 目录已保存：${saved.title}`, 'success');
+  else toast(`保存失败：${drivePicker.getState().error?.message || '请重试'}`, 'error');
+  applyPdfDrive(saved);
+});
+
+// 手贴 token（高级设置）：留空 = 云盘根目录；与可视化选择同一验证语义，失败不覆盖旧目录
+$('#save-drive-target').addEventListener('click', async () => {
+  if (!drivePicker) return;
+  const folderToken = $('#drive-token').value.trim() || null;
+  const saved = await drivePicker.saveManual({ folderToken, title: folderToken ?? '我的空间', path: folderToken ? undefined : ['我的空间'] });
+  if (saved) toast(`PDF 目录已保存：${saved.title}`, 'success');
+  else toast(`目录验证失败：${drivePicker.getState().error?.message || '请重试'}`, 'error');
+  applyPdfDrive(saved);
+});
 
 // 选择器/手动输入验证成功后，目标写入当前预设并整体持久化
 function applyDestination(destination) {
@@ -356,8 +437,8 @@ for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
     syncEditor();
   });
 }
-// PDF 存云盘开关（#65）：开启写完整聚合结构（folderToken 恒 null = 云盘根目录，picker 归 #66），
-// 关闭归一为 null；随预设整体经 SAVE_PRESETS 写回
+// PDF 存云盘开关（#65）：开启写完整聚合结构（folderToken null = 云盘根目录，目录选择见 #66
+// 的目录行/picker），关闭归一为 null；随预设整体经 SAVE_PRESETS 写回
 $('#f-pdf-drive').addEventListener('click', () => {
   const enabled = !(resolvePdfDrive(editingPreset())?.enabled === true);
   applyMutation(updatePreset(state, editingId, {

@@ -101,10 +101,10 @@ function parseTargetQuery(request, allowedKeys) {
   return { pathname: url.pathname, cursor: cursor || undefined, limit, query };
 }
 
-function larkQueryError(error) {
+function larkQueryError(error, resource = '知识库') {
   const text = `${error.code || ''} ${error.message || ''}`.toLowerCase();
   if (/auth|login|unauthorized|token.{0,12}(expired|invalid)|登录|授权/.test(text)) return { status: 503, code: 'LARK_AUTH_REQUIRED', message: '飞书用户未登录或授权已失效' };
-  if (/permission|forbidden|denied|权限/.test(text)) return { status: 403, code: 'LARK_PERMISSION_DENIED', message: '当前飞书用户没有访问该知识库的权限' };
+  if (/permission|forbidden|denied|权限/.test(text)) return { status: 403, code: 'LARK_PERMISSION_DENIED', message: `当前飞书用户没有访问该${resource}的权限` };
   return { status: 502, code: 'LARK_REQUEST_FAILED', message: '飞书查询失败，请稍后重试' };
 }
 
@@ -202,6 +202,36 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         }
       }
 
+      // Drive 目录选择器端点族（#66）：省略 parentFolderToken 即根层「我的空间」，只返回文件夹项
+      if (request.method === 'GET' && request.url?.startsWith('/v1/drive/folders')) {
+        const { pathname, cursor, limit, query } = parseTargetQuery(request, ['parentFolderToken', 'cursor', 'limit']);
+        if (pathname !== '/v1/drive/folders') return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);
+        const parentFolderToken = query.get('parentFolderToken');
+        if (parentFolderToken !== null && !WIKI_TOKEN.test(parentFolderToken)) return send(response, 400, { ok: false, code: 'TARGET_QUERY_INVALID', message: 'parentFolderToken 不合法' }, origin);
+        try {
+          const result = await lark.listDriveFolders({ folderToken: parentFolderToken || undefined, pageToken: cursor, pageSize: limit });
+          return send(response, 200, { ok: true, ...result }, origin);
+        } catch (error) {
+          const mapped = larkQueryError(error, '云盘目录');
+          return send(response, mapped.status, { ok: false, code: mapped.code, message: mapped.message }, origin);
+        }
+      }
+
+      // 目录校验（picker 保存/手贴 token 共用）：folderToken 缺失/null 表示云盘根目录，合法通过
+      if (request.method === 'POST' && request.url === '/v1/drive/folders/validate') {
+        const body = await readJson(request);
+        const folderToken = body?.folderToken;
+        if (folderToken !== undefined && folderToken !== null && (typeof folderToken !== 'string' || !WIKI_TOKEN.test(folderToken))) {
+          return send(response, 400, { ok: false, code: 'FOLDER_TOKEN_INVALID', message: 'folderToken 不合法' }, origin);
+        }
+        try {
+          const folder = await lark.validateDriveFolder({ folderToken: folderToken || null });
+          return send(response, 200, { ok: true, folder }, origin);
+        } catch (error) {
+          return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin);
+        }
+      }
+
       if (request.method === 'GET' && request.url?.startsWith('/v1/jobs') && !request.url.startsWith('/v1/jobs/')) {
         const { pathname, query, limit: parsedLimit } = parseTargetQuery(request, ['limit']);
         if (pathname !== '/v1/jobs') return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);
@@ -225,6 +255,11 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         validateSnapshot(body.snapshot);
         const clientTiming = validateClientTiming(body.clientTiming);
         const pdfSource = body.pdfSource === undefined || body.pdfSource === null ? null : validatePdfSource(body.pdfSource);
+        // pdf 目标目录（#66）：null = 云盘根目录；非空须是合法 token 形态
+        const pdfFolderToken = body.pdfFolderToken === undefined || body.pdfFolderToken === null ? null : body.pdfFolderToken;
+        if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
+          return send(response, 400, { ok: false, code: 'PDF_FOLDER_INVALID', message: 'pdfFolderToken 不合法' }, origin);
+        }
         try { await lark.validateDestination(body.destination); }
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
         // 图片写入模式（#53）：合法三态直用；非法/缺省回退旧 includeImages 布尔语义（false → off，其余 → preview）
@@ -238,7 +273,8 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           imageMode,
           clientTiming,
         });
-        // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名
+        // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名；
+        // folderToken（#66）是 picker/弹窗选定的云盘目录，null 即根目录
         let pdfSubmitted = null;
         if (pdfSource) {
           pdfSubmitted = await store.submit({
@@ -247,6 +283,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
             kind: JOB_KIND.PDF,
             pdfSource,
             title: body.snapshot.title,
+            folderToken: pdfFolderToken,
           });
         }
         executor.kick();

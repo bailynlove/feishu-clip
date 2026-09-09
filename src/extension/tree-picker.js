@@ -1,6 +1,6 @@
 // 树形 picker 内核：面包屑下钻、分页、选中、保存/验证的通用状态机。不依赖 DOM 或 chrome API，
 // 可在 node:test 下直接测试。数据源通过适配器对象注入（wiki 适配器见 target-picker.js，
-// drive 适配器规划见 #66）：
+// drive 适配器见 drive-picker.js，#66）：
 //   listRoot({ cursor, limit })             → { items, hasMore, nextPageToken }
 //   listChildren({ crumbs, cursor, limit }) → 同上；crumbs 为当前下钻路径（适配器自定义 crumb，需含 title）
 //   isSelectable(item, view)                → 保存目标模板 | false（truthy 即整行可选中；模板可自带 path，

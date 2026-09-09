@@ -27,7 +27,7 @@ export function resolveImageMode(preset) {
 }
 
 // PDF 存云盘聚合字段（#62/#65）：读取时迁移——缺字段/非法值一律归一为 null；
-// enabled:true + folderToken:null = 存云盘根目录（合法态）。folderName 冗余存展示名（picker 归 #66）
+// enabled:true + folderToken:null = 存云盘根目录（合法态）。folderName 冗余存展示名（picker 见 #66）
 export function resolvePdfDrive(preset) {
   const value = preset?.pdfDrive;
   if (!value || typeof value !== 'object' || value.enabled !== true) return null;

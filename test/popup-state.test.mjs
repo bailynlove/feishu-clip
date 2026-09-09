@@ -662,7 +662,7 @@ test('会话 PDF 开关：初值 = 预设默认，偏离预设即「仅本次」
   assert.equal(isPdfSessionOnly(setPdfOn(plain, true)), true);
 });
 
-test('saveAsNewPreset / updateCurrentPreset 把会话 PDF 开关写回预设 pdfDrive（folderToken 恒 null，picker 归 #66）', () => {
+test('saveAsNewPreset / updateCurrentPreset 把会话 PDF 开关写回预设 pdfDrive（未选目录时 folderToken 为 null = 根目录）', () => {
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   const { preset: created } = saveAsNewPreset(setPdfOn(state, true), '论文');
   assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: null, folderName: null });
@@ -700,4 +700,73 @@ test('formatPdfSize / pdfDisplayName 展示兜底', () => {
   assert.equal(pdfDisplayName({ url: 'https://arxiv.org/pdf/2401.00001' }), '2401.00001', 'name 缺失回退 URL 末段');
   assert.equal(pdfDisplayName({ url: 'https://example.com/' }), '主 PDF', '全部落空用通用占位');
   assert.equal(pdfDisplayName(null), '主 PDF');
+});
+
+// ——— PDF 云盘目录会话选择（#66）：chip 选择仅本次生效；保存/改预设时随 pdfDrive 写回 ———
+
+import {
+  isPdfFolderSessionOnly,
+  pdfFolderLabel,
+  presetPdfFolder,
+  setPdfFolder,
+} from '../src/extension/popup-state.js';
+
+const FOLDER_DRIVE = { enabled: true, folderToken: 'fld-papers', folderName: '论文' };
+const folderPreset = [{ id: 'p1', name: '论文', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: FOLDER_DRIVE }];
+
+test('会话目录初值 = 预设 pdfDrive 目录；与预设一致不算「仅本次」', () => {
+  const state = initPopupPresets({ presets: folderPreset, defaultPresetId: 'p1' }, tab, now);
+  assert.deepEqual(state.pdfFolder, { folderToken: 'fld-papers', folderName: '论文' });
+  assert.deepEqual(presetPdfFolder(state), { folderToken: 'fld-papers', folderName: '论文' });
+  assert.equal(isPdfFolderSessionOnly(state), false);
+  assert.equal(isPdfSessionOnly(state), false);
+  assert.equal(isSessionModified(state), false);
+  assert.equal(pdfFolderLabel(state), '论文');
+
+  const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(plain.pdfFolder, null, '预设没开 PDF → 会话目录为 null');
+  assert.equal(pdfFolderLabel(plain), '云盘根目录（我的空间）', '无目录选择显示根目录');
+});
+
+test('setPdfFolder 仅本次生效：徽标 + 修改检测；切预设清除并重取预设目录', () => {
+  let state = initPopupPresets({ presets: folderPreset, defaultPresetId: 'p1' }, tab, now);
+  state = setPdfFolder(state, { folderToken: 'fld-other', folderName: '其他' });
+  assert.equal(isPdfFolderSessionOnly(state), true);
+  assert.equal(isPdfSessionOnly(state), true, '目录偏离预设也亮开关行的「仅本次」');
+  assert.equal(isSessionModified(state), true, '目录变化计入「本次设置已修改」');
+
+  // 改回预设目录即不再 dirty（按 folderToken 比较）
+  state = setPdfFolder(state, { folderToken: 'fld-papers', folderName: '论文' });
+  assert.equal(isSessionModified(state), false);
+
+  // 根目录选择（folderToken null）也是合法覆盖
+  state = setPdfFolder(state, { folderToken: null, folderName: null });
+  assert.equal(isPdfFolderSessionOnly(state), true);
+  assert.equal(pdfFolderLabel(state), '云盘根目录（我的空间）');
+
+  const two = [
+    { ...folderPreset[0] },
+    { id: 'p2', name: '根目录预设', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: { enabled: true, folderToken: null, folderName: null } },
+  ];
+  state = initPopupPresets({ presets: two, defaultPresetId: 'p1' }, tab, now);
+  state = setPdfFolder(state, { folderToken: 'fld-other', folderName: '其他' });
+  state = selectPreset(state, 'p2');
+  assert.deepEqual(state.pdfFolder, { folderToken: null, folderName: null }, '切预设后从新预设重新起算');
+  assert.equal(isPdfFolderSessionOnly(state), false);
+});
+
+test('saveAsNewPreset / updateCurrentPreset 把会话目录写回 pdfDrive（folderName 冗余存展示名）', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = setPdfOn(setPdfFolder(state, { folderToken: 'fld-papers', folderName: '论文' }), true);
+  const { preset: created } = saveAsNewPreset(state, '论文');
+  assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: 'fld-papers', folderName: '论文' });
+
+  const { preset: updated, state: next } = updateCurrentPreset(state);
+  assert.deepEqual(updated.pdfDrive, { enabled: true, folderToken: 'fld-papers', folderName: '论文' });
+  assert.equal(isSessionModified(next), false, '写回后 session 与预设一致');
+
+  // 根目录覆盖写回：folderToken 为 null 的合法态
+  state = setPdfFolder(state, { folderToken: null, folderName: null });
+  const { preset: rootBack } = updateCurrentPreset(state);
+  assert.deepEqual(rootBack.pdfDrive, { enabled: true, folderToken: null, folderName: null });
 });

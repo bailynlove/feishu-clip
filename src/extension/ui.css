@@ -226,10 +226,10 @@
 .popup .sheet .crumbs{padding:0 18px}
 .popup .sheet .picker-status{padding:0 18px}
 .popup .sheet .picker-list{flex:1;margin:0 12px;overflow-y:auto}
-.popup .sheet #tp-more{margin:4px 12px}
+.popup .sheet #tp-more,.popup .sheet #dp-more{margin:4px 12px}
 .popup .sheet .picker-actions{padding:0 12px}
 .popup .sheet .link{color:var(--brand-deep)}
-.popup .sheet #tp-confirm{width:auto;margin:4px 14px 16px}
+.popup .sheet #tp-confirm,.popup .sheet #dp-confirm{width:auto;margin:4px 14px 16px}
 .popup .picker-row{padding:0}
 .popup .picker-row .row-title{padding:10px 12px;min-height:38px;display:flex;align-items:center}
 .popup .picker-row:hover{background:var(--brand-soft)}

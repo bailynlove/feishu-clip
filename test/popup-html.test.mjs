@@ -15,9 +15,25 @@ function classAttr(id) {
 }
 
 test('PDF entries start hidden and are managed by popup.js', () => {
-  for (const id of ['pdf-row', 'pdf-discover', 'open-pdf', 'retry-pdf', 'pdf-temp-badge']) {
+  for (const id of ['pdf-row', 'pdf-discover', 'open-pdf', 'retry-pdf', 'pdf-temp-badge', 'pdf-folder', 'drive-picker-panel']) {
     assert.ok(classAttr(id).includes('hidden'), `#${id} 初始应为 hidden`);
   }
+});
+
+// 目录 chip（#66）：PDF 开关开启后显示「🗂 目录名 + 更改 ›」，打开 drive picker overlay
+test('pdf folder chip and drive picker overlay (#66)', () => {
+  const chip = html.match(/<button id="pdf-folder"[\s\S]*?<\/button>/);
+  assert.ok(chip, '折叠区内应有 #pdf-folder 目录 chip');
+  assert.ok(chip[0].includes('id="pdf-folder-name"'), 'chip 有目录名位');
+  assert.ok(chip[0].includes('id="pdf-folder-temp-badge"'), 'chip 有「仅本次」徽标位');
+  assert.ok(chip[0].includes('更改 ›'), 'chip 有更改入口');
+
+  const overlay = html.match(/<div id="drive-picker-panel"[\s\S]*?<\/section><\/div>/);
+  assert.ok(overlay, '应有 drive picker overlay（与目标 picker 同一形态）');
+  for (const id of ['dp-crumbs', 'dp-status', 'dp-list', 'dp-more', 'dp-back', 'dp-retry', 'dp-cancel', 'dp-confirm', 'drive-picker-mask']) {
+    assert.ok(overlay[0].includes(`id="${id}"`), `overlay 应有 #${id}`);
+  }
+  assert.ok(overlay[0].includes('仅本次'), 'overlay 标明仅本次生效');
 });
 
 test('pdf-row carries the switch, subtitle slot and session-only badge', () => {

@@ -873,7 +873,7 @@ test('pdf job：下载后原格式落盘，经 drive +upload 上传云盘根目�
   assert.equal(uploads.length, 1);
   assert.equal(uploads[0].fileName, 'Attention Is All You Need.pdf', '文件名 = 标题渲染结果 + .pdf');
   assert.equal(uploads[0].name, 'Attention Is All You Need.pdf');
-  assert.equal(uploads[0].folderToken, null, '本切片固定云盘根目录，不传 folderToken');
+  assert.equal(uploads[0].folderToken, null, 'job 无 folderToken（存量/#65 前）走云盘根目录');
   assert.ok(uploads[0].cwd, '落盘在 scratch 目录上传（--file 只接受 cwd 内相对路径）');
   assert.ok(!path.isAbsolute(uploads[0].fileName), 'fileName 必须是相对路径');
   assert.equal(store.completed.kind, 'pdf');
@@ -881,6 +881,17 @@ test('pdf job：下载后原格式落盘，经 drive +upload 上传云盘根目�
   assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'pdf_download'), '下载阶段计时');
   assert.ok(store.completed.timeline.some((entry) => entry.kind === 'cli' && entry.name === 'drive +upload'), '上传计时');
   assert.equal(store.failed, null);
+});
+
+test('pdf job：job.folderToken（picker 选定的目录，#66）透传给 drive +upload', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-folder', folderToken: 'fld-papers' });
+  const uploads = [];
+  const lark = { async uploadDriveFile(options) { uploads.push(options); return { fileToken: 'f', url: 'https://u' }; } };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.equal(uploads[0].folderToken, 'fld-papers', 'executor 以 job 上的 folderToken 调 lark-cli');
+  assert.equal(store.completed?.kind, 'pdf');
 });
 
 test('pdf job：空标题时文件名回退 pdfSource.name', async () => {

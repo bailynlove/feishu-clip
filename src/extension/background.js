@@ -81,6 +81,16 @@ async function handle(message) {
       if (message.limit) params.set('limit', String(message.limit));
       return bridge(`/v1/targets/nodes?${params}`);
     }
+    // Drive 目录选择器（#66）：省略 folderToken 列根层「我的空间」
+    case 'LIST_DRIVE_FOLDERS': {
+      const params = new URLSearchParams();
+      if (message.folderToken) params.set('parentFolderToken', message.folderToken);
+      if (message.cursor) params.set('cursor', message.cursor);
+      if (message.limit) params.set('limit', String(message.limit));
+      const query = params.toString();
+      return bridge(`/v1/drive/folders${query ? `?${query}` : ''}`);
+    }
+    case 'VALIDATE_DRIVE_FOLDER': return bridge('/v1/drive/folders/validate', { method: 'POST', body: { folderToken: message.folderToken ?? null } });
     case 'CLIP': {
       // 开发者模式耗时诊断：页面提取在扩展侧完成，bridge 看不到这段，故由扩展计时后随 job 上报考勤
       const extractStart = performance.now();
@@ -100,7 +110,9 @@ async function handle(message) {
       const pdfSource = detected?.url && /^https?:/.test(detected.url)
         ? { type: 'url', url: detected.url, name: detected.name ?? null, sizeBytes: detected.sizeBytes ?? null }
         : null;
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource } });
+      // pdf 目标目录（#66）：弹窗 chip 选定的 folderToken（null = 云盘根目录），随 job 透传
+      const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource, pdfFolderToken } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }

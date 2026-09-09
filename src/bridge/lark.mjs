@@ -104,6 +104,36 @@ export class LarkClient {
     };
   }
 
+  // Drive 目录列举（#66，picker 用）：只回文件夹项。省略 folderToken 列根目录（我的空间）——
+  // 根目录模式不支持分页、一次返回全部（CLI 文档），故 --page-token 只在子目录分页时携带
+  async listDriveFolders({ folderToken, pageToken, pageSize = 50 } = {}) {
+    const args = ['drive', 'files', 'list', '--as', 'user', '--page-size', String(pageSize), '--format', 'json'];
+    if (folderToken) args.push('--folder-token', folderToken);
+    if (folderToken && pageToken) args.push('--page-token', pageToken);
+    const result = await this.run(args);
+    const data = result.data || {};
+    const folders = (data.files || data.items || [])
+      .filter((item) => item?.type === 'folder' && item.token)
+      .map((item) => ({ folderToken: item.token, name: item.name || item.token }));
+    return {
+      folders,
+      hasMore: data.has_more === true,
+      nextPageToken: data.has_more === true ? data.page_token || null : null,
+    };
+  }
+
+  // Drive 目录校验（#66）：folderToken 为 null 即根目录，恒合法；非空 token 用 +inspect
+  // 证实存在且确为文件夹（bare token 须带 --type folder）。可写性不在此验证——目录失效/不可写
+  // 会在上传时落成 pdf job 失败，弹窗可见可重试，无静默回退
+  async validateDriveFolder({ folderToken }) {
+    if (!folderToken) return { folderToken: null, name: '我的空间' };
+    const result = await this.run(['drive', '+inspect', '--as', 'user', '--url', folderToken, '--type', 'folder', '--format', 'json']);
+    const data = result.data || {};
+    const type = data.type || data.doc_type || null;
+    if (type && type !== 'folder') throw new Error('该 token 不是云盘文件夹');
+    return { folderToken: data.token || folderToken, name: data.title || data.name || folderToken };
+  }
+
   // Drive 原格式上传（#65，命令契约见 docs/research/drive-upload-facts.md）：
   // ≤20MB 一次性、>20MB CLI 自动分片；省略 folderToken 即根目录；同名复传合法并存。
   // --file 只接受 cwd 下的相对路径（与图片 media-upload 同一约束），调用方须先落盘到 cwd

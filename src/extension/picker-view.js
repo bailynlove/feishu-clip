@@ -131,3 +131,101 @@ export function wirePicker(picker, els) {
     return state.view === 'spaces' ? picker.loadMoreSpaces() : picker.loadMoreNodes();
   });
 }
+
+// ——— Drive 目录选择器渲染（#66）：直挂树形内核状态（view: root | level，items 为文件夹行），
+// 与 wiki 的 renderPicker 同形但数据源是 drive-picker.js 的 createDrivePicker ———
+
+// drive 侧错误文案：forbidden 指向云盘目录而非知识库，其余沿用通用表
+export const DRIVE_PICKER_ERROR_TEXT = {
+  ...PICKER_ERROR_TEXT,
+  forbidden: '当前飞书用户没有访问该云盘目录的权限。',
+};
+
+// els 同 renderPicker；labels: { saveRoot, saveFolder, saving }，可选 errors 覆盖错误文案表
+export function renderDrivePicker(picker, state, els, labels) {
+  const errors = labels.errors ?? DRIVE_PICKER_ERROR_TEXT;
+  const { status, list, crumbs } = els;
+  list.replaceChildren();
+  crumbs.replaceChildren();
+
+  if (state.error) {
+    status.textContent = errors[state.error.kind] || errors.failed;
+    status.className = 'picker-status error-text';
+  } else if (state.status === 'loading') {
+    status.textContent = '正在加载…';
+    status.className = 'picker-status';
+  } else {
+    status.textContent = '';
+    status.className = 'picker-status';
+  }
+
+  els.retry.classList.toggle('hidden', !state.error);
+  els.back.classList.toggle('hidden', state.view !== 'level' || state.status === 'loading');
+  els.more.classList.toggle('hidden', state.status !== 'ready' || !(state.view === 'root' ? state.rootHasMore : state.itemsHasMore));
+
+  const items = state.view === 'root' ? state.rootItems : state.items;
+  if (state.status === 'ready' && !state.error && items.length === 0) {
+    status.textContent = state.view === 'root' ? '云盘根目录下没有文件夹。' : '该目录下没有子文件夹。';
+  }
+
+  if (state.view === 'level') {
+    crumbs.classList.remove('hidden');
+    const root = document.createElement('button');
+    root.type = 'button';
+    root.className = 'link';
+    root.textContent = '我的空间';
+    root.addEventListener('click', () => picker.goToCrumb(-1));
+    crumbs.append(root);
+    state.crumbs.forEach((crumb, index) => {
+      crumbs.append(document.createTextNode(' / '));
+      const entry = document.createElement('button');
+      entry.type = 'button';
+      entry.className = 'link';
+      entry.textContent = crumb.title;
+      entry.disabled = index === state.crumbs.length - 1;
+      entry.addEventListener('click', () => picker.goToCrumb(index));
+      crumbs.append(entry);
+    });
+  } else {
+    crumbs.classList.add('hidden');
+  }
+
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = `picker-row selectable${state.selectedItem === item ? ' selected' : ''}`;
+    // 整行可点（不只文字），下钻按钮阻止冒泡以免误选中
+    row.addEventListener('click', () => picker.select(item));
+    const title = document.createElement('button');
+    title.type = 'button';
+    title.className = 'row-title';
+    title.textContent = item.name;
+    row.append(title);
+    const hint = document.createElement('span');
+    hint.className = 'row-hint';
+    hint.textContent = item.driveRoot ? '根目录' : '文件夹';
+    row.append(hint);
+    if (item.folderToken) {
+      const drill = document.createElement('button');
+      drill.type = 'button';
+      drill.className = 'link row-drill';
+      drill.textContent = '进入 ›';
+      drill.addEventListener('click', (event) => { event.stopPropagation(); picker.open(item); });
+      row.append(drill);
+    }
+    const li = document.createElement('li');
+    li.append(row);
+    list.append(li);
+  }
+
+  els.save.disabled = state.saving || !state.selectedItem;
+  els.save.textContent = state.saving ? labels.saving : state.selectedItem && !state.selectedItem.folderToken ? labels.saveRoot : labels.saveFolder;
+}
+
+export function wireDrivePicker(picker, els) {
+  els.back.addEventListener('click', () => picker.back());
+  els.retry.addEventListener('click', () => picker.retry());
+  els.more.addEventListener('click', () => {
+    const state = picker.getState();
+    return state.view === 'root' ? picker.loadMoreRoot() : picker.loadMoreChildren();
+  });
+}

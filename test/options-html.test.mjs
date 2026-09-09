@@ -46,12 +46,28 @@ test('preset editor has a three-state image mode segmented control', () => {
   assert.ok(!html.includes('id="f-images"'), '旧的「包含图片」开关应移除');
 });
 
-// PDF 存云盘预设开关（#65）：预设表单提供「识别到论文主 PDF 时顺带存入云盘」开关，
-// 初始关；本切片目录固定云盘根目录（picker 归 #66），文案须写明根目录
+// PDF 存云盘预设开关（#65）+ 目录选择（#66）：开关初始关；开启后显示目录行（picker 面板 +
+// 高级设置手贴 token），picker 面板控件与 renderDrivePicker 的 hidden 管理契约同 wiki 面板
 test('preset editor has a PDF-drive switch, initially off', () => {
   const row = html.match(/<button[^>]*id="f-pdf-drive"[^>]*>([\s\S]*?)<\/button>/);
   assert.ok(row, '应有 #f-pdf-drive 开关');
   assert.ok(row[0].includes('aria-pressed="false"'), '#f-pdf-drive 初始应为关');
   assert.ok(!classAttr('f-pdf-drive').includes('on'), '#f-pdf-drive 初始不带 on 类');
-  assert.ok(row[1].includes('云盘根目录'), '说明文案应写明本切片固定存云盘根目录');
+});
+
+test('preset editor has a PDF folder row and drive picker panel (#66)', () => {
+  assert.ok(classAttr('f-pdf-folder').includes('hidden'), '目录行初始隐藏（开关默认关）');
+  assert.ok(html.includes('id="f-pdf-folder-text"'), '目录行有展示名位');
+  assert.ok(classAttr('drive-picker-panel').includes('hidden'), 'drive picker 面板初始隐藏');
+  for (const id of ['dp-crumbs', 'dp-status', 'dp-list']) assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
+  for (const id of ['dp-more', 'dp-back', 'dp-retry']) {
+    assert.ok(classAttr(id).includes('hidden'), `#${id} 初始应为 hidden`);
+  }
+  assert.ok(!classAttr('dp-save').includes('hidden'), '#dp-save 不得带 hidden 类（renderDrivePicker 用 disabled 管理）');
+  // 高级设置：手贴 token 路径
+  const advanced = html.match(/<details id="drive-advanced">([\s\S]*?)<\/details>/);
+  assert.ok(advanced, '应有手贴 token 的高级设置');
+  assert.ok(advanced[1].includes('id="drive-token"'), '应有目录 token 输入框');
+  assert.ok(advanced[1].includes('留空表示云盘根目录'), '应写明留空即根目录');
+  assert.ok(advanced[1].includes('id="save-drive-target"'), '应有验证并保存按钮');
 });

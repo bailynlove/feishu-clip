@@ -125,9 +125,38 @@ export function presetPdfEnabled(state) {
   return resolvePdfDrive(currentPreset(state))?.enabled === true;
 }
 
-// 「仅本次」徽标：会话开关与预设默认不一致即标注
+// 预设默认目录（#66）：{ folderToken, folderName } 或 null（未开/根目录之外的语义不变：
+// 预设开了但没选目录时 folderToken 为 null = 云盘根目录）
+export function presetPdfFolder(state) {
+  const resolved = resolvePdfDrive(currentPreset(state));
+  return resolved ? { folderToken: resolved.folderToken, folderName: resolved.folderName } : null;
+}
+
+function samePdfFolder(a, b) {
+  return (a?.folderToken ?? null) === (b?.folderToken ?? null);
+}
+
+// 「仅本次」徽标：会话开关或会话目录与预设默认不一致即标注
 export function isPdfSessionOnly(state) {
-  return state.pdfOn !== presetPdfEnabled(state);
+  return state.pdfOn !== presetPdfEnabled(state) || !samePdfFolder(state.pdfFolder, presetPdfFolder(state));
+}
+
+// 目录 chip 的「仅本次」徽标：只看目录维度（开关偏离由开关行自己标）
+export function isPdfFolderSessionOnly(state) {
+  return !samePdfFolder(state.pdfFolder, presetPdfFolder(state));
+}
+
+// 目录 chip 的会话选择（#66）：仅本次生效，不回写预设；folder 为 { folderToken, folderName }，
+// null/空 token 即云盘根目录
+export function setPdfFolder(state, folder) {
+  return { ...state, pdfFolder: { folderToken: folder?.folderToken ?? null, folderName: folder?.folderName ?? null } };
+}
+
+// 目录 chip 展示名：根目录 → 固定文案；有 token 无展示名（手贴路径）回退 token 本身
+export function pdfFolderLabel(state) {
+  const folder = state.pdfFolder;
+  if (!folder?.folderToken) return '云盘根目录（我的空间）';
+  return folder.folderName ?? folder.folderToken;
 }
 
 // 文件大小显示（#65）：拿不到 Content-Length 显示「未知大小」，不阻塞主流程
@@ -167,13 +196,16 @@ function renderCurrentTitle(state) {
 // 覆盖的「仅本次」临时目标，预设自带目标不亮徽标
 function applyPresetParams(state) {
   const preset = currentPreset(state);
+  const pdfDrive = resolvePdfDrive(preset);
   return {
     ...state,
     destination: preset.destination ?? null,
     temporary: false,
     imageMode: resolveImageMode(preset),
-    // PDF 存云盘（#65）：会话开关初值 = 预设默认；识别结果（state.pdf）随后由弹窗探测填入
-    pdfOn: resolvePdfDrive(preset)?.enabled === true,
+    // PDF 存云盘（#65）：会话开关初值 = 预设默认；识别结果（state.pdf）随后由弹窗探测填入。
+    // 会话目录（#66）初值同样取自预设 pdfDrive，手动 chip 选择只覆盖本次
+    pdfOn: pdfDrive?.enabled === true,
+    pdfFolder: pdfDrive ? { folderToken: pdfDrive.folderToken, folderName: pdfDrive.folderName } : null,
     pdf: state.pdf ?? null,
     // 自定义正文框预填所选预设的 bodyTemplate：切预设即应用新预设模板，
     // 清除上一次的一次性修改（与目标/图片的切预设语义一致）
@@ -259,7 +291,7 @@ function sameDestination(a, b) {
 }
 
 // 「本次设置与所选预设不一致」的判定口径：弹窗可改的五项——保存目标（按值比较，
-// 手动覆盖成相同目标不算修改）、图片写入模式、PDF 存云盘开关、标题框、自定义正文框。
+// 手动覆盖成相同目标不算修改）、图片写入模式、PDF 存云盘开关与目录（#66）、标题框、自定义正文框。
 // 标题/正文的基线是「预填进框的值」而非模板原始串：标题基线 = 预设 titleTemplate 的
 // 渲染结果（isTitleEdited 本就是这个比较），自定义正文基线 = 预设 bodyTemplate（预填值）。
 export function isSessionModified(state) {
@@ -279,10 +311,12 @@ export function setIncludeImages(state, includeImages) {
   return { ...state, imageMode: presetMode === 'off' ? 'preview' : presetMode };
 }
 
-// 会话 PDF 开关 → 预设 pdfDrive 字段（#65）：本切片目录固定云盘根目录（folderToken 恒 null，
-// picker 归 #66）；关闭态归一为 null（与存量预设缺省同形）
+// 会话 PDF 开关 → 预设 pdfDrive 字段（#65）；目录取会话 chip 选择（#66），
+// folderToken 为 null = 存云盘根目录（合法态）；关闭态归一为 null（与存量预设缺省同形）
 function sessionPdfDrive(state) {
-  return state.pdfOn ? { enabled: true, folderToken: null, folderName: null } : null;
+  return state.pdfOn
+    ? { enabled: true, folderToken: state.pdfFolder?.folderToken ?? null, folderName: state.pdfFolder?.folderName ?? null }
+    : null;
 }
 
 // 构造并选中新预设：继承所选预设全部字段，用当前一次性设置覆盖五项——

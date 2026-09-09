@@ -107,3 +107,66 @@ test('nodes：点击行的空白区域也选中，「进入 ›」只下钻不�
   click(findByClass(els.list, 'row-drill')[0]);
   assert.deepEqual(calls, [['open', 'n1']]);
 });
+
+// ——— Drive 目录 picker 渲染（#66）：直挂树形内核状态（view root/level）———
+import { renderDrivePicker } from '../src/extension/picker-view.js';
+
+const DRIVE_LABELS = { saveRoot: '存到根目录', saveFolder: '存到该目录', saving: '验证中…' };
+
+const DRIVE_ROOT_STATE = {
+  view: 'root', status: 'ready', error: null, saving: false,
+  rootItems: [
+    { folderToken: null, name: '我的空间', driveRoot: true },
+    { folderToken: 'fld-a', name: '论文' },
+  ],
+  rootHasMore: false, items: [], itemsHasMore: false, crumbs: [], selectedItem: null,
+};
+
+const DRIVE_LEVEL_STATE = {
+  view: 'level', status: 'ready', error: null, saving: false,
+  rootItems: [], rootHasMore: false,
+  items: [{ folderToken: 'fld-a1', name: '2026' }],
+  itemsHasMore: false,
+  crumbs: [{ folderToken: 'fld-a', title: '论文' }],
+  selectedItem: null,
+};
+
+test('drive root：整行点击选中根目录行，保存按钮用根目录文案；根目录行无下钻按钮', () => {
+  const els = setup();
+  const calls = [];
+  const picker = { select: (item) => calls.push(['select', item.folderToken]), open: (item) => calls.push(['open', item.folderToken]), getState: () => DRIVE_ROOT_STATE };
+  renderDrivePicker(picker, DRIVE_ROOT_STATE, els, DRIVE_LABELS);
+  const rows = findByClass(els.list, 'picker-row');
+  assert.equal(rows.length, 2);
+  click(rows[0]);
+  assert.deepEqual(calls, [['select', null]]);
+  assert.equal(findByClass(rows[0], 'row-drill').length, 0, '根目录行不可下钻');
+  assert.equal(findByClass(rows[1], 'row-drill').length, 1, '文件夹可下钻');
+
+  const selected = { ...DRIVE_ROOT_STATE, selectedItem: DRIVE_ROOT_STATE.rootItems[0] };
+  renderDrivePicker(picker, selected, els, DRIVE_LABELS);
+  assert.equal(els.save.textContent, '存到根目录');
+  assert.equal(els.save.disabled, false);
+});
+
+test('drive level：面包屑根层是「我的空间」；「进入 ›」只下钻不选中', () => {
+  const els = setup();
+  const calls = [];
+  const picker = {
+    select: (item) => calls.push(['select', item.folderToken]),
+    open: (item) => calls.push(['open', item.folderToken]),
+    goToCrumb: (index) => calls.push(['crumb', index]),
+    getState: () => DRIVE_LEVEL_STATE,
+  };
+  renderDrivePicker(picker, DRIVE_LEVEL_STATE, els, DRIVE_LABELS);
+  assert.equal(els.crumbs.children[0].textContent, '我的空间', '面包屑首段是云盘根层');
+  click(els.crumbs.children[0]);
+  assert.deepEqual(calls[0], ['crumb', -1], '点根层面包屑回根列表');
+
+  renderDrivePicker(picker, DRIVE_LEVEL_STATE, els, DRIVE_LABELS);
+  click(findByClass(els.list, 'row-drill')[0]);
+  assert.deepEqual(calls[1], ['open', 'fld-a1']);
+
+  renderDrivePicker(picker, { ...DRIVE_LEVEL_STATE, selectedItem: DRIVE_LEVEL_STATE.items[0] }, els, DRIVE_LABELS);
+  assert.equal(els.save.textContent, '存到该目录');
+});

@@ -1,12 +1,14 @@
-import { describeDestination, renderPicker, wirePicker } from './picker-view.js';
+import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireDrivePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
-import { describeAttemptView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, presetPdfEnabled, isPdfSessionOnly, formatPdfSize, pdfDisplayName } from './popup-state.js';
+import { createDrivePicker } from './drive-picker.js';
+import { describeAttemptView, initPopupPresets, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
 let currentTabUrl = null;
 let pollTimer = null;
 let popupPicker = null;
+let drivePicker = null;
 let presetState = null;
 let defaultPresetId = null; // SAVE_PRESETS 整体写回时须带上（#40 不改变默认预设）
 // 预览懒提取（#37）：首次展开预览才跑 extractor，缓存快照供实时重渲
@@ -74,6 +76,16 @@ function syncPdfView() {
     $('#pdf').checked = presetState.pdfOn;
     $('#pdf-sub').textContent = `${pdfDisplayName(detected)} · ${formatPdfSize(detected.sizeBytes)}`;
     $('#pdf-temp-badge').classList.toggle('hidden', !isPdfSessionOnly(presetState));
+  }
+  // 目录 chip（#66）：开关开启后才出现；显示会话目录（初值 = 预设目录），
+  // 目录偏离预设时单独亮「仅本次」徽标
+  const showFolder = Boolean(detected) && presetState.pdfOn;
+  $('#pdf-folder').classList.toggle('hidden', !showFolder);
+  if (showFolder) {
+    $('#pdf-folder-name').textContent = pdfFolderLabel(presetState);
+    $('#pdf-folder-temp-badge').classList.toggle('hidden', !isPdfFolderSessionOnly(presetState));
+  } else {
+    closeDrivePicker();
   }
   const discoverable = detected && !presetState.pdfOn && !presetPdfEnabled(presetState);
   $('#pdf-discover').classList.toggle('hidden', !discoverable);
@@ -175,6 +187,67 @@ function closePicker() {
   $('#picker-panel').classList.add('hidden');
   popupPicker = null;
 }
+
+// ——— PDF 云盘目录 picker（#66）：同一 overlay 形态，数据源是 drive 端点族；仅本次生效 ———
+const DRIVE_POPUP_LABELS = {
+  saveRoot: '仅本次存到云盘根目录',
+  saveFolder: '仅本次存到该目录',
+  saving: '正在验证…',
+};
+
+function drivePickerElements() {
+  return {
+    status: $('#dp-status'),
+    list: $('#dp-list'),
+    crumbs: $('#dp-crumbs'),
+    more: $('#dp-more'),
+    back: $('#dp-back'),
+    retry: $('#dp-retry'),
+    save: $('#dp-confirm'),
+  };
+}
+
+async function openDrivePicker() {
+  $('#drive-picker-panel').classList.remove('hidden');
+  // 每次打开都新建控制器：状态全新，不会意外复用上一次的临时选择
+  drivePicker = createDrivePicker({
+    listFolders: ({ folderToken, cursor, limit }) => message({ type: 'LIST_DRIVE_FOLDERS', folderToken, cursor, limit }),
+    validateFolder: async ({ folderToken }) => (await message({ type: 'VALIDATE_DRIVE_FOLDER', folderToken })).folder,
+    initialDestination: presetState.pdfFolder
+      ? { folderToken: presetState.pdfFolder.folderToken, title: presetState.pdfFolder.folderName ?? '我的空间' }
+      : null,
+  });
+  const els = drivePickerElements();
+  drivePicker.subscribe((state) => renderDrivePicker(drivePicker, state, els, DRIVE_POPUP_LABELS));
+  wireDrivePicker(drivePicker, els);
+  await drivePicker.start();
+}
+
+function closeDrivePicker() {
+  $('#drive-picker-panel').classList.add('hidden');
+  drivePicker = null;
+}
+
+$('#pdf-folder').addEventListener('click', () => {
+  if ($('#drive-picker-panel').classList.contains('hidden')) openDrivePicker();
+  else closeDrivePicker();
+});
+$('#dp-cancel').addEventListener('click', closeDrivePicker);
+$('#drive-picker-mask').addEventListener('click', closeDrivePicker);
+$('#dp-confirm').addEventListener('click', async () => {
+  if (!drivePicker) return;
+  const saved = await drivePicker.saveSelection();
+  if (saved) {
+    presetState = setPdfFolder(presetState, { folderToken: saved.folderToken ?? null, folderName: saved.title });
+    syncPdfView();
+    syncModifiedButtons();
+    closeDrivePicker();
+    show(`本次 PDF 将存到：${(saved.path ?? []).concat(saved.title).join(' / ')}。预设目录不变。`);
+  } else {
+    // token 失效/不可写：报错并保持面板打开，可直接重选，无静默回退
+    show(`目录验证失败：${drivePicker.getState().error?.message || '请重新选择'}`, 'error');
+  }
+});
 
 async function inspect() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -371,9 +444,11 @@ async function clipToFeishu() {
       imageMode: presetState.imageMode,
       title: finalTitle(presetState),
       customBody: presetState.customBody,
-      // PDF 存云盘（#65）：本次开了开关且识别到主 PDF 时附带 pdfSource，bridge 建双 job
+      // PDF 存云盘（#65）：本次开了开关且识别到主 PDF 时附带 pdfSource，bridge 建双 job；
+      // pdfFolderToken（#66）是目录 chip 的会话选择（null = 云盘根目录）
       pdfEnabled: presetState.pdfOn && Boolean(presetState.pdf),
       pdfSource: presetState.pdf,
+      pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
     });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
@@ -400,6 +475,7 @@ async function retryPdf() {
       customBody: presetState.customBody,
       pdfEnabled: true,
       pdfSource: presetState.pdf,
+      pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
     });
     poll();
   } catch (error) {

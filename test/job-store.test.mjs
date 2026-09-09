@@ -460,6 +460,31 @@ test('pdf job 取消走最小状态集：queued/running → cancelled', async ()
   });
 });
 
+test('pdf job 记录目标目录 folderToken（#66）：缺省 null（根目录），重试以最新提交为准', async () => {
+  await withStore(async ({ store }) => {
+    const legacy = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    assert.equal(legacy.job.folderToken, null, '不带 folderToken 的提交落根目录');
+
+    const picked = await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource: PDF_SOURCE, folderToken: 'fld-a' });
+    assert.equal(picked.job.folderToken, 'fld-a');
+
+    // 非字符串/空串一律归一为 null
+    const blank = await store.submit({ attemptId: 'attempt-3', sourceUrl: 'https://example.test/c', kind: 'pdf', pdfSource: PDF_SOURCE, folderToken: '' });
+    assert.equal(blank.job.folderToken, null);
+
+    // 失败重试（弹窗重选目录后点「重试 PDF」）：folderToken 以本次提交为准
+    await store.claim('attempt-2', 'worker-a', 'pdf');
+    await store.fail('attempt-2', 'worker-a', { stage: 'pdf', error: '目录已删除' }, 'pdf');
+    const retried = await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource: PDF_SOURCE, folderToken: 'fld-b' });
+    assert.equal(retried.retried, true);
+    assert.equal(retried.job.folderToken, 'fld-b', '重试带上重选的目录');
+
+    // 持久化往返：folderToken 随 jobs.json 落盘
+    const reloaded = await store.get('attempt-2', 'pdf');
+    assert.equal(reloaded.folderToken, 'fld-b');
+  });
+});
+
 test('failed 的 pdf job 同键重提交复位重排队（弹窗「重试 PDF」），clip 终态重发不复活', async () => {
   await withStore(async ({ store }) => {
     await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
