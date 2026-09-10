@@ -107,3 +107,29 @@ Date: 2026-08-20 (Asia/Shanghai)
 ### Manual (pending)
 
 The following remain for a real Chrome pass with the reloaded unpacked extension: picker layout within popup size (breadcrumbs, back, load-more, error states), switching one clip between two different real Feishu parent documents, and reopening the popup reverting to the persisted default target.
+
+## PDF drive mode (#56, planned — pending implementation)
+
+Date: 2026-09-08 (Asia/Shanghai). 规划来源：wayfinder map #56 的全部决议票（#57–#62）。以下为待实现的验收场景，实现完成后按惯例补实测记录。
+
+### Automated (planned)
+
+- `npm test` 新增覆盖：
+  - job-store：`(attemptId, kind)` 双 job 幂等提交；pdf job 最小状态机（`queued / awaiting_bytes / running / succeeded / failed / cancelled / expired`，无 reconcile）；url 型下载 401/403 → `awaiting_bytes`；bytes 到齐 + SHA-256 验证通过 → `queued`，hash 不匹配拒收；chunk 位图断点续传（只补缺块）；staging 文件随终态删除、超龄孤儿由 sweep 清理；`get(attemptId)` 返回整次尝试的全部 job；job TTL → `expired`。
+  - 预设：`pdfDrive` 读取时迁移（存量预设缺省 `null`）；`enabled + folderToken:null` = 云盘根目录的合法态。
+  - picker：drive 适配器的导航/分页/错误分类与 wiki 适配器同规；`createTargetPicker` 泛化后 wiki 侧行为不变（回归）。
+  - 扩展识别：executeScript 探针读 `document.contentType` 判定 PDF 标签页；注入失败回退 `tab.url` 后缀兜底；HTML 页 `citation_pdf_url` meta 与 arXiv 站点规则识别主 PDF；页面上非主 PDF 链接不误报。
+- `npm run check` 覆盖新增模块。
+
+### Real Feishu account via production Bridge path (planned)
+
+仿 `scripts/accept-targets.mjs` 新增 `scripts/accept-pdf-drive.mjs`，真账号实测：
+
+- arXiv abstract 页剪藏：文档与 PDF 双产物建成，弹窗呈现两个产物入口（打开飞书文档 / 打开云盘 PDF）；`drive files list` 回读确认 PDF 在目标文件夹。
+- PDF 标签页（直接打开 arXiv PDF URL）：仅产生 `kind: 'pdf'` job，不建剪藏文档。
+- 大 PDF（> 20 MB）走 CLI 自动分片成功；超过自定硬上限的 PDF 快速失败并明确提示（不等到传完）。
+- PDF 上传失败 + 文档成功：弹窗呈现部分成功警告（[打开文档][重试 PDF]），重试仅重跑 pdf job。
+- 凭据回退链路：url 型下载撞 401/403 → job 转 `awaiting_bytes` → 扩展分块喂字节（含一次模拟中断后续传）→ 整验通过 → `succeeded`。
+- 同一 PDF 剪藏两次：云盘出现两份同名文件并存（不查重语义，#57 实测行为）；孤儿文件风险作为已知权衡备注。
+- 目录 picker 真实浏览文件夹树（面包屑、分页、根层"我的空间"）、手贴 token 高级路径、token 失效后重选；未设置目录时上传到云盘根目录。
+- spike 验证项（实现第一步）：activeTab 授权下 SW `fetch(credentials:'include')` 抓取 PDF 字节成立；不成立则回 #61 改方案。

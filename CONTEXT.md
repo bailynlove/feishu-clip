@@ -21,7 +21,7 @@ _Avoid_: 导出路径、同步目录
 _Avoid_: 更新、同步、覆盖
 
 **部分成功（Partial Success）**:
-剪藏文档及正文已经创建，但一张或多张图片按写入模式降级（预览优先：预览块 → 下载上传 → 原图链接文本；下载优先：下载上传 → 原图链接文本）全部失败；失败位置保留原图链接，并向用户展示警告。
+剪藏文档及正文已经创建，但一张或多张图片按写入模式降级（预览优先：预览块 → 下载上传 → 原图链接文本；下载优先：下载上传 → 原图链接文本）全部失败；失败位置保留原图链接，并向用户展示警告。PDF 云盘模式下，剪藏文档成功而 PDF 上传任务失败时同样按部分成功呈现（双 job 各自终态，聚合判定在弹窗）。
 _Avoid_: 导出失败、静默跳过
 
 **图片候选（Image Candidate）**:
@@ -63,3 +63,15 @@ _Avoid_: 水印、追踪码
 **iframe 占位符（iframe Placeholder）**:
 正文内 iframe（如折叠起来的算法可视化面板）在剪藏正文中的 `[[FEISHU_CLIP_IFRAME:i]]` 独立段落标记；桥接侧据此转写为飞书 iframe 块（block_type 26），失败时降级为标题链接段落并警告。
 _Avoid_: 嵌入帧、外部网页块
+
+**PDF 识别（PDF Detection）**:
+点击剪藏时判定来源页面是否携带一份可存云盘的 PDF：标签页本身是 PDF（executeScript 探针读 `document.contentType`，注入失败回退 URL 后缀兜底），或 HTML 论文页存在主 PDF 链接（站点规则 + `citation_pdf_url` meta 启发式，不做全量 PDF 链接扫描）。
+_Avoid_: 网页里有 PDF 链接、浏览器下载记录
+
+**PDF 上传任务（PDF Upload Job）**:
+与剪藏 job 共享同一剪藏尝试 `attemptId`、以 `kind: 'pdf'` 区分的独立 job；状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 转入 awaiting_bytes 等待扩展喂字节。
+_Avoid_: 附件同步、文献库条目
+
+**云盘目录（Drive Folder）**:
+PDF 上传任务接收文件的位置：预设 `pdfDrive` 里的 Drive 文件夹 token + 冗余展示名；token 为空即云盘根目录。弹窗内改动仅本次生效、不回写预设。
+_Avoid_: 导出路径、同步目录
