@@ -52,6 +52,33 @@ function needsCredentialFallback(error) {
   return error?.code === 'PDF_FETCH_FAILED' && (error.statusCode === 401 || error.statusCode === 403);
 }
 
+// pdf 下载瞬时网络错误判定：只认裸系统错误码（对端 reset / 超时 / 拒连 / DNS 抖动）。
+// 带 PDF_* 业务码的失败（401/403 凭据回退、SIZE/TYPE/SSRF 拒绝）绝不重试，语义不变。
+// 背景：arXiv 等对同 IP 并发连接数有限制，clip 图片下载与 pdf 下载同主机并发会被 reset
+const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN']);
+
+function isTransientNetworkError(error) {
+  if (typeof error?.code === 'string' && error.code.startsWith('PDF_')) return false;
+  if (TRANSIENT_NETWORK_CODES.has(error?.code)) return true;
+  return /socket hang up/i.test(error?.message || '');
+}
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// 瞬时错误自动重试：最多 2 次重试（共 3 次尝试），退避约 1s / 3s。
+// sleep 可注入（测试不等真实退避）；onRetry 用于 timeline 埋点
+async function withTransientRetry(fn, { sleep = defaultSleep, backoffMs = [1000, 3000], onRetry = () => {} } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= 1 + backoffMs.length || !isTransientNetworkError(error)) throw error;
+      onRetry(error, attempt);
+      await sleep(backoffMs[attempt - 1]);
+    }
+  }
+}
+
 function escapeMarkdown(value) {
   return String(value || '').replace(/[\\[\]]/g, '\\$&').replace(/[\r\n]+/g, ' ').slice(0, 300);
 }
@@ -157,12 +184,14 @@ function isServerTimeout(error) {
 }
 
 export class ClipExecutor {
-  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, staging = null }) {
+  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, staging = null, sleep = defaultSleep }) {
     this.store = store;
     this.lark = lark;
     this.logger = logger;
     // pdf 下载函数可注入（测试 stub；生产默认走 image-policy 的 SSRF 校验下载）
     this.downloadPdf = downloadPdf;
+    // 重试退避 sleep 可注入（测试不等真实退避；生产为 setTimeout）
+    this.sleep = sleep;
     // 分块暂存（#68）：bytes 型 pdf job 的字节来源；null 时 bytes 路径不可用（仅测试场景）
     this.staging = staging;
     this.running = false;
@@ -215,7 +244,12 @@ export class ClipExecutor {
         timeline.push({ kind: 'stage', name: 'pdf_staging', ms: Date.now() - stageAt });
       } else {
         const downloadAt = Date.now();
-        const fetched = await this.downloadPdf(job.pdfSource.url);
+        // 瞬时网络错误（ECONNRESET 类）自动重试：arXiv 等站点限制同 IP 并发连接，
+        // clip 图片与 pdf 同主机并发下载会被对端 reset；业务失败（PDF_*）不重试
+        const fetched = await withTransientRetry(() => this.downloadPdf(job.pdfSource.url), {
+          sleep: this.sleep,
+          onRetry: (error, attempt) => timeline.push({ kind: 'retry', name: 'pdf_download', detail: `${error?.code || error?.message}，第 ${attempt} 次重试` }),
+        });
         timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
         await writeFile(path.join(scratch, name), fetched.buffer);
       }

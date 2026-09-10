@@ -962,6 +962,61 @@ test('pdf job：下载撞 401/403 不 fail，转 awaiting_bytes（其余 HTTP �
   assert.match(store.failed?.error, /PDF_HTTP_404/);
 });
 
+// ——— 瞬时网络错误重试：ECONNRESET 类裸系统错误码自动重试（最多 2 次）；PDF_* 业务失败绝不重试 ———
+
+test('pdf job：下载撞瞬时网络错误（ECONNRESET）自动重试，第二次成功后 job succeeded', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-retry' });
+  const lark = { async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; } };
+  let calls = 0;
+  const downloadPdf = async (url) => {
+    calls += 1;
+    if (calls === 1) throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    return { buffer: Buffer.from('%PDF-'), source: url, sizeBytes: 5 };
+  };
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf, sleep }).kick();
+  await store.settled;
+
+  assert.equal(calls, 2, '首次 ECONNRESET 后重试一次成功');
+  assert.deepEqual(sleeps, [1000], '首次退避约 1s');
+  assert.equal(store.completed?.kind, 'pdf');
+  assert.equal(store.failed, null);
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'retry' && entry.name === 'pdf_download'), 'timeline 记一笔重试');
+});
+
+test('pdf job：连续 3 次瞬时网络错误最终 failed（共 3 次尝试，退避约 1s/3s）', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-retry-exhausted' });
+  const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
+  let calls = 0;
+  const downloadPdf = async () => { calls += 1; throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); };
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf, sleep }).kick();
+  await store.settled;
+
+  assert.equal(calls, 3, '最多 2 次重试（共 3 次尝试）');
+  assert.deepEqual(sleeps, [1000, 3000], '退避约 1s / 3s');
+  assert.equal(store.failed?.kind, 'pdf');
+  assert.equal(store.failed?.stage, 'pdf');
+  assert.equal(store.completed, null);
+});
+
+test('pdf job：带 PDF_* 业务码的错误绝不重试（401/403 仍走 awaiting_bytes 既有路径）', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-403-noretry' });
+  const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
+  let calls = 0;
+  const downloadPdf = async () => { calls += 1; throw Object.assign(new Error('PDF_HTTP_403'), { code: 'PDF_FETCH_FAILED', statusCode: 403 }); };
+  const sleep = async () => { throw new Error('业务失败不得触发退避'); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf, sleep }).kick();
+  await store.settled;
+
+  assert.equal(calls, 1, 'PDF_FETCH_FAILED 不重试');
+  assert.ok(store.awaitedBytes, '403 语义不变：转 awaiting_bytes');
+  assert.equal(store.failed, null);
+  assert.equal(store.completed, null);
+});
+
 test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清理 staging', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-exec-staging-'));
   const stagingDir = path.join(directory, 'staging');
