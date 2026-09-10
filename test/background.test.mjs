@@ -28,6 +28,7 @@ let detectPdfResult = { pdf: null }; // pdf-detect.js 桩的探测结果
 let tabUrl = PAGE; // 当前标签页 URL 桩（#67 探测用例会换 URL）
 let pdfTabProbeResult = null; // DETECT_PDF_TAB 探针（func 注入）返回值
 let pdfTabProbeError = null; // 非 null 时探针注入失败（走 URL 后缀兜底）
+let pdfHeadStub = 'application/pdf'; // 兜底 HEAD 的 content-type；null = HEAD 网络失败
 // ——— 凭据回传（#68）FEED_PDF_BYTES 用例的桩状态 ———
 const PDF_SOURCE_URL = 'https://pub.example.com/paywalled.pdf';
 let pdfSourceServer = null; // 非 null 时源站 URL 返回流式 Response；{ body } 或 { failStatus }
@@ -63,6 +64,11 @@ globalThis.chrome = {
   },
 };
 globalThis.fetch = async (url, options) => {
+  // DETECT_PDF_TAB 注入失败兜底（#67）：SW 对疑似 .pdf URL 的 HEAD content-type 校验
+  if (options?.method === 'HEAD') {
+    if (pdfHeadStub === null) throw new Error('network down');
+    return { ok: true, headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? pdfHeadStub : null) } };
+  }
   // 源站 PDF（#68 凭据抓取）：流式 Response，分段 enqueue 模拟真实流
   if (url === PDF_SOURCE_URL && pdfSourceServer) {
     if (pdfSourceServer.failStatus) return { ok: false, status: pdfSourceServer.failStatus, body: null };
@@ -91,7 +97,7 @@ globalThis.fetch = async (url, options) => {
       if (feedJob && url.includes(`/v1/jobs/${feedJob.attemptId}`)) return { ok: true, jobs: [feedJob] };
       if (url.includes(`/v1/jobs/${ATTEMPT}`)) return { ok: true, job: terminalJob };
       if (url.endsWith('/v1/drive/folders/validate')) return { ok: true, folder: { folderToken: lastDriveValidateBody.folderToken ?? null, name: '论文' } };
-      if (url.includes('/v1/drive/folders')) return { ok: true, folders: [{ folderToken: 'fld-a', name: '论文' }], hasMore: false, nextPageToken: null };
+      if (url.includes('/v1/drive/folders')) return { ok: true, items: [{ folderToken: 'fld-a', name: '论文', type: 'folder' }], hasMore: false, nextPageToken: null };
       return { ok: true, job: { attemptId: 'new-attempt' } };
     },
   };
@@ -205,7 +211,7 @@ test('LIST_DRIVE_FOLDERS / VALIDATE_DRIVE_FOLDER 转发到 drive 端点族', asy
   lastDriveListUrl = null;
   const root = await send({ type: 'LIST_DRIVE_FOLDERS' });
   assert.ok(lastDriveListUrl.endsWith('/v1/drive/folders'), '省略 folderToken 列根层，不带查询参数');
-  assert.equal(root.folders[0].folderToken, 'fld-a');
+  assert.equal(root.items[0].folderToken, 'fld-a');
 
   await send({ type: 'LIST_DRIVE_FOLDERS', folderToken: 'fld-a', cursor: 'c2', limit: 20 });
   assert.ok(lastDriveListUrl.includes('parentFolderToken=fld-a'));
@@ -256,7 +262,7 @@ test('DETECT_PDF_TAB：探针 title 为空回退 URL 末段；非 PDF 页面（�
   }
 });
 
-test('DETECT_PDF_TAB：注入失败回退 URL 后缀兜底（忽略 query/hash）；非 .pdf 兜底不命中', async () => {
+test('DETECT_PDF_TAB：注入失败回退 URL 后缀 + HEAD 校验（忽略 query/hash）；非 .pdf 不命中', async () => {
   pdfTabProbeError = new Error('Cannot access contents of the page');
   try {
     tabUrl = 'https://example.com/paper.pdf?dl=1#page=2';
@@ -272,6 +278,30 @@ test('DETECT_PDF_TAB：注入失败回退 URL 后缀兜底（忽略 query/hash�
     assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null);
   } finally {
     tabUrl = PAGE; pdfTabProbeError = null;
+  }
+});
+
+// 注入失败兜底误判防护（review #67）：HEAD content-type 不符（HTML 登录墙）或 HEAD 网络失败
+// 一律保守不判，不进 PDF 面板；content-type 含 application/pdf 才通过
+test('DETECT_PDF_TAB：注入失败时 HEAD content-type 不符/网络失败均保守不判', async () => {
+  pdfTabProbeError = new Error('Cannot access contents of the page');
+  try {
+    // .pdf 后缀但 HEAD 返回 HTML（登录墙）：不误判
+    tabUrl = 'https://example.com/paper.pdf';
+    pdfHeadStub = 'text/html; charset=utf-8';
+    assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null, 'HTML 登录墙不进入 PDF 面板');
+
+    // HEAD 网络失败：保守不判
+    pdfHeadStub = null;
+    assert.equal((await send({ type: 'DETECT_PDF_TAB' })).pdfTab, null, 'HEAD 失败保守处理');
+
+    // content-type 含 application/pdf（带参数也命中）：通过
+    pdfHeadStub = 'application/pdf; charset=binary';
+    const { pdfTab } = await send({ type: 'DETECT_PDF_TAB' });
+    assert.equal(pdfTab.url, tabUrl);
+    assert.equal(pdfTab.name, 'paper.pdf');
+  } finally {
+    tabUrl = PAGE; pdfTabProbeError = null; pdfHeadStub = 'application/pdf';
   }
 });
 

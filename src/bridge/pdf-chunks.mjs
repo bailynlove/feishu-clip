@@ -7,7 +7,9 @@ import { PDF_CHUNK_BYTES } from './job-store.mjs';
 // PDF 分块暂存（#61/#68）：扩展凭据回传的字节按 4 MiB 块落 staging/<attemptId>.part
 //（offset = index × PDF_CHUNK_BYTES），已收块位图记在同名 .json sidecar（原子写）。
 // 全部到齐后整体验证 size + SHA-256，通过才把文件交给 executor；
-// job 终态/整验失败由调用方 discard，超龄孤儿由 sweep 按 mtime 清理
+// job 终态/整验失败由调用方 discard，cancelled 的 pdf job 由 server 周期 sweep 经
+// discardForJob 即时清理（store 层不碰文件系统，cancel 路径自身不带清理），
+// 超龄孤儿由 sweep 按 mtime 兜底
 export class PdfChunkStaging {
   #dir;
   #now;
@@ -100,6 +102,14 @@ export class PdfChunkStaging {
     await rm(this.filePath(attemptId), { force: true });
     await rm(this.#manifestPath(attemptId), { force: true });
     this.#tails.delete(attemptId);
+  }
+
+  // cancel 路径清理（#68）：cancelled 的 pdf job 可能留有未喂齐的 staging；store.cancel
+  // 不碰文件系统（纪律见 server.mjs），由 server 周期 sweep 对每个 cancelled pdf job 调这里，
+  // 不依赖超龄孤儿 sweep 才清理。非 pdf / 缺 attemptId 的输入安全空转
+  async discardForJob(job) {
+    if (job?.kind !== 'pdf' || !job?.attemptId) return;
+    await this.discard(job.attemptId);
   }
 
   // 超龄孤儿清理：.part/.json 的最新 mtime 超过 maxAgeMs 即整组删除；返回被清理的 attemptId

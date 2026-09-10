@@ -416,8 +416,10 @@ test('pdf job 提交校验：url/bytes 两型，http(s) 无凭据；bytes 声明
     await assert.rejects(() => submit({ type: 'url', url: 'not-a-url' }), /valid URL/);
     await assert.rejects(() => submit({ type: 'url', url: 'ftp://example.test/x.pdf' }), /credential-free/);
     await assert.rejects(() => submit({ type: 'url', url: 'https://user:pass@example.test/x.pdf' }), /credential-free/);
-    const ok = await submit({ type: 'url', url: 'https://example.test/x.pdf', name: 'x'.repeat(300), sizeBytes: 42 });
-    assert.equal(ok.job.pdfSource.name.length, 250, 'name 截断到 250 字符');
+    // 校验实现与 server 共享（review 起单份）：name 超长两层的口径一致——严格拒绝而非截断
+    await assert.rejects(() => submit({ type: 'url', url: 'https://example.test/x.pdf', name: 'x'.repeat(251) }), /at most 250 chars/);
+    const ok = await submit({ type: 'url', url: 'https://example.test/x.pdf', name: 'x'.repeat(250), sizeBytes: 42 });
+    assert.equal(ok.job.pdfSource.name.length, 250, '250 字符的 name 合法');
     assert.equal(ok.job.pdfSource.sizeBytes, 42);
 
     // bytes 型（#68）：文件名/总大小/总块数/SHA-256 必填，totalChunks 必须按 4 MiB 口径自洽

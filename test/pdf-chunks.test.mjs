@@ -85,3 +85,21 @@ test('discard 删除 .part 与位图 sidecar；sweep 只清超龄孤儿', async 
     assert.equal(await exists(staging.filePath(orphan)), false);
   });
 });
+
+// discardForJob（review #68）：cancelled 的 pdf job 由 server 周期 sweep 经此清理 staging，
+// 不依赖超龄兜底；非 pdf / 缺 attemptId 的输入安全空转
+test('discardForJob：pdf job 清理 staging；非 pdf/空输入空转', async () => {
+  await withStaging(async ({ staging, directory }) => {
+    await staging.putChunk(ATTEMPT, 0, randomBytes(16));
+    await staging.discardForJob({ kind: 'pdf', attemptId: ATTEMPT, status: 'cancelled' });
+    assert.equal(await exists(staging.filePath(ATTEMPT)), false, 'cancelled 的 pdf job 即时清理');
+    assert.equal(await exists(path.join(directory, 'staging', `${ATTEMPT}.json`)), false);
+
+    // 存量 job 缺省 kind 按 clip 读取；clip/null 不得误删任何文件
+    await staging.putChunk(ATTEMPT, 0, randomBytes(16));
+    await staging.discardForJob({ attemptId: ATTEMPT, status: 'cancelled' });
+    await staging.discardForJob(null);
+    await staging.discardForJob({});
+    assert.equal(await exists(staging.filePath(ATTEMPT)), true, '非 pdf 输入空转，不误删');
+  });
+});

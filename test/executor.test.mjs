@@ -876,11 +876,11 @@ test('pdf job：下载后原格式落盘，经 drive +upload 上传云盘根目�
   assert.equal(store.claims.length, 1);
   assert.equal(store.claims[0].kind, 'pdf', 'claim 带 pdf kind');
   assert.equal(uploads.length, 1);
-  assert.equal(uploads[0].fileName, 'Attention Is All You Need.pdf', '文件名 = 标题渲染结果 + .pdf');
-  assert.equal(uploads[0].name, 'Attention Is All You Need.pdf');
+  assert.equal(uploads[0].localFileName, 'Attention Is All You Need.pdf', '落盘文件名 = 标题渲染结果 + .pdf');
+  assert.equal(uploads[0].displayName, 'Attention Is All You Need.pdf', '云盘展示名同一');
   assert.equal(uploads[0].folderToken, null, 'job 无 folderToken（存量/#65 前）走云盘根目录');
   assert.ok(uploads[0].cwd, '落盘在 scratch 目录上传（--file 只接受 cwd 内相对路径）');
-  assert.ok(!path.isAbsolute(uploads[0].fileName), 'fileName 必须是相对路径');
+  assert.ok(!path.isAbsolute(uploads[0].localFileName), 'localFileName 必须是相对路径');
   assert.equal(store.completed.kind, 'pdf');
   assert.deepEqual(store.completed.document, { fileToken: 'ft-pdf', url: 'https://example.feishu.cn/file/ft-pdf' });
   assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'pdf_download'), '下载阶段计时');
@@ -906,7 +906,7 @@ test('pdf job：空标题时文件名回退 pdfSource.name', async () => {
   const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
   new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
   await store.settled;
-  assert.equal(uploads[0].fileName, '1706.03762.pdf');
+  assert.equal(uploads[0].localFileName, '1706.03762.pdf');
 });
 
 test('pdf job：下载超限/类型不符映射为中文失败文案，上传歧义一律按失败（fail 落 failed）', async () => {
@@ -984,7 +984,7 @@ test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清�
 
     assert.equal(downloads, 0, '字节来自 staging 而非 URL 下载');
     assert.equal(uploads.length, 1);
-    assert.equal(uploads[0].fileName, 'Attention Is All You Need.pdf');
+    assert.equal(uploads[0].localFileName, 'Attention Is All You Need.pdf');
     // 上传的文件内容就是 staging 字节（scratch 已删，用 copyFile 目标之外的旁证：上传被调用即路径通）
     assert.equal(store.completed.kind, 'pdf');
     assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'pdf_staging'), 'staging 阶段计时');

@@ -132,8 +132,8 @@ export function wirePicker(picker, els) {
   });
 }
 
-// ——— Drive 目录选择器渲染（#66）：直挂树形内核状态（view: root | level，items 为文件夹行），
-// 与 wiki 的 renderPicker 同形但数据源是 drive-picker.js 的 createDrivePicker ———
+// ——— Drive 目录选择器渲染（#66）：直挂树形内核状态（view: root | level，items 为全部子项——
+// 文件夹可交互、文件项置灰），与 wiki 的 renderPicker 同形但数据源是 drive-picker.js 的 createDrivePicker ———
 
 // drive 侧错误文案：forbidden 指向云盘目录而非知识库，其余沿用通用表
 export const DRIVE_PICKER_ERROR_TEXT = {
@@ -165,7 +165,7 @@ export function renderDrivePicker(picker, state, els, labels) {
 
   const items = state.view === 'root' ? state.rootItems : state.items;
   if (state.status === 'ready' && !state.error && items.length === 0) {
-    status.textContent = state.view === 'root' ? '云盘根目录下没有文件夹。' : '该目录下没有子文件夹。';
+    status.textContent = state.view === 'root' ? '云盘根目录下没有内容。' : '该目录下没有内容。';
   }
 
   if (state.view === 'level') {
@@ -191,20 +191,25 @@ export function renderDrivePicker(picker, state, els, labels) {
   }
 
   for (const item of items) {
+    // 文件项（#66）：置灰展示，不可选中不可下钻；文件夹/根目录行保持原有交互
+    const isFile = !item.driveRoot && item.type !== 'folder';
     const row = document.createElement('div');
-    row.className = `picker-row selectable${state.selectedItem === item ? ' selected' : ''}`;
-    // 整行可点（不只文字），下钻按钮阻止冒泡以免误选中
-    row.addEventListener('click', () => picker.select(item));
+    row.className = isFile ? 'picker-row file-row' : `picker-row selectable${state.selectedItem === item ? ' selected' : ''}`;
+    if (!isFile) {
+      // 整行可点（不只文字），下钻按钮阻止冒泡以免误选中
+      row.addEventListener('click', () => picker.select(item));
+    }
     const title = document.createElement('button');
     title.type = 'button';
     title.className = 'row-title';
-    title.textContent = item.name;
+    title.textContent = isFile ? `📄 ${item.name}` : item.name;
+    if (isFile) title.disabled = true;
     row.append(title);
     const hint = document.createElement('span');
     hint.className = 'row-hint';
-    hint.textContent = item.driveRoot ? '根目录' : '文件夹';
+    hint.textContent = item.driveRoot ? '根目录' : isFile ? '文件' : '文件夹';
     row.append(hint);
-    if (item.folderToken) {
+    if (!isFile && item.folderToken) {
       const drill = document.createElement('button');
       drill.type = 'button';
       drill.className = 'link row-drill';

@@ -234,14 +234,14 @@ test('LarkClient.uploadDriveFile builds the drive +upload argv and maps file_tok
     return { ok: true, data: { file_token: 'ft-1', url: 'https://example.feishu.cn/file/ft-1' } };
   };
 
-  const root = await client.uploadDriveFile({ fileName: 'paper.pdf', name: '论文标题.pdf', folderToken: null, cwd: '/tmp/scratch' });
+  const root = await client.uploadDriveFile({ localFileName: 'paper.pdf', displayName: '论文标题.pdf', folderToken: null, cwd: '/tmp/scratch' });
   assert.deepEqual(calls[0].args, ['drive', '+upload', '--as', 'user', '--file', 'paper.pdf', '--name', '论文标题.pdf', '--format', 'json']);
   assert.equal(calls[0].options.cwd, '/tmp/scratch', '--file 相对路径依赖 cwd 落盘目录');
   assert.deepEqual(root, { fileToken: 'ft-1', url: 'https://example.feishu.cn/file/ft-1' });
 
-  const subfolder = await client.uploadDriveFile({ fileName: 'paper.pdf', folderToken: 'fldcnX', cwd: '/tmp/scratch' });
+  const subfolder = await client.uploadDriveFile({ localFileName: 'paper.pdf', folderToken: 'fldcnX', cwd: '/tmp/scratch' });
   assert.ok(calls[1].args.includes('--folder-token') && calls[1].args.includes('fldcnX'), '有目录时带 --folder-token');
-  assert.ok(calls[1].args.includes('paper.pdf'), '--name 缺省回退 fileName');
+  assert.ok(calls[1].args.includes('paper.pdf'), '--name 缺省回退 localFileName');
   assert.equal(subfolder.fileToken, 'ft-1');
 });
 
@@ -249,20 +249,20 @@ test('LarkClient.uploadDriveFile rejects envelopes without file_token/url（上�
   const client = new LarkClient({ cliPath: '/fake' });
   client.run = async () => ({ ok: true, data: {} });
   await assert.rejects(
-    () => client.uploadDriveFile({ fileName: 'paper.pdf', cwd: '/tmp' }),
+    () => client.uploadDriveFile({ localFileName: 'paper.pdf', cwd: '/tmp' }),
     /LARK_UPLOAD_MISSING_FILE/,
   );
 });
 
 // ——— Drive 目录选择器端点族（#66）———
 
-test('drive folders route lists folders with pagination and validates the query', async () => {
+test('drive folders route lists items with pagination and validates the query', async () => {
   const seen = [];
   const lark = fakeLark({
-    listDriveFolders: async ({ folderToken, pageToken, pageSize }) => {
+    listDriveItems: async ({ folderToken, pageToken, pageSize }) => {
       seen.push({ folderToken, pageToken, pageSize });
-      if (!pageToken) return { folders: [{ folderToken: 'fld-a', name: '论文' }], hasMore: true, nextPageToken: 'cursor-2' };
-      return { folders: [{ folderToken: 'fld-b', name: '剪藏待读' }], hasMore: false, nextPageToken: null };
+      if (!pageToken) return { items: [{ folderToken: 'fld-a', name: '论文', type: 'folder' }], hasMore: true, nextPageToken: 'cursor-2' };
+      return { items: [{ folderToken: 'fld-b', name: '剪藏待读', type: 'folder' }], hasMore: false, nextPageToken: null };
     },
   });
   const bridge = await startBridge(lark);
@@ -277,12 +277,12 @@ test('drive folders route lists folders with pagination and validates the query'
     // 省略 parentFolderToken = 根层「我的空间」
     const root = await (await bridge.call('/v1/drive/folders?limit=20')).json();
     assert.equal(root.ok, true);
-    assert.deepEqual(root.folders, [{ folderToken: 'fld-a', name: '论文' }]);
+    assert.deepEqual(root.items, [{ folderToken: 'fld-a', name: '论文', type: 'folder' }]);
     assert.equal(root.hasMore, true);
     assert.deepEqual(seen[0], { folderToken: undefined, pageToken: undefined, pageSize: 20 });
 
     const child = await (await bridge.call(`/v1/drive/folders?parentFolderToken=fld-a&cursor=${encodeURIComponent('cursor-2')}`)).json();
-    assert.deepEqual(child.folders, [{ folderToken: 'fld-b', name: '剪藏待读' }]);
+    assert.deepEqual(child.items, [{ folderToken: 'fld-b', name: '剪藏待读', type: 'folder' }]);
     assert.deepEqual(seen[1], { folderToken: 'fld-a', pageToken: 'cursor-2', pageSize: 50 });
   } finally {
     await bridge.close();
@@ -291,7 +291,7 @@ test('drive folders route lists folders with pagination and validates the query'
 
 test('drive folders route maps lark failures to actionable codes', async () => {
   const lark = fakeLark({
-    listDriveFolders: async () => { throw Object.assign(new Error('user not logged in, run auth login'), { code: 'AUTH_FAILED' }); },
+    listDriveItems: async () => { throw Object.assign(new Error('user not logged in, run auth login'), { code: 'AUTH_FAILED' }); },
   });
   const bridge = await startBridge(lark);
   try {
@@ -377,7 +377,7 @@ test('POST /v1/jobs 透传 pdfFolderToken 到 pdf job；非法 token 400', async
   }
 });
 
-test('LarkClient.listDriveFolders builds argv, filters non-folder items, and pages only subfolders', async () => {
+test('LarkClient.listDriveItems builds argv, keeps file items with their type, and pages only subfolders', async () => {
   const calls = [];
   const client = new LarkClient({ cliPath: '/fake' });
   client.run = async (args) => {
@@ -396,13 +396,21 @@ test('LarkClient.listDriveFolders builds argv, filters non-folder items, and pag
     };
   };
 
-  const sub = await client.listDriveFolders({ folderToken: 'fld-a', pageToken: 'cursor', pageSize: 20 });
+  const sub = await client.listDriveItems({ folderToken: 'fld-a', pageToken: 'cursor', pageSize: 20 });
   assert.deepEqual(calls[0], ['drive', 'files', 'list', '--as', 'user', '--page-size', '20', '--format', 'json', '--folder-token', 'fld-a', '--page-token', 'cursor']);
-  assert.deepEqual(sub, { folders: [{ folderToken: 'fld-1', name: '论文' }], hasMore: true, nextPageToken: 'next' }, '只保留文件夹项');
+  assert.deepEqual(sub, {
+    items: [
+      { folderToken: 'fld-1', name: '论文', type: 'folder' },
+      { folderToken: 'file-1', name: '报告.pdf', type: 'file' },
+      { folderToken: 'doc-1', name: '文档', type: 'docx' },
+    ],
+    hasMore: true,
+    nextPageToken: 'next',
+  }, '全部子项带类型返回（文件项由 picker 置灰，不在 bridge 过滤）');
 
-  const root = await client.listDriveFolders({ pageToken: 'ignored', pageSize: 10 });
+  const root = await client.listDriveItems({ pageToken: 'ignored', pageSize: 10 });
   assert.deepEqual(calls[1], ['drive', 'files', 'list', '--as', 'user', '--page-size', '10', '--format', 'json'], '根目录模式不带 --folder-token，且不支持分页故不带 --page-token');
-  assert.equal(root.folders.length, 1);
+  assert.equal(root.items.length, 3);
 });
 
 test('LarkClient.validateDriveFolder: null 即根目录不调 CLI；token 走 +inspect 且须为文件夹', async () => {

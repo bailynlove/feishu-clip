@@ -4,6 +4,8 @@ import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
+// 分块切块口径与 src/bridge/job-store.mjs 的 PDF_CHUNK_BYTES 保持一致（SW 与 bridge 分属
+// 两个运行时，无法共享模块，修改须两边同步）
 const PDF_CHUNK_BYTES = 4 * 1024 * 1024;
 
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
@@ -62,6 +64,17 @@ function pdfNameFromUrl(pageUrl) {
   } catch { return null; }
 }
 
+// 注入失败时的兜底校验（review #67）：.pdf 后缀只是启发式——登录墙/错误页也常以 .pdf 结尾。
+// SW 持凭据发 HEAD 核对 content-type；网络失败或不符（HTML 登录墙等）一律保守不判，不进 PDF 面板
+async function headConfirmsPdf(pageUrl) {
+  try {
+    const response = await fetch(pageUrl, { method: 'HEAD', credentials: 'include' });
+    return String(response.headers.get('content-type') || '').toLowerCase().includes('application/pdf');
+  } catch {
+    return false;
+  }
+}
+
 // 探针在页面上下文执行（executeScript 序列化 func，须自包含）：命中 PDF 时顺带用 HEAD
 // 拿文件大小（拿不到不阻塞识别，弹窗显示「未知大小」），title 在内嵌查看器里即文件名
 function pdfTabProbe() {
@@ -83,7 +96,9 @@ async function detectPdfTab() {
     if (execution?.result?.contentType !== 'application/pdf') return { pdfTab: null };
     return { pdfTab: { url: tab.url, name: execution.result.title || pdfNameFromUrl(tab.url), sizeBytes: execution.result.sizeBytes ?? null } };
   } catch {
-    return { pdfTab: isPdfUrl(tab.url) ? { url: tab.url, name: pdfNameFromUrl(tab.url), sizeBytes: null } : null };
+    if (!isPdfUrl(tab.url)) return { pdfTab: null };
+    if (!(await headConfirmsPdf(tab.url))) return { pdfTab: null };
+    return { pdfTab: { url: tab.url, name: pdfNameFromUrl(tab.url), sizeBytes: null } };
   }
 }
 

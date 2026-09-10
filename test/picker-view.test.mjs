@@ -117,7 +117,8 @@ const DRIVE_ROOT_STATE = {
   view: 'root', status: 'ready', error: null, saving: false,
   rootItems: [
     { folderToken: null, name: '我的空间', driveRoot: true },
-    { folderToken: 'fld-a', name: '论文' },
+    { folderToken: 'fld-a', name: '论文', type: 'folder' },
+    { folderToken: 'file-1', name: '报告.pdf', type: 'file' },
   ],
   rootHasMore: false, items: [], itemsHasMore: false, crumbs: [], selectedItem: null,
 };
@@ -125,7 +126,7 @@ const DRIVE_ROOT_STATE = {
 const DRIVE_LEVEL_STATE = {
   view: 'level', status: 'ready', error: null, saving: false,
   rootItems: [], rootHasMore: false,
-  items: [{ folderToken: 'fld-a1', name: '2026' }],
+  items: [{ folderToken: 'fld-a1', name: '2026', type: 'folder' }],
   itemsHasMore: false,
   crumbs: [{ folderToken: 'fld-a', title: '论文' }],
   selectedItem: null,
@@ -137,7 +138,7 @@ test('drive root：整行点击选中根目录行，保存按钮用根目录文�
   const picker = { select: (item) => calls.push(['select', item.folderToken]), open: (item) => calls.push(['open', item.folderToken]), getState: () => DRIVE_ROOT_STATE };
   renderDrivePicker(picker, DRIVE_ROOT_STATE, els, DRIVE_LABELS);
   const rows = findByClass(els.list, 'picker-row');
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 3);
   click(rows[0]);
   assert.deepEqual(calls, [['select', null]]);
   assert.equal(findByClass(rows[0], 'row-drill').length, 0, '根目录行不可下钻');
@@ -147,6 +148,25 @@ test('drive root：整行点击选中根目录行，保存按钮用根目录文�
   renderDrivePicker(picker, selected, els, DRIVE_LABELS);
   assert.equal(els.save.textContent, '存到根目录');
   assert.equal(els.save.disabled, false);
+});
+
+// 文件项置灰（review #66）：不绑点击、无下钻按钮，弱化样式类 + 📄 图标
+test('drive 文件行：置灰不可点、无下钻，hint 标注「文件」', () => {
+  const els = setup();
+  const calls = [];
+  const picker = { select: (item) => calls.push(['select', item.folderToken]), open: (item) => calls.push(['open', item.folderToken]), getState: () => DRIVE_ROOT_STATE };
+  renderDrivePicker(picker, DRIVE_ROOT_STATE, els, DRIVE_LABELS);
+  const rows = findByClass(els.list, 'picker-row');
+  const fileRow = rows[2];
+  assert.ok(fileRow.className.includes('file-row'), '文件行带弱化样式类');
+  assert.ok(!fileRow.className.includes('selectable'));
+  click(fileRow);
+  click(findByClass(fileRow, 'row-title')[0]);
+  assert.deepEqual(calls, [], '文件行点击不触发选中');
+  assert.equal(findByClass(fileRow, 'row-drill').length, 0, '文件行无下钻按钮');
+  assert.equal(findByClass(fileRow, 'row-title')[0].textContent, '📄 报告.pdf');
+  assert.equal(findByClass(fileRow, 'row-hint')[0].textContent, '文件');
+  assert.equal(findByClass(rows[1], 'row-hint')[0].textContent, '文件夹');
 });
 
 test('drive level：面包屑根层是「我的空间」；「进入 ›」只下钻不选中', () => {

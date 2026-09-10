@@ -52,7 +52,9 @@ export const CLEANUP_STATUS = Object.freeze({
 export const IMAGE_MODES = Object.freeze(['preview', 'download', 'off']);
 
 // 分块通道切块口径（#61/#68）：每块 4 MiB 原字节 base64 走 readJson（52 MiB 上限兼容）；
-// bytes 声明的 totalChunks 必须与此口径一致
+// bytes 声明的 totalChunks 必须与此口径一致。
+// 与 src/extension/background.js 的 PDF_CHUNK_BYTES 保持一致（SW 与 bridge 分属两个运行时，
+// 无法共享模块，修改须两边同步）
 export const PDF_CHUNK_BYTES = 4 * 1024 * 1024;
 
 const JOB_STATUSES = new Set(Object.values(JOB_STATUS));
@@ -60,32 +62,91 @@ const JOB_KINDS = new Set(Object.values(JOB_KIND));
 const FAILURE_STAGES = new Set(Object.values(FAILURE_STAGE));
 const CLEANUP_STATUSES = new Set(Object.values(CLEANUP_STATUS));
 
+// 按 kind 的策略表（review：submit/complete/fail 与 executor 分发处的 kind === PDF 三元收拢于此）：
+// 每种 kind 的初始状态、complete/fail 的终态补丁（含各自的前置校验），以及 executor 的
+// 消费者入口名。只查表，不引入类层次或插件机制；新增 kind 在这里补一行
+export const JOB_KIND_STRATEGY = Object.freeze({
+  [JOB_KIND.CLIP]: Object.freeze({
+    consumer: 'clip',
+    initialStatus: () => JOB_STATUS.QUEUED,
+    // clip 完成要求已建档；有警告落 succeeded_with_warnings
+    completePatch(job, { warnings }) {
+      if (!job.document) throw new Error('Cannot complete a clip attempt without a document');
+      return {
+        status: warnings.length > 0 ? JOB_STATUS.SUCCEEDED_WITH_WARNINGS : JOB_STATUS.SUCCEEDED,
+        step: JOB_STEP.DONE,
+        warnings: [...warnings],
+      };
+    },
+    failPatch(job, { stage, error, cleanup }) {
+      if (stage === FAILURE_STAGE.IMAGES && job.document) {
+        return { status: JOB_STATUS.SUCCEEDED_WITH_WARNINGS, warnings: [error] };
+      }
+      if (!job.document) return { status: JOB_STATUS.FAILED };
+      if (cleanup?.status === CLEANUP_STATUS.DELETED) {
+        return { status: JOB_STATUS.FAILED, document: null, cleanup: structuredClone(cleanup) };
+      }
+      return { status: JOB_STATUS.NEEDS_ATTENTION, cleanup: structuredClone(cleanup ?? { status: CLEANUP_STATUS.NOT_ATTEMPTED }) };
+    },
+  }),
+  [JOB_KIND.PDF]: Object.freeze({
+    consumer: 'pdf',
+    // bytes 型提交（#68）直接落 awaiting_bytes 等扩展分块回传；url 型落 queued 由 executor 下载
+    initialStatus: (pdfSource) => (pdfSource?.type === 'bytes' ? JOB_STATUS.AWAITING_BYTES : JOB_STATUS.QUEUED),
+    // pdf job 的 document 是上传产物 { fileToken, url }；上传歧义不走到这里（歧义按失败）
+    completePatch(job, { document }) {
+      if (!document?.url) throw new TypeError('pdf job completion requires the uploaded file (url)');
+      return { document: structuredClone(document), status: JOB_STATUS.SUCCEEDED };
+    },
+    // pdf 最小状态集（#60）：上传歧义一律按失败处理——同名复传合法并存、孤儿文件无害，
+    // 不做 reconciling/needs_attention/孤儿清理
+    failPatch: () => ({ status: JOB_STATUS.FAILED }),
+  }),
+});
+
+function kindStrategy(kind) {
+  return JOB_KIND_STRATEGY[JOB_KINDS.has(kind) ? kind : JOB_KIND.CLIP];
+}
+
 function jobKind(job) {
   return JOB_KINDS.has(job?.kind) ? job.kind : JOB_KIND.CLIP;
 }
 
 // pdfSource 两型（#60/#68）：url 型由 bridge 直接下载（撞 401/403 转 awaiting_bytes 回退）；
 // bytes 型由扩展持凭据抓取后分块回传，提交时声明文件名/总大小/总块数/SHA-256。
-// url 在 bytes 型里同样必填：既是扩展回传的抓取地址，也是幂等绑定键
-function normalizePdfSource(pdfSource) {
-  if (pdfSource?.type !== 'url' && pdfSource?.type !== 'bytes') throw new TypeError('pdfSource.type must be url or bytes');
+// url 在 bytes 型里同样必填：既是扩展回传的抓取地址，也是幂等绑定键。
+// 这是唯一一份校验实现（review：不再 server/store 各写一遍）：store 直接用，TypeError 上
+// 携带 code；server 层把 TypeError 按 code 翻译成 400 错误码。maxBytes 仅 server 传入
+// （bytes 声明的大小上限与 url 型下载同一档），store 层不重复设限
+export function normalizePdfSource(pdfSource, { maxBytes = null } = {}) {
+  const bad = (code, message) => Object.assign(new TypeError(message), { code });
+  if (pdfSource?.type !== 'url' && pdfSource?.type !== 'bytes') throw bad('PDF_SOURCE_REQUIRED', 'pdfSource.type must be url or bytes');
   let url;
-  try { url = new URL(pdfSource.url); } catch { throw new TypeError('pdfSource.url is not a valid URL'); }
+  try { url = new URL(pdfSource.url); } catch { throw bad('PDF_SOURCE_URL_REJECTED', 'pdfSource.url is not a valid URL'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-    throw new TypeError('pdfSource.url must be a credential-free http(s) URL');
+    throw bad('PDF_SOURCE_URL_REJECTED', 'pdfSource.url must be a credential-free http(s) URL');
   }
   const normalized = { type: pdfSource.type, url: url.href };
-  if (typeof pdfSource.name === 'string' && pdfSource.name) normalized.name = pdfSource.name.slice(0, 250);
-  if (Number.isInteger(pdfSource.sizeBytes) && pdfSource.sizeBytes > 0) normalized.sizeBytes = pdfSource.sizeBytes;
+  if (pdfSource.name !== undefined && pdfSource.name !== null) {
+    if (typeof pdfSource.name !== 'string' || pdfSource.name.length > 250) {
+      throw bad('PDF_SOURCE_INVALID', 'pdfSource.name must be a string of at most 250 chars');
+    }
+    if (pdfSource.name) normalized.name = pdfSource.name;
+  }
+  if (pdfSource.sizeBytes !== undefined && pdfSource.sizeBytes !== null) {
+    if (!Number.isInteger(pdfSource.sizeBytes) || pdfSource.sizeBytes <= 0) {
+      throw bad('PDF_SOURCE_INVALID', 'pdfSource.sizeBytes must be a positive integer');
+    }
+    normalized.sizeBytes = pdfSource.sizeBytes;
+  }
   if (pdfSource.type === 'bytes') {
     // bytes 声明是整验依据：文件名/总大小必填，总块数必须与 4 MiB 切块口径一致，SHA-256 小写 hex
-    if (!normalized.name) throw new TypeError('pdfSource.name is required for bytes');
-    if (!Number.isInteger(pdfSource.sizeBytes) || pdfSource.sizeBytes <= 0) {
-      throw new TypeError('pdfSource.sizeBytes must be a positive integer');
-    }
+    if (!normalized.name) throw bad('PDF_SOURCE_INVALID', 'pdfSource.name is required for bytes');
+    if (normalized.sizeBytes === undefined) throw bad('PDF_SOURCE_INVALID', 'pdfSource.sizeBytes must be a positive integer');
+    if (maxBytes !== null && normalized.sizeBytes > maxBytes) throw bad('PDF_SOURCE_TOO_LARGE', 'pdfSource.sizeBytes exceeds the limit');
     const totalChunks = Math.ceil(pdfSource.sizeBytes / PDF_CHUNK_BYTES);
-    if (pdfSource.totalChunks !== totalChunks) throw new TypeError('pdfSource.totalChunks does not match sizeBytes');
-    if (!/^[0-9a-f]{64}$/.test(pdfSource.sha256 || '')) throw new TypeError('pdfSource.sha256 must be 64 lowercase hex chars');
+    if (pdfSource.totalChunks !== totalChunks) throw bad('PDF_SOURCE_INVALID', 'pdfSource.totalChunks does not match sizeBytes');
+    if (!/^[0-9a-f]{64}$/.test(pdfSource.sha256 || '')) throw bad('PDF_SOURCE_INVALID', 'pdfSource.sha256 must be 64 lowercase hex chars');
     normalized.totalChunks = totalChunks;
     normalized.sha256 = pdfSource.sha256;
   }
@@ -143,7 +204,7 @@ export class PersistentJobStore {
         // 重试可能换了目录（用户在弹窗重选），folderToken 以本次提交为准。
         // bytes 型重试（#68）：以新声明为准并回落 awaiting_bytes，等扩展重新喂字节
         if (kind === JOB_KIND.PDF && existing.status === JOB_STATUS.FAILED) {
-          existing.status = normalizedPdfSource.type === 'bytes' ? JOB_STATUS.AWAITING_BYTES : JOB_STATUS.QUEUED;
+          existing.status = kindStrategy(kind).initialStatus(normalizedPdfSource);
           existing.pdfSource = normalizedPdfSource;
           existing.error = null;
           existing.workerId = null;
@@ -174,7 +235,8 @@ export class PersistentJobStore {
       if (kind === JOB_KIND.PDF) {
         // pdf job 用最小状态集（#60）：queued/awaiting_bytes/running/succeeded/failed/cancelled/expired，
         // 无 reconciling/needs_attention；字段形状与 clip 对齐（读取方不逐个判空）。
-        // bytes 型提交（#68）直接落 awaiting_bytes 等分块回传；url 型落 queued 由 executor 下载
+        // 初始状态按 kind 策略表：bytes 型提交（#68）直接落 awaiting_bytes 等分块回传；
+        // url 型落 queued 由 executor 下载
         const job = {
           jobId: this.#createJobId(),
           attemptId,
@@ -185,7 +247,7 @@ export class PersistentJobStore {
           folderToken: normalizedFolderToken,
           snapshot: null,
           destination: null,
-          status: normalizedPdfSource.type === 'bytes' ? JOB_STATUS.AWAITING_BYTES : JOB_STATUS.QUEUED,
+          status: kindStrategy(kind).initialStatus(normalizedPdfSource),
           step: null,
           document: null,
           warnings: [],
@@ -377,17 +439,8 @@ export class PersistentJobStore {
     return this.#mutate(async (data) => {
       const job = this.#findJob(data, attemptId, kind);
       this.#assertActiveWorker(job, workerId);
-      if (kind === JOB_KIND.PDF) {
-        // pdf job 的 document 是上传产物 { fileToken, url }；上传歧义不走到这里（歧义按失败）
-        if (!document?.url) throw new TypeError('pdf job completion requires the uploaded file (url)');
-        job.document = structuredClone(document);
-        job.status = JOB_STATUS.SUCCEEDED;
-      } else {
-        if (!job.document) throw new Error('Cannot complete a clip attempt without a document');
-        job.status = warnings.length > 0 ? JOB_STATUS.SUCCEEDED_WITH_WARNINGS : JOB_STATUS.SUCCEEDED;
-        job.step = JOB_STEP.DONE;
-        job.warnings = [...warnings];
-      }
+      // 终态判定按 kind 策略表（completePatch 内含各自的前置校验，先算补丁再落，避免半改状态）
+      Object.assign(job, kindStrategy(kind).completePatch(job, { warnings, document }));
       // 耗时埋点只在终态一次性落盘，避免执行期每追加一条就整本重写 jobs.json（内含大 snapshot）
       if (timeline) job.timeline = structuredClone(timeline);
       if (totalMs !== null) job.totalMs = totalMs;
@@ -408,24 +461,8 @@ export class PersistentJobStore {
       this.#assertActiveWorker(job, workerId);
       job.error = error;
       job.step = JOB_STEP.DONE;
-
-      if (kind === JOB_KIND.PDF) {
-        // pdf 最小状态集（#60）：上传歧义一律按失败处理——同名复传合法并存、孤儿文件无害，
-        // 不做 reconciling/needs_attention/孤儿清理
-        job.status = JOB_STATUS.FAILED;
-      } else if (stage === FAILURE_STAGE.IMAGES && job.document) {
-        job.status = JOB_STATUS.SUCCEEDED_WITH_WARNINGS;
-        job.warnings = [error];
-      } else if (!job.document) {
-        job.status = JOB_STATUS.FAILED;
-      } else if (cleanup?.status === CLEANUP_STATUS.DELETED) {
-        job.status = JOB_STATUS.FAILED;
-        job.document = null;
-        job.cleanup = structuredClone(cleanup);
-      } else {
-        job.status = JOB_STATUS.NEEDS_ATTENTION;
-        job.cleanup = structuredClone(cleanup ?? { status: CLEANUP_STATUS.NOT_ATTEMPTED });
-      }
+      // 失败后的状态归集按 kind 策略表（clip 按阶段/清理结果分流；pdf 恒 failed）
+      Object.assign(job, kindStrategy(kind).failPatch(job, { stage, error, cleanup }));
 
       this.#releaseLease(job);
       if (timeline) job.timeline = structuredClone(timeline);

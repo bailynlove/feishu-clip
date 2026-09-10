@@ -104,19 +104,21 @@ export class LarkClient {
     };
   }
 
-  // Drive 目录列举（#66，picker 用）：只回文件夹项。省略 folderToken 列根目录（我的空间）——
-  // 根目录模式不支持分页、一次返回全部（CLI 文档），故 --page-token 只在子目录分页时携带
-  async listDriveFolders({ folderToken, pageToken, pageSize = 50 } = {}) {
+  // Drive 目录列举（#66，picker 用）：返回全部子项（文件夹 + 文件），由 picker 侧把文件夹
+  // 做成可下钻/可选中、文件项置灰展示。省略 folderToken 列根目录（我的空间）——根目录模式
+  // 不支持分页、一次返回全部（#57 实测，见 research/drive-upload-facts 分支
+  // docs/research/drive-upload-facts.md「列举文件夹」节），故 --page-token 只在子目录分页时携带
+  async listDriveItems({ folderToken, pageToken, pageSize = 50 } = {}) {
     const args = ['drive', 'files', 'list', '--as', 'user', '--page-size', String(pageSize), '--format', 'json'];
     if (folderToken) args.push('--folder-token', folderToken);
     if (folderToken && pageToken) args.push('--page-token', pageToken);
     const result = await this.run(args);
     const data = result.data || {};
-    const folders = (data.files || data.items || [])
-      .filter((item) => item?.type === 'folder' && item.token)
-      .map((item) => ({ folderToken: item.token, name: item.name || item.token }));
+    const items = (data.files || data.items || [])
+      .filter((item) => item?.token)
+      .map((item) => ({ folderToken: item.token, name: item.name || item.token, type: item.type || null }));
     return {
-      folders,
+      items,
       hasMore: data.has_more === true,
       nextPageToken: data.has_more === true ? data.page_token || null : null,
     };
@@ -136,9 +138,10 @@ export class LarkClient {
 
   // Drive 原格式上传（#65，命令契约见 docs/research/drive-upload-facts.md）：
   // ≤20MB 一次性、>20MB CLI 自动分片；省略 folderToken 即根目录；同名复传合法并存。
-  // --file 只接受 cwd 下的相对路径（与图片 media-upload 同一约束），调用方须先落盘到 cwd
-  async uploadDriveFile({ fileName, name, folderToken, cwd, timeoutMs = 300_000 }) {
-    const args = ['drive', '+upload', '--as', 'user', '--file', fileName, '--name', name || fileName, '--format', 'json'];
+  // localFileName 是调用方落盘到 cwd 的相对文件名（--file 只接受 cwd 下的相对路径，
+  // 与图片 media-upload 同一约束）；displayName 是云盘展示名（--name，缺省回退 localFileName）
+  async uploadDriveFile({ localFileName, displayName, folderToken, cwd, timeoutMs = 300_000 }) {
+    const args = ['drive', '+upload', '--as', 'user', '--file', localFileName, '--name', displayName || localFileName, '--format', 'json'];
     if (folderToken) args.push('--folder-token', folderToken);
     const result = await this.run(args, { cwd, timeoutMs });
     const data = result.data || {};

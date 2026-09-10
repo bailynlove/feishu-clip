@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { LarkClient } from './lark.mjs';
 import { PairingStore } from './pairing.mjs';
-import { IMAGE_MODES, JOB_KIND, JOB_STATUS, PDF_CHUNK_BYTES, PersistentJobStore } from './job-store.mjs';
+import { IMAGE_MODES, JOB_KIND, JOB_STATUS, PDF_CHUNK_BYTES, PersistentJobStore, normalizePdfSource } from './job-store.mjs';
 import { PDF_LIMITS } from './image-policy.mjs';
 import { PdfChunkStaging } from './pdf-chunks.mjs';
 import { ClipExecutor } from './executor.mjs';
@@ -48,36 +48,19 @@ function validateSnapshot(snapshot) {
 }
 
 // pdfSource（#65/#68）：url 型由 bridge 直接下载；bytes 型由扩展持凭据抓取后分块回传，
-// 提交时声明文件名/总大小/总块数/SHA-256（#61）。name/sizeBytes 对 url 型是可选展示信息；
-// 校验失败直接 400
+// 提交时声明文件名/总大小/总块数/SHA-256（#61）。name/sizeBytes 对 url 型是可选展示信息。
+// 校验实现与 job-store 共享（normalizePdfSource 是唯一一份，review 起不再双写）；
+// 这里把 TypeError 按 code 翻译成 400，bytes 声明的大小上限与 url 型下载同一档（PDF_LIMITS.maxBytes）
 function validatePdfSource(value) {
-  const bad = (code) => Object.assign(new Error(code), { status: 400, code });
-  if (!value || typeof value !== 'object' || (value.type !== 'url' && value.type !== 'bytes')) throw bad('PDF_SOURCE_REQUIRED');
-  let url;
-  try { url = new URL(value.url); } catch { throw bad('PDF_SOURCE_URL_REJECTED'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw bad('PDF_SOURCE_URL_REJECTED');
-  const pdfSource = { type: value.type, url: url.href };
-  if (value.name !== undefined && value.name !== null) {
-    if (typeof value.name !== 'string' || value.name.length > 250) throw bad('PDF_SOURCE_INVALID');
-    pdfSource.name = value.name;
+  try {
+    return normalizePdfSource(value, { maxBytes: PDF_LIMITS.maxBytes });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      const code = error.code || 'PDF_SOURCE_INVALID';
+      throw Object.assign(new Error(code), { status: 400, code });
+    }
+    throw error;
   }
-  if (value.sizeBytes !== undefined && value.sizeBytes !== null) {
-    if (!Number.isInteger(value.sizeBytes) || value.sizeBytes <= 0) throw bad('PDF_SOURCE_INVALID');
-    pdfSource.sizeBytes = value.sizeBytes;
-  }
-  if (value.type === 'bytes') {
-    // bytes 声明是整验依据：文件名/总大小必填；总块数必须与 4 MiB 切块口径一致；
-    // 大小上限与 url 型下载同一档（PDF_LIMITS.maxBytes），SHA-256 为小写 hex
-    if (!pdfSource.name) throw bad('PDF_SOURCE_INVALID');
-    if (pdfSource.sizeBytes === undefined) throw bad('PDF_SOURCE_INVALID');
-    if (pdfSource.sizeBytes > PDF_LIMITS.maxBytes) throw bad('PDF_SOURCE_TOO_LARGE');
-    const totalChunks = Math.ceil(pdfSource.sizeBytes / PDF_CHUNK_BYTES);
-    if (value.totalChunks !== totalChunks) throw bad('PDF_SOURCE_INVALID');
-    if (!/^[0-9a-f]{64}$/.test(value.sha256 || '')) throw bad('PDF_SOURCE_INVALID');
-    pdfSource.totalChunks = totalChunks;
-    pdfSource.sha256 = value.sha256;
-  }
-  return pdfSource;
 }
 
 function jobView(job) {
@@ -132,10 +115,13 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
   const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}) });
   // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
   // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出。
-  // staging 清理（#68）：随 recoverExpired 的 expired 列表即时 discard，再按 mtime 扫超龄孤儿
+  // staging 清理（#68）：随 recoverExpired 的 expired 列表即时 discard，再按 mtime 扫超龄孤儿；
+  // cancelled 的 pdf job（cancel 无 HTTP 端点、store 层不碰文件系统）也在这里即时 discard，
+  // 不等超龄孤儿兜底
   const sweep = async () => {
     const recovered = await store.recoverExpired();
     for (const attemptId of recovered.expired) await staging.discard(attemptId).catch(() => {});
+    for (const job of await store.list({ statuses: [JOB_STATUS.CANCELLED] })) await staging.discardForJob(job).catch(() => {});
     await staging.sweep(config.jobTtlMs ?? 24 * 60 * 60 * 1_000).catch((error) => logger.error('staging sweep failed', error));
     await executor.reconcile();
     executor.kick();
@@ -223,14 +209,15 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         }
       }
 
-      // Drive 目录选择器端点族（#66）：省略 parentFolderToken 即根层「我的空间」，只返回文件夹项
+      // Drive 目录选择器端点族（#66）：省略 parentFolderToken 即根层「我的空间」；
+      // 返回全部子项——文件夹可下钻/选中，文件项由 picker 置灰展示（不可选不可下钻）
       if (request.method === 'GET' && request.url?.startsWith('/v1/drive/folders')) {
         const { pathname, cursor, limit, query } = parseTargetQuery(request, ['parentFolderToken', 'cursor', 'limit']);
         if (pathname !== '/v1/drive/folders') return send(response, 404, { ok: false, code: 'NOT_FOUND' }, origin);
         const parentFolderToken = query.get('parentFolderToken');
         if (parentFolderToken !== null && !WIKI_TOKEN.test(parentFolderToken)) return send(response, 400, { ok: false, code: 'TARGET_QUERY_INVALID', message: 'parentFolderToken 不合法' }, origin);
         try {
-          const result = await lark.listDriveFolders({ folderToken: parentFolderToken || undefined, pageToken: cursor, pageSize: limit });
+          const result = await lark.listDriveItems({ folderToken: parentFolderToken || undefined, pageToken: cursor, pageSize: limit });
           return send(response, 200, { ok: true, ...result }, origin);
         } catch (error) {
           const mapped = larkQueryError(error, '云盘目录');

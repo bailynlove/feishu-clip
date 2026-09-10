@@ -9,7 +9,7 @@ import {
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
 } from './options-state.js';
-import { resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDriveFolder, resolveImageMode, resolvePdfDrive } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -334,7 +334,7 @@ function closeDrivePicker() {
 function applyPdfDrive(saved) {
   if (!editingId || !saved) return;
   applyMutation(updatePreset(state, editingId, {
-    pdfDrive: { enabled: true, folderToken: saved.folderToken ?? null, folderName: saved.title ?? null },
+    pdfDrive: { enabled: true, ...createDriveFolder({ folderToken: saved.folderToken, folderName: saved.title }) },
   }));
   syncEditor();
   closeDrivePicker();
@@ -442,7 +442,7 @@ for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
 $('#f-pdf-drive').addEventListener('click', () => {
   const enabled = !(resolvePdfDrive(editingPreset())?.enabled === true);
   applyMutation(updatePreset(state, editingId, {
-    pdfDrive: enabled ? { enabled: true, folderToken: null, folderName: null } : null,
+    pdfDrive: enabled ? { enabled: true, ...createDriveFolder() } : null,
   }));
   syncEditor();
 });

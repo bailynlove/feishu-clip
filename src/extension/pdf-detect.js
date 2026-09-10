@@ -27,6 +27,8 @@
     const citationPdf = document.querySelector('meta[name="citation_pdf_url"]')?.getAttribute('content') ?? null;
     const pdf = detectMainPdf(location.href, citationPdf);
     if (!pdf) return { pdf: null };
+    // HEAD 取大小是 #59 定稿原型（prototype/popup-pdf-59 分支 variant-a）发现性入口的既定规格
+    // ——入口本就带大小展示，非 scope creep；拿不到（CORS/服务器不支持）显示「未知大小」
     let sizeBytes = null;
     try {
       const response = await fetch(pdf.url, { method: 'HEAD', credentials: 'same-origin' });

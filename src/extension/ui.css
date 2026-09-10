@@ -135,6 +135,7 @@
 .options #picker-panel .picker-list li+li{border-top:1px solid #eef1f6}
 .options #picker-panel .picker-row{padding:9px 12px;font-size:12.5px;border-radius:0}
 .options #picker-panel .picker-row:hover{background:var(--blue-soft)}
+.options #picker-panel .picker-row.file-row:hover{background:transparent}
 .options #picker-panel .picker-row.selected{background:var(--brand);box-shadow:inset 0 1px 2px rgba(255,255,255,.7);color:var(--brand-ink)}
 .options #picker-panel .picker-row.selected .row-hint{color:var(--brand-ink);opacity:.65}
 .options #picker-panel .picker-row .row-title{font-size:12.5px}
@@ -142,7 +143,7 @@
 .options #picker-panel .picker-actions{margin-top:8px}
 .options #picker-panel details{margin-top:10px}
 .options #picker-panel summary{font-size:12px}
-.current-target{margin:0 0 10px}.crumbs{margin:0 0 8px;font-size:13px}.crumbs .link{padding:0}.picker-status{min-height:18px;margin:4px 0;font-size:12px;color:var(--muted)}.picker-status.error-text{color:#962932}.picker-list{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.picker-list li+li{border-top:1px solid var(--line)}.picker-row{display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;border:0;background:transparent;text-align:left;cursor:pointer;font-size:13px}.picker-row:hover{background:#f0f4ff}.picker-row.selected{background:#e9f0ff;box-shadow:inset 3px 0 0 var(--blue)}.picker-row .row-title{flex:1;border:0;background:transparent;padding:0;text-align:left;font-size:13px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-hint{color:var(--muted);font-size:12px}.row-drill{white-space:nowrap}.picker-actions{display:flex;align-items:center;gap:10px;margin-top:10px}.picker-actions .primary{flex:1}details{margin-top:14px}summary{cursor:pointer;font-size:13px;font-weight:650}
+.current-target{margin:0 0 10px}.crumbs{margin:0 0 8px;font-size:13px}.crumbs .link{padding:0}.picker-status{min-height:18px;margin:4px 0;font-size:12px;color:var(--muted)}.picker-status.error-text{color:#962932}.picker-list{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}.picker-list li+li{border-top:1px solid var(--line)}.picker-row{display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;border:0;background:transparent;text-align:left;cursor:pointer;font-size:13px}.picker-row:hover{background:#f0f4ff}.picker-row.selected{background:#e9f0ff;box-shadow:inset 3px 0 0 var(--blue)}.picker-row .row-title{flex:1;border:0;background:transparent;padding:0;text-align:left;font-size:13px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-hint{color:var(--muted);font-size:12px}.row-drill{white-space:nowrap}.picker-row.file-row{cursor:default;opacity:.55}.picker-row.file-row:hover{background:transparent}.picker-row.file-row .row-title{cursor:default}.picker-actions{display:flex;align-items:center;gap:10px;margin-top:10px}.picker-actions .primary{flex:1}details{margin-top:14px}summary{cursor:pointer;font-size:13px;font-weight:650}
 
 /* ——— 弹窗（#24，C 版原型：动森薄荷绿 hero + 天空蓝果冻主按钮）。全部限定 .popup 作用域，不影响设置页 ——— */
 .popup{--brand:#7fe3bd;--brand-2:#5fd4ec;--brand-soft:rgba(127,227,189,.14);--brand-line:rgba(127,227,189,.45);--brand-ink:#0b3b36;--brand-deep:#0f766e}
@@ -242,6 +243,7 @@
 .popup .picker-row{padding:0}
 .popup .picker-row .row-title{padding:10px 12px;min-height:38px;display:flex;align-items:center}
 .popup .picker-row:hover{background:var(--brand-soft)}
+.popup .picker-row.file-row:hover{background:transparent}
 .popup .picker-row.selected{background:var(--brand-soft);box-shadow:inset 3px 0 0 var(--brand-deep)}
 /* 修复 #40 验收 bug：.hidden{display:none}（0,1,0）压不过 .popup 作用域组件的 display 规则
    （0,2,0），导致命名条/命中提示/折叠区常驻显示。popup 内统一加 important 兜底 */

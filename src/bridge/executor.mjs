@@ -2,7 +2,7 @@ import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { FAILURE_STAGE, IMAGE_MODES, JOB_KIND, JOB_STATUS } from './job-store.mjs';
+import { FAILURE_STAGE, IMAGE_MODES, JOB_KIND, JOB_KIND_STRATEGY, JOB_STATUS } from './job-store.mjs';
 import { downloadPublicImage, downloadPublicPdf, IMAGE_LIMITS, PDF_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
 
 // 尝试标记：写在元信息引用块里（prepareMarkdown），reconcile 靠它在 wiki 里反查认领文档
@@ -167,6 +167,11 @@ export class ClipExecutor {
     this.staging = staging;
     this.running = false;
     this.reconcileRunning = false;
+    // 消费者入口按 kind 策略表分发（review：不再写 kind === PDF 三元）；未知 kind 兜底 clip
+    this.consumers = {
+      clip: (job) => this.#execute(job),
+      pdf: (job) => this.#executePdf(job),
+    };
   }
 
   kick() {
@@ -182,8 +187,8 @@ export class ClipExecutor {
     for (;;) {
       const [job] = await this.store.list({ statuses: [JOB_STATUS.QUEUED] });
       if (!job) return;
-      const execute = job.kind === JOB_KIND.PDF ? () => this.#executePdf(job) : () => this.#execute(job);
-      await execute().catch((error) => this.logger.error('clip worker failed', error));
+      const strategy = JOB_KIND_STRATEGY[job.kind] ?? JOB_KIND_STRATEGY[JOB_KIND.CLIP];
+      await this.consumers[strategy.consumer](job).catch((error) => this.logger.error('clip worker failed', error));
     }
   }
 
@@ -216,8 +221,8 @@ export class ClipExecutor {
       }
       const uploadAt = Date.now();
       const uploaded = await this.lark.uploadDriveFile({
-        fileName: name,
-        name,
+        localFileName: name, // cwd 下落盘的相对文件名（--file 约束）
+        displayName: name, // 云盘展示名
         folderToken: job.folderToken ?? null, // #66：picker/弹窗选定的目录；null 走根目录
         cwd: scratch,
       });

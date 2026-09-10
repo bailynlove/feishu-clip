@@ -351,7 +351,7 @@ const ATTEMPT_BYTES = '51515151-5151-4511-8511-515151515151';
 const ATTEMPT_MISMATCH = '52525252-5252-4522-8522-525252525252';
 const ATTEMPT_FALLBACK = '53535353-5353-4533-8533-535353535353';
 
-async function bootBridge({ downloadPdf, uploads } = {}) {
+async function bootBridge({ downloadPdf, uploads, sweepIntervalMs } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-chunks-'));
   const pairingFile = path.join(directory, 'pairing.json');
   const code = 'chunks-pairing-code';
@@ -362,8 +362,8 @@ async function bootBridge({ downloadPdf, uploads } = {}) {
     uploadDriveFile: async (options) => { uploads?.push(options); return { fileToken: 'ft-x', url: 'https://example.feishu.cn/file/ft-x' }; },
     run: async () => ({ ok: true, data: {} }),
   };
-  const { server } = await createBridge({
-    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+  const { server, store } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json'), ...(sweepIntervalMs ? { sweepIntervalMs } : {}) },
     lark: fakeLark,
     logger: { error() {}, log() {} },
     ...(downloadPdf ? { downloadPdf } : {}),
@@ -396,8 +396,35 @@ async function bootBridge({ downloadPdf, uploads } = {}) {
     }
     return (await readdir(stagingDir).catch(() => [])).filter((entry) => entry.startsWith(attemptId));
   };
-  return { directory, server, call, readPdfJob, waitFor, waitStagingGone };
+  return { directory, server, store, call, readPdfJob, waitFor, waitStagingGone };
 }
+
+// cancel 路径 staging 清理（review #68）：cancel 无 HTTP 端点（store 层不碰文件系统），
+// cancelled 的 pdf job 由周期 sweep 经 staging.discardForJob 即时清理，不等超龄孤儿兜底
+test('cancelled 的 pdf job：未喂齐的 staging 由周期 sweep 即时清理', async () => {
+  const attemptId = '54545454-5454-4544-8544-545454545454';
+  const { directory, server, store, call, waitStagingGone } = await bootBridge({ sweepIntervalMs: 20 });
+  const stagingDir = path.join(directory, 'staging');
+  try {
+    const sizeBytes = PDF_CHUNK_BYTES + 64;
+    const submitted = await call('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId, pdfSource: { type: 'bytes', url: 'https://pub.example.com/c.pdf', name: 'c.pdf', sizeBytes, totalChunks: 2, sha256: 'b'.repeat(64) } }),
+    });
+    assert.equal(submitted.status, 202);
+    // 喂一块（共两块，未齐）→ staging 落盘在 awaiting_bytes
+    const fed = await call(`/v1/jobs/${attemptId}/pdf-chunks`, { method: 'POST', body: JSON.stringify({ index: 0, totalChunks: 2, dataBase64: randomBytes(PDF_CHUNK_BYTES).toString('base64') }) });
+    assert.equal(fed.status, 200);
+    assert.ok((await readdir(stagingDir)).some((entry) => entry.startsWith(attemptId)), 'staging 已落盘');
+
+    const cancelled = await store.cancel(attemptId, 'pdf');
+    assert.equal(cancelled.status, 'cancelled', 'awaiting_bytes 可直接取消');
+    assert.deepEqual(await waitStagingGone(attemptId), [], 'cancelled 后 staging 由周期 sweep 即时清理');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('分块通道端到端：bytes 提交 → 位图续传 → 整验 → succeeded；hash 不匹配拒收', async () => {
   const uploads = [];
@@ -441,7 +468,7 @@ test('分块通道端到端：bytes 提交 → 位图续传 → 整验 → succe
     assert.equal(done.status, 'succeeded');
     assert.equal(done.document.url, 'https://example.feishu.cn/file/ft-x');
     assert.equal(uploads.length, 1);
-    assert.equal(uploads[0].fileName, 'Paper.pdf', '文件名 = 标题渲染结果 + .pdf');
+    assert.equal(uploads[0].localFileName, 'Paper.pdf', '落盘文件名 = 标题渲染结果 + .pdf');
     assert.deepEqual(await waitStagingGone(ATTEMPT_BYTES), [], '终态后 staging 无残留');
 
     // hash 不匹配：拒收、job failed、staging 清理、不产生云盘文件
@@ -522,7 +549,7 @@ test('凭据回退全链路：url 型 403 → awaiting_bytes → 声明升级 �
     assert.equal(done.status, 'succeeded');
     assert.equal(downloads, 1, 'bytes 路径不再走 URL 下载');
     assert.equal(uploads.length, 1);
-    assert.equal(uploads[0].fileName, 'Paywalled Paper.pdf', '文件名仍取标题渲染结果');
+    assert.equal(uploads[0].localFileName, 'Paywalled Paper.pdf', '落盘文件名仍取标题渲染结果');
     assert.deepEqual(await waitStagingGone(ATTEMPT_FALLBACK), [], '终态后 staging 无残留');
   } finally {
     await new Promise((resolve) => server.close(resolve));
