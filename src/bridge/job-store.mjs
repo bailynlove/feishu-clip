@@ -6,6 +6,8 @@ const EMPTY_STORE = Object.freeze({ version: 1, jobs: [] });
 
 export const JOB_STATUS = Object.freeze({
   QUEUED: 'queued',
+  // 凭据回退（#68）：url 型下载撞 401/403 或 bytes 型提交后，等扩展分块回传字节
+  AWAITING_BYTES: 'awaiting_bytes',
   RUNNING: 'running',
   RECONCILING: 'reconciling',
   CANCEL_PENDING_RECONCILIATION: 'cancel_pending_reconciliation',
@@ -49,6 +51,10 @@ export const CLEANUP_STATUS = Object.freeze({
 // 图片写入模式（#53）：preview 预览优先 / download 下载优先 / off 不保存
 export const IMAGE_MODES = Object.freeze(['preview', 'download', 'off']);
 
+// 分块通道切块口径（#61/#68）：每块 4 MiB 原字节 base64 走 readJson（52 MiB 上限兼容）；
+// bytes 声明的 totalChunks 必须与此口径一致
+export const PDF_CHUNK_BYTES = 4 * 1024 * 1024;
+
 const JOB_STATUSES = new Set(Object.values(JOB_STATUS));
 const JOB_KINDS = new Set(Object.values(JOB_KIND));
 const FAILURE_STAGES = new Set(Object.values(FAILURE_STAGE));
@@ -58,17 +64,31 @@ function jobKind(job) {
   return JOB_KINDS.has(job?.kind) ? job.kind : JOB_KIND.CLIP;
 }
 
-// pdfSource 只接受 url 型（bytes 型凭据通道归 #61）；name/sizeBytes 仅作展示与兜底命名
+// pdfSource 两型（#60/#68）：url 型由 bridge 直接下载（撞 401/403 转 awaiting_bytes 回退）；
+// bytes 型由扩展持凭据抓取后分块回传，提交时声明文件名/总大小/总块数/SHA-256。
+// url 在 bytes 型里同样必填：既是扩展回传的抓取地址，也是幂等绑定键
 function normalizePdfSource(pdfSource) {
-  if (pdfSource?.type !== 'url') throw new TypeError('pdfSource.type must be url');
+  if (pdfSource?.type !== 'url' && pdfSource?.type !== 'bytes') throw new TypeError('pdfSource.type must be url or bytes');
   let url;
   try { url = new URL(pdfSource.url); } catch { throw new TypeError('pdfSource.url is not a valid URL'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new TypeError('pdfSource.url must be a credential-free http(s) URL');
   }
-  const normalized = { type: 'url', url: url.href };
+  const normalized = { type: pdfSource.type, url: url.href };
   if (typeof pdfSource.name === 'string' && pdfSource.name) normalized.name = pdfSource.name.slice(0, 250);
   if (Number.isInteger(pdfSource.sizeBytes) && pdfSource.sizeBytes > 0) normalized.sizeBytes = pdfSource.sizeBytes;
+  if (pdfSource.type === 'bytes') {
+    // bytes 声明是整验依据：文件名/总大小必填，总块数必须与 4 MiB 切块口径一致，SHA-256 小写 hex
+    if (!normalized.name) throw new TypeError('pdfSource.name is required for bytes');
+    if (!Number.isInteger(pdfSource.sizeBytes) || pdfSource.sizeBytes <= 0) {
+      throw new TypeError('pdfSource.sizeBytes must be a positive integer');
+    }
+    const totalChunks = Math.ceil(pdfSource.sizeBytes / PDF_CHUNK_BYTES);
+    if (pdfSource.totalChunks !== totalChunks) throw new TypeError('pdfSource.totalChunks does not match sizeBytes');
+    if (!/^[0-9a-f]{64}$/.test(pdfSource.sha256 || '')) throw new TypeError('pdfSource.sha256 must be 64 lowercase hex chars');
+    normalized.totalChunks = totalChunks;
+    normalized.sha256 = pdfSource.sha256;
+  }
   return normalized;
 }
 
@@ -120,9 +140,11 @@ export class PersistentJobStore {
         }
         // pdf 失败重试（#65 弹窗「重试 PDF」）：终态 failed 的 pdf job 被同键重新提交时
         // 复位重排队，幂等复用同一 job 记录；clip 侧维持原语义（终态重发不复活）。
-        // 重试可能换了目录（用户在弹窗重选），folderToken 以本次提交为准
+        // 重试可能换了目录（用户在弹窗重选），folderToken 以本次提交为准。
+        // bytes 型重试（#68）：以新声明为准并回落 awaiting_bytes，等扩展重新喂字节
         if (kind === JOB_KIND.PDF && existing.status === JOB_STATUS.FAILED) {
-          existing.status = JOB_STATUS.QUEUED;
+          existing.status = normalizedPdfSource.type === 'bytes' ? JOB_STATUS.AWAITING_BYTES : JOB_STATUS.QUEUED;
+          existing.pdfSource = normalizedPdfSource;
           existing.error = null;
           existing.workerId = null;
           existing.leaseExpiresAt = null;
@@ -131,13 +153,28 @@ export class PersistentJobStore {
           existing.updatedAt = this.#now();
           return { result: { created: false, retried: true, job: structuredClone(existing) }, changed: true };
         }
+        // 凭据回退升级（#68）：url 型撞 401/403 转 awaiting_bytes 后，扩展补交 bytes 声明
+        // （同 url 绑定，上面的 url 校验已拦下异源）。声明一旦落库即粘滞：同 sha 幂等，
+        // 异 sha 拒绝——源站内容变了应让任务失败后重来，不在中途换声明使已收块失效
+        if (kind === JOB_KIND.PDF && existing.status === JOB_STATUS.AWAITING_BYTES
+          && existing.pdfSource.type === 'url' && normalizedPdfSource.type === 'bytes') {
+          existing.pdfSource = normalizedPdfSource;
+          existing.updatedAt = this.#now();
+          return { result: { created: false, upgraded: true, job: structuredClone(existing) }, changed: true };
+        }
+        if (kind === JOB_KIND.PDF && existing.status === JOB_STATUS.AWAITING_BYTES
+          && existing.pdfSource.type === 'bytes' && normalizedPdfSource.type === 'bytes'
+          && existing.pdfSource.sha256 !== normalizedPdfSource.sha256) {
+          throw new Error(`attemptId ${attemptId} is already bound to another pdf source`);
+        }
         return { result: { created: false, job: structuredClone(existing) }, changed: false };
       }
 
       const timestamp = this.#now();
       if (kind === JOB_KIND.PDF) {
-        // pdf job 用最小状态集 queued/running/succeeded/failed/cancelled/expired（#60），
-        // 无 reconciling/needs_attention；字段形状与 clip 对齐（读取方不逐个判空）
+        // pdf job 用最小状态集（#60）：queued/awaiting_bytes/running/succeeded/failed/cancelled/expired，
+        // 无 reconciling/needs_attention；字段形状与 clip 对齐（读取方不逐个判空）。
+        // bytes 型提交（#68）直接落 awaiting_bytes 等分块回传；url 型落 queued 由 executor 下载
         const job = {
           jobId: this.#createJobId(),
           attemptId,
@@ -148,7 +185,7 @@ export class PersistentJobStore {
           folderToken: normalizedFolderToken,
           snapshot: null,
           destination: null,
-          status: JOB_STATUS.QUEUED,
+          status: normalizedPdfSource.type === 'bytes' ? JOB_STATUS.AWAITING_BYTES : JOB_STATUS.QUEUED,
           step: null,
           document: null,
           warnings: [],
@@ -325,7 +362,7 @@ export class PersistentJobStore {
         job.updatedAt = timestamp;
         return { result: structuredClone(job), changed: true };
       }
-      if (job.status !== JOB_STATUS.QUEUED && job.status !== JOB_STATUS.RUNNING) {
+      if (job.status !== JOB_STATUS.QUEUED && job.status !== JOB_STATUS.RUNNING && job.status !== JOB_STATUS.AWAITING_BYTES) {
         throw new Error(`Cannot cancel job in ${job.status} state`);
       }
       job.status = job.document ? JOB_STATUS.CANCELLED_WITH_DOCUMENT : JOB_STATUS.CANCELLED;
@@ -398,6 +435,45 @@ export class PersistentJobStore {
     });
   }
 
+  // ——— 凭据回退（#68）：awaiting_bytes 的三个流转 ———
+
+  // url 型下载撞 401/403：不 fail，转 awaiting_bytes 等扩展持凭据分块回传
+  async awaitBytes(attemptId, workerId) {
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      this.#assertActiveWorker(job, workerId);
+      job.status = JOB_STATUS.AWAITING_BYTES;
+      this.#releaseLease(job);
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
+  // 分块全部到齐且 SHA-256 整验通过 → 重排队，executor 拾取后走 staging 字节上传
+  async markBytesReady(attemptId) {
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      if (job.status !== JOB_STATUS.AWAITING_BYTES) throw new Error(`Cannot mark bytes ready in ${job.status} state`);
+      job.status = JOB_STATUS.QUEUED;
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
+  // 整验失败（SHA-256/大小不匹配）→ failed；staging 清理由调用方负责
+  async failBytes(attemptId, error) {
+    if (!error) throw new TypeError('error is required');
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      if (job.status !== JOB_STATUS.AWAITING_BYTES) throw new Error(`Cannot fail awaiting-bytes job in ${job.status} state`);
+      job.status = JOB_STATUS.FAILED;
+      job.error = error;
+      job.step = JOB_STEP.DONE;
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
   async recoverExpired() {
     return this.#mutate(async (data) => {
       const timestamp = this.#now();
@@ -426,7 +502,13 @@ export class PersistentJobStore {
         }
 
         const stale = timestamp - job.updatedAt >= this.#jobTtlMs;
-        if (job.status === JOB_STATUS.QUEUED && stale) {
+        // awaiting_bytes 超龄（#68）：字节始终没喂齐，走 job TTL → expired；
+        // staging 残留由调用方（sweep）按返回的 expired 列表清理
+        if (job.status === JOB_STATUS.AWAITING_BYTES && stale) {
+          job.status = JOB_STATUS.EXPIRED;
+          job.updatedAt = timestamp;
+          expired.push(job.attemptId);
+        } else if (job.status === JOB_STATUS.QUEUED && stale) {
           if (job.document) {
             job.status = JOB_STATUS.NEEDS_ATTENTION;
             job.error = 'Queued job expired after a document was created';

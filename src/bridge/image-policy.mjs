@@ -153,7 +153,8 @@ export function requestPublicBytes(url, record, { accept, maxBytes, label, timeo
       }
       if (response.statusCode !== 200) {
         response.resume();
-        reject(Object.assign(new Error(`${label}_HTTP_${response.statusCode}`), { code: `${label}_FETCH_FAILED` }));
+        // statusCode 透传给调用方：pdf 下载撞 401/403 要转凭据回退（awaiting_bytes，#68）而非失败
+        reject(Object.assign(new Error(`${label}_HTTP_${response.statusCode}`), { code: `${label}_FETCH_FAILED`, statusCode: response.statusCode }));
         return;
       }
       const advertised = Number(response.headers['content-length'] || 0);

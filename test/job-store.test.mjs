@@ -409,17 +409,28 @@ test('同一 attemptId 下 clip 与 pdf job 各自独立，get 不带 kind 返�
   });
 });
 
-test('pdf job 提交校验：只接受 url 型、http(s) 无凭据', async () => {
+test('pdf job 提交校验：url/bytes 两型，http(s) 无凭据；bytes 声明必填且自洽', async () => {
   await withStore(async ({ store }) => {
     const submit = (pdfSource) => store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource });
     await assert.rejects(() => submit(null), /pdfSource.type/);
-    await assert.rejects(() => submit({ type: 'bytes', url: 'https://example.test/x.pdf' }), /pdfSource.type/);
     await assert.rejects(() => submit({ type: 'url', url: 'not-a-url' }), /valid URL/);
     await assert.rejects(() => submit({ type: 'url', url: 'ftp://example.test/x.pdf' }), /credential-free/);
     await assert.rejects(() => submit({ type: 'url', url: 'https://user:pass@example.test/x.pdf' }), /credential-free/);
     const ok = await submit({ type: 'url', url: 'https://example.test/x.pdf', name: 'x'.repeat(300), sizeBytes: 42 });
     assert.equal(ok.job.pdfSource.name.length, 250, 'name 截断到 250 字符');
     assert.equal(ok.job.pdfSource.sizeBytes, 42);
+
+    // bytes 型（#68）：文件名/总大小/总块数/SHA-256 必填，totalChunks 必须按 4 MiB 口径自洽
+    const submitBytes = (pdfSource) => store.submit({ attemptId: 'attempt-bytes', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource });
+    const bytes = { type: 'bytes', url: 'https://example.test/x.pdf', name: 'x.pdf', sizeBytes: 5 * 1024 * 1024, totalChunks: 2, sha256: 'a'.repeat(64) };
+    await assert.rejects(() => submitBytes({ type: 'bytes', url: 'https://example.test/x.pdf' }), /name is required/);
+    await assert.rejects(() => submitBytes({ ...bytes, totalChunks: 3 }), /totalChunks does not match/);
+    await assert.rejects(() => submitBytes({ ...bytes, sha256: 'A'.repeat(64) }), /sha256 must be 64 lowercase hex/);
+    await assert.rejects(() => submitBytes({ ...bytes, url: 'ftp://example.test/x.pdf' }), /credential-free/);
+    await assert.rejects(() => submitBytes({ ...bytes, sizeBytes: 0 }), /sizeBytes must be a positive integer/);
+    const accepted = await submitBytes(bytes);
+    assert.equal(accepted.job.status, 'awaiting_bytes', 'bytes 型提交直接落 awaiting_bytes');
+    assert.deepEqual(accepted.job.pdfSource, bytes, '声明随 job 落库（url 保留为抓取地址与绑定键）');
   });
 });
 
@@ -534,4 +545,110 @@ test('存量无 kind 字段的 job 读取时按 clip 迁移', async () => {
     await reloaded.recordDocument('attempt-1', 'worker-a', { documentId: 'd1', url: 'https://example.test/d1' });
     assert.equal((await reloaded.complete('attempt-1', 'worker-a')).status, 'succeeded');
   });
+});
+
+// ——— 凭据回退（#68）：awaiting_bytes 流转 ———
+
+const BYTES_SOURCE = { type: 'bytes', url: 'https://example.test/x.pdf', name: 'x.pdf', sizeBytes: 5 * 1024 * 1024, totalChunks: 2, sha256: 'b'.repeat(64) };
+
+test('url 型下载撞 401/403：awaitBytes 从 running 转 awaiting_bytes，不 fail', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    await store.claim('attempt-1', 'worker-a', 'pdf');
+    const awaiting = await store.awaitBytes('attempt-1', 'worker-a');
+    assert.equal(awaiting.status, 'awaiting_bytes');
+    assert.equal(awaiting.workerId, null, '释放租约');
+    assert.equal(awaiting.error, null, '不是失败');
+
+    // 非活跃 worker 不得转；非 running 状态不得转
+    await assert.rejects(() => store.awaitBytes('attempt-1', 'worker-a'), /active worker/);
+  });
+});
+
+test('markBytesReady / failBytes：只对 awaiting_bytes 生效', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    await assert.rejects(() => store.markBytesReady('attempt-1'), /queued/, 'queued 态不得标记字节就绪');
+    await assert.rejects(() => store.failBytes('attempt-1', 'boom'), /queued/);
+
+    await store.claim('attempt-1', 'worker-a', 'pdf');
+    await store.awaitBytes('attempt-1', 'worker-a');
+    const ready = await store.markBytesReady('attempt-1');
+    assert.equal(ready.status, 'queued', '整验通过后重排队等 executor 拾取');
+    // 重排队后可正常 claim → complete
+    await store.claim('attempt-1', 'worker-b', 'pdf');
+    assert.equal((await store.complete('attempt-1', 'worker-b', { document: { fileToken: 'f', url: 'https://u' } }, 'pdf')).status, 'succeeded');
+
+    // hash 不匹配 → failed
+    await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    const failed = await store.failBytes('attempt-2', 'PDF 字节校验失败（SHA-256 不匹配），已拒绝接收');
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error, /SHA-256/);
+    await assert.rejects(() => store.failBytes('attempt-2', 'again'), /failed/, '终态不得重复 failBytes');
+  });
+});
+
+test('凭据回退升级：url 型 awaiting_bytes 同 url 补交 bytes 声明；声明粘滞，异 sha 拒绝', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    // queued 态不允许直接升级（必须先由 executor 撞 401/403 转 awaiting_bytes）
+    const early = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: { ...BYTES_SOURCE, url: PDF_SOURCE.url } });
+    assert.equal(early.upgraded, undefined);
+    assert.equal(early.job.status, 'queued', '未进 awaiting_bytes 前 bytes 声明不生效');
+
+    await store.claim('attempt-1', 'worker-a', 'pdf');
+    await store.awaitBytes('attempt-1', 'worker-a');
+    const declaration = { ...BYTES_SOURCE, url: PDF_SOURCE.url };
+    const upgraded = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: declaration });
+    assert.equal(upgraded.upgraded, true, 'url 型 awaiting_bytes + 同 url bytes 声明 → 升级');
+    assert.equal(upgraded.job.status, 'awaiting_bytes', '升级后仍等字节');
+    assert.equal(upgraded.job.pdfSource.type, 'bytes');
+    assert.equal(upgraded.job.pdfSource.sha256, declaration.sha256);
+
+    // 同声明重复提交幂等；url 型重复提交（弹窗重试路径）也不动声明
+    const again = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: declaration });
+    assert.equal(again.created, false);
+    assert.equal(again.upgraded, undefined);
+    const urlAgain = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    assert.equal(urlAgain.job.pdfSource.type, 'bytes', '声明粘滞不被 url 型重提覆盖');
+
+    // 异 sha 声明拒绝（源站内容变了应让任务失败后重来，不中途换声明）
+    await assert.rejects(
+      () => store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: { ...declaration, sha256: 'c'.repeat(64) } }),
+      /another pdf source/,
+    );
+    // 异 url 声明同样拒绝（绑定校验先于升级分支）
+    await assert.rejects(
+      () => store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: { ...declaration, url: 'https://example.test/other.pdf' } }),
+      /another pdf source/,
+    );
+  });
+});
+
+test('failed 的 bytes 型 pdf job 重提交：复位 awaiting_bytes 并以新声明为准', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    await store.failBytes('attempt-1', 'hash mismatch');
+    const retryDeclaration = { ...BYTES_SOURCE, sha256: 'd'.repeat(64) };
+    const retried = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: retryDeclaration });
+    assert.equal(retried.retried, true);
+    assert.equal(retried.job.status, 'awaiting_bytes', 'bytes 重试回落 awaiting_bytes 等重新喂字节');
+    assert.equal(retried.job.pdfSource.sha256, retryDeclaration.sha256, '以新声明为准');
+    assert.equal(retried.job.error, null);
+  });
+});
+
+test('awaiting_bytes 可取消；超龄走 job TTL → expired', async () => {
+  let now = 1_000;
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-cancel', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    const cancelled = await store.cancel('attempt-cancel', 'pdf');
+    assert.equal(cancelled.status, 'cancelled', 'awaiting_bytes 可直接取消');
+
+    await store.submit({ attemptId: 'attempt-stale', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    now = 1_000 + 10_001;
+    const recovered = await store.recoverExpired();
+    assert.deepEqual(recovered.expired, ['attempt-stale'], 'awaiting_bytes 超龄 → expired');
+    assert.equal((await store.get('attempt-stale', 'pdf')).status, 'expired');
+  }, { now: () => now, jobTtlMs: 10_000 });
 });

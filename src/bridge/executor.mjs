@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -44,6 +44,12 @@ function pdfErrorMessage(error) {
   if (error?.code === 'PDF_TYPE_REJECTED') return '下载到的内容不是 PDF 文件';
   if (error?.code === 'PDF_SSRF_REJECTED') return 'PDF 地址不安全，已拒绝下载';
   return error?.message || 'PDF 上传失败';
+}
+
+// 凭据回退判定（#68）：url 型下载撞 401/403 不算失败，转 awaiting_bytes 等扩展分块回传。
+// statusCode 由 image-policy 在 HTTP 非 200 错误上携带
+function needsCredentialFallback(error) {
+  return error?.code === 'PDF_FETCH_FAILED' && (error.statusCode === 401 || error.statusCode === 403);
 }
 
 function escapeMarkdown(value) {
@@ -151,12 +157,14 @@ function isServerTimeout(error) {
 }
 
 export class ClipExecutor {
-  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf }) {
+  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, staging = null }) {
     this.store = store;
     this.lark = lark;
     this.logger = logger;
     // pdf 下载函数可注入（测试 stub；生产默认走 image-policy 的 SSRF 校验下载）
     this.downloadPdf = downloadPdf;
+    // 分块暂存（#68）：bytes 型 pdf job 的字节来源；null 时 bytes 路径不可用（仅测试场景）
+    this.staging = staging;
     this.running = false;
     this.reconcileRunning = false;
   }
@@ -179,23 +187,33 @@ export class ClipExecutor {
     }
   }
 
-  // pdf job 消费者（#65）：按 pdfSource.url 下载（image-policy 的 SSRF/逐跳校验 + 100 MiB 硬上限），
-  // 落到任务目录后经 lark-cli drive +upload 原格式上传云盘；job.folderToken（#66）是 picker/
+  // pdf job 消费者（#65）：url 型按 pdfSource.url 下载（image-policy 的 SSRF/逐跳校验 +
+  // 100 MiB 硬上限）；bytes 型（#68 凭据回退）字节已在 staging 整验过，复制进任务目录即可。
+  // 落盘后都经 lark-cli drive +upload 原格式上传云盘；job.folderToken（#66）是 picker/
   // 弹窗选定的目标目录，null 即根目录（省略 --folder-token）。
-  // 上传歧义一律按失败处理（#60）：不查重不 reconcile——同名复传合法并存、孤儿文件无害（#57 实测）
+  // 上传歧义一律按失败处理（#60）：不查重不 reconcile——同名复传合法并存、孤儿文件无害（#57 实测）。
+  // 唯一例外：url 型下载撞 401/403 不 fail，转 awaiting_bytes 等扩展持凭据分块回传（#68）
   async #executePdf(job) {
     const workerId = randomUUID();
     await this.store.claim(job.attemptId, workerId, JOB_KIND.PDF);
     const scratch = await mkdtemp(path.join(tmpdir(), 'feishu-clip-pdf-'));
+    const isBytes = job.pdfSource?.type === 'bytes';
     const startedAt = Date.now();
     const timeline = [];
     const timing = () => ({ timeline, totalMs: Date.now() - startedAt });
     try {
       const name = pdfFileName({ title: job.title, url: job.pdfSource.url, fallback: job.pdfSource.name });
-      const downloadAt = Date.now();
-      const fetched = await this.downloadPdf(job.pdfSource.url);
-      timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
-      await writeFile(path.join(scratch, name), fetched.buffer);
+      if (isBytes) {
+        // staging 文件已按声明整验（size + SHA-256）；复制成正式文件名供 lark-cli 相对路径上传
+        const stageAt = Date.now();
+        await copyFile(this.staging.filePath(job.attemptId), path.join(scratch, name));
+        timeline.push({ kind: 'stage', name: 'pdf_staging', ms: Date.now() - stageAt });
+      } else {
+        const downloadAt = Date.now();
+        const fetched = await this.downloadPdf(job.pdfSource.url);
+        timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
+        await writeFile(path.join(scratch, name), fetched.buffer);
+      }
       const uploadAt = Date.now();
       const uploaded = await this.lark.uploadDriveFile({
         fileName: name,
@@ -208,11 +226,21 @@ export class ClipExecutor {
     } catch (error) {
       const current = await this.store.get(job.attemptId, JOB_KIND.PDF);
       if (current?.status === JOB_STATUS.RUNNING && current.workerId === workerId) {
-        await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF);
+        if (!isBytes && needsCredentialFallback(error)) {
+          // 401/403（付费墙等）：不 fail，转 awaiting_bytes，弹窗轮询看到后经 SW 喂字节（#68）
+          await this.store.awaitBytes(job.attemptId, workerId);
+          this.logger.log?.('pdf download requires credentials, awaiting extension bytes', { attemptId: job.attemptId, statusCode: error.statusCode });
+        } else {
+          await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF);
+          this.logger.error('pdf job failed', { attemptId: job.attemptId, error });
+        }
+      } else {
+        this.logger.error('pdf job failed', { attemptId: job.attemptId, error });
       }
-      this.logger.error('pdf job failed', { attemptId: job.attemptId, error });
     } finally {
       await rm(scratch, { recursive: true, force: true });
+      // staging 随终态删除（#68）：bytes 路径无论成败，收尾后清掉 .part 与位图 sidecar
+      if (isBytes) await this.staging?.discard(job.attemptId).catch(() => {});
     }
   }
 

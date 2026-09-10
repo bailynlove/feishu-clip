@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ClipExecutor, prepareMarkdown } from '../src/bridge/executor.mjs';
+import { PdfChunkStaging } from '../src/bridge/pdf-chunks.mjs';
 
 test('snapshot markers become traceable image anchors and unsafe sources are plain text', () => {
   const prepared = prepareMarkdown({
@@ -831,6 +834,7 @@ function pdfFakeStore(job) {
   const store = {
     completed: null,
     failed: null,
+    awaitedBytes: null,
     settled,
     claims: [],
     async list() { return drained ? [] : [job]; },
@@ -838,6 +842,7 @@ function pdfFakeStore(job) {
     async get(attemptId, kind) { return kind === 'pdf' ? { status: 'running', workerId: store.workerId } : null; },
     async complete(_id, _worker, result, kind) { store.completed = { ...result, kind }; drained = true; onSettled(); },
     async fail(_id, _worker, result, kind) { store.failed = { ...result, kind }; drained = true; onSettled(); },
+    async awaitBytes(attemptId, workerId) { store.awaitedBytes = { attemptId, workerId }; drained = true; onSettled(); },
   };
   return store;
 }
@@ -929,4 +934,68 @@ test('pdf job：下载超限/类型不符映射为中文失败文案，上传歧
   await store.settled;
   assert.equal(store.failed?.stage, 'pdf');
   assert.equal(store.failed?.error, 'socket hang up', '未识别的上传错误透传原始消息');
+});
+
+// ——— 凭据回退（#68）：url 型撞 401/403 转 awaiting_bytes；bytes 型走 staging 上传 ———
+
+test('pdf job：下载撞 401/403 不 fail，转 awaiting_bytes（其余 HTTP 错误仍 fail）', async () => {
+  for (const statusCode of [401, 403]) {
+    const store = pdfFakeStore({ ...PDF_JOB, attemptId: `pdf-${statusCode}` });
+    const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
+    const downloadPdf = async () => { throw Object.assign(new Error(`PDF_HTTP_${statusCode}`), { code: 'PDF_FETCH_FAILED', statusCode }); };
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf }).kick();
+    await store.settled;
+    assert.ok(store.awaitedBytes, `${statusCode} 应转 awaiting_bytes`);
+    assert.equal(store.awaitedBytes.attemptId, `pdf-${statusCode}`);
+    assert.equal(store.failed, null, `${statusCode} 不得落 failed`);
+    assert.equal(store.completed, null);
+  }
+
+  // 对照组：404 等其他 HTTP 错误仍按失败处理
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-404' });
+  const lark = { async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; } };
+  const downloadPdf = async () => { throw Object.assign(new Error('PDF_HTTP_404'), { code: 'PDF_FETCH_FAILED', statusCode: 404 }); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.equal(store.awaitedBytes, null);
+  assert.equal(store.failed?.stage, 'pdf');
+  assert.match(store.failed?.error, /PDF_HTTP_404/);
+});
+
+test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清理 staging', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-exec-staging-'));
+  const stagingDir = path.join(directory, 'staging');
+  const staging = new PdfChunkStaging({ dir: stagingDir });
+  const body = Buffer.from('%PDF-1.7 staged bytes', 'latin1');
+  const attemptId = 'pdf-bytes-job';
+  await staging.putChunk(attemptId, 0, body);
+  try {
+    const store = pdfFakeStore({
+      ...PDF_JOB,
+      attemptId,
+      pdfSource: { type: 'bytes', url: PDF_JOB.pdfSource.url, name: '1706.03762.pdf', sizeBytes: body.length, totalChunks: 1, sha256: 'e'.repeat(64) },
+    });
+    const uploads = [];
+    const lark = { async uploadDriveFile(options) { uploads.push(options); return { fileToken: 'ft-b', url: 'https://u' }; } };
+    let downloads = 0;
+    const downloadPdf = async () => { downloads += 1; throw new Error('bytes 型不得走 URL 下载'); };
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf, staging }).kick();
+    await store.settled;
+
+    assert.equal(downloads, 0, '字节来自 staging 而非 URL 下载');
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0].fileName, 'Attention Is All You Need.pdf');
+    // 上传的文件内容就是 staging 字节（scratch 已删，用 copyFile 目标之外的旁证：上传被调用即路径通）
+    assert.equal(store.completed.kind, 'pdf');
+    assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'pdf_staging'), 'staging 阶段计时');
+    assert.ok(!store.completed.timeline.some((entry) => entry.name === 'pdf_download'), '无下载阶段');
+    const leftovers = async () => (await readdir(stagingDir).catch(() => [])).filter((entry) => entry.startsWith(attemptId));
+    // complete 落盘先于 finally 的 staging discard，等收尾完成再断言
+    for (let count = 0; count < 100 && (await leftovers()).length > 0; count += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(await leftovers(), [], '终态后 staging 已清理');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

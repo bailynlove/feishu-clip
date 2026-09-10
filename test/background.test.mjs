@@ -3,6 +3,7 @@
 // 清除会让「保存完成后重开弹窗看不到成功态」（用户实测 bug）：
 // 跨页打开弹窗一次（终态 job 被静默丢弃是对的）顺带把指针清了，回到原页面也无状态可恢复。
 import assert from 'node:assert/strict';
+import { createHash, randomBytes } from 'node:crypto';
 import test from 'node:test';
 
 const PAGE = 'https://example.com/article';
@@ -27,6 +28,12 @@ let detectPdfResult = { pdf: null }; // pdf-detect.js 桩的探测结果
 let tabUrl = PAGE; // 当前标签页 URL 桩（#67 探测用例会换 URL）
 let pdfTabProbeResult = null; // DETECT_PDF_TAB 探针（func 注入）返回值
 let pdfTabProbeError = null; // 非 null 时探针注入失败（走 URL 后缀兜底）
+// ——— 凭据回传（#68）FEED_PDF_BYTES 用例的桩状态 ———
+const PDF_SOURCE_URL = 'https://pub.example.com/paywalled.pdf';
+let pdfSourceServer = null; // 非 null 时源站 URL 返回流式 Response；{ body } 或 { failStatus }
+let feedJob = null; // FEED 用例的 pdf job 视图（GET /v1/jobs/:id 返回）
+let chunkBitmap = []; // pdf-chunks GET 返回的位图
+let postedChunks = []; // 记录分块 POST 请求体
 globalThis.chrome = {
   runtime: { id: 'ext-id', onMessage: { addListener: (fn) => listeners.push(fn) } },
   tabs: { query: async () => [{ id: 1, url: tabUrl }] },
@@ -56,12 +63,32 @@ globalThis.chrome = {
   },
 };
 globalThis.fetch = async (url, options) => {
+  // 源站 PDF（#68 凭据抓取）：流式 Response，分段 enqueue 模拟真实流
+  if (url === PDF_SOURCE_URL && pdfSourceServer) {
+    if (pdfSourceServer.failStatus) return { ok: false, status: pdfSourceServer.failStatus, body: null };
+    const bytes = pdfSourceServer.body;
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (let offset = 0; offset < bytes.length; offset += 1000) controller.enqueue(bytes.subarray(offset, offset + 1000));
+        controller.close();
+      },
+    }), { status: 200 });
+  }
+  // 分块通道端点（#68）
+  if (url.includes('/pdf-chunks')) {
+    if (options?.method === 'POST') {
+      postedChunks.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ ok: true, complete: false, received: chunkBitmap.length + postedChunks.length }) };
+    }
+    return { ok: true, json: async () => ({ ok: true, declared: feedJob?.pdfSource?.type === 'bytes', totalChunks: feedJob?.pdfSource?.totalChunks ?? null, bitmap: chunkBitmap }) };
+  }
   if (url.endsWith('/v1/jobs') && options?.method === 'POST') lastJobsBody = JSON.parse(options.body);
   if (url.endsWith('/v1/drive/folders/validate')) lastDriveValidateBody = JSON.parse(options.body);
   else if (url.includes('/v1/drive/folders')) lastDriveListUrl = url;
   return {
     ok: true,
     json: async () => {
+      if (feedJob && url.includes(`/v1/jobs/${feedJob.attemptId}`)) return { ok: true, jobs: [feedJob] };
       if (url.includes(`/v1/jobs/${ATTEMPT}`)) return { ok: true, job: terminalJob };
       if (url.endsWith('/v1/drive/folders/validate')) return { ok: true, folder: { folderToken: lastDriveValidateBody.folderToken ?? null, name: '论文' } };
       if (url.includes('/v1/drive/folders')) return { ok: true, folders: [{ folderToken: 'fld-a', name: '论文' }], hasMore: false, nextPageToken: null };
@@ -277,4 +304,88 @@ test('SAVE_PDF_TAB：只提交 pdf-only 任务体（无 snapshot/destination）�
 test('SAVE_PDF_TAB：非 http(s) 的 pdfSource 拒绝提交', async () => {
   await assert.rejects(send({ type: 'SAVE_PDF_TAB', pdfSource: { url: 'file:///Users/x/paper.pdf' } }), /PDF 地址不可用/);
   await assert.rejects(send({ type: 'SAVE_PDF_TAB' }), /PDF 地址不可用/);
+});
+
+// ——— 凭据回传（#68）：FEED_PDF_BYTES 的声明、切块、续传 ———
+
+const FEED_ATTEMPT = '61616161-6161-4161-8161-616161616161';
+const FEED_BODY_SIZE = 2 * 4 * 1024 * 1024 + 500; // 3 块：两块满块 + 500 字节末块
+
+function resetFeedStubs(body) {
+  postedChunks = [];
+  chunkBitmap = [];
+  lastJobsBody = null;
+  pdfSourceServer = { body };
+  feedJob = null;
+}
+
+test('FEED_PDF_BYTES：url 型 awaiting_bytes → 先声明（SHA-256/总块数）再逐块 POST', async () => {
+  const body = randomBytes(FEED_BODY_SIZE);
+  resetFeedStubs(body);
+  feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper', pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'paywalled.pdf' } };
+  try {
+    const result = await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL });
+    assert.deepEqual(result, { fed: true, uploaded: 3, totalChunks: 3 });
+
+    // 第一遍流式读出的声明经 POST /v1/jobs 升级（同一 attemptId）
+    assert.equal(lastJobsBody.attemptId, FEED_ATTEMPT);
+    assert.equal(lastJobsBody.pdfSource.type, 'bytes');
+    assert.equal(lastJobsBody.pdfSource.url, PDF_SOURCE_URL, '声明保留抓取地址');
+    assert.equal(lastJobsBody.pdfSource.name, 'paywalled.pdf');
+    assert.equal(lastJobsBody.pdfSource.sizeBytes, FEED_BODY_SIZE);
+    assert.equal(lastJobsBody.pdfSource.totalChunks, 3);
+    assert.equal(lastJobsBody.pdfSource.sha256, createHash('sha256').update(body).digest('hex'), '声明哈希 = 整文件 SHA-256');
+
+    // 第二遍切块：按序 POST，块内容与原字节一致
+    assert.deepEqual(postedChunks.map((chunk) => chunk.index), [0, 1, 2]);
+    assert.ok(postedChunks.every((chunk) => chunk.totalChunks === 3));
+    const chunkBytes = (index) => Buffer.from(postedChunks[index].dataBase64, 'base64');
+    assert.equal(chunkBytes(0).length, 4 * 1024 * 1024);
+    assert.equal(chunkBytes(2).length, 500, '末块为剩余字节');
+    assert.ok(Buffer.concat([chunkBytes(0), chunkBytes(1), chunkBytes(2)]).equals(body), '切块拼接还原原文件');
+  } finally {
+    resetFeedStubs(null);
+  }
+});
+
+test('FEED_PDF_BYTES：声明已在库时跳过第一遍；位图续传只补缺块', async () => {
+  const body = randomBytes(FEED_BODY_SIZE);
+  resetFeedStubs(body);
+  feedJob = {
+    attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper',
+    pdfSource: { type: 'bytes', url: PDF_SOURCE_URL, name: 'paywalled.pdf', sizeBytes: FEED_BODY_SIZE, totalChunks: 3, sha256: 'f'.repeat(64) },
+  };
+  chunkBitmap = [0, 1]; // 模拟中断前已确认两块
+  try {
+    const result = await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL });
+    assert.deepEqual(result, { fed: true, uploaded: 1, totalChunks: 3 });
+    assert.equal(lastJobsBody, null, '声明已就位不再重复提交');
+    assert.deepEqual(postedChunks.map((chunk) => chunk.index), [2], '只补位图缺失的块，不重传已确认块');
+  } finally {
+    resetFeedStubs(null);
+  }
+});
+
+test('FEED_PDF_BYTES：job 不在 awaiting_bytes 不动作；源站仍 401/403 报错可重试', async () => {
+  resetFeedStubs(randomBytes(100));
+  feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'failed', pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'x.pdf' } };
+  try {
+    assert.deepEqual(await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL }), { fed: false, status: 'failed' });
+    assert.equal(lastJobsBody, null);
+    assert.deepEqual(postedChunks, []);
+
+    feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'x.pdf' } };
+    pdfSourceServer = { failStatus: 401 };
+    await assert.rejects(
+      send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL }),
+      (error) => error.code === 'PDF_SOURCE_AUTH',
+    );
+    pdfSourceServer = { failStatus: 500 };
+    await assert.rejects(
+      send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL }),
+      (error) => error.code === 'PDF_SOURCE_FETCH_FAILED',
+    );
+  } finally {
+    resetFeedStubs(null);
+  }
 });

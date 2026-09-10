@@ -367,6 +367,20 @@ async function inspect() {
   }).catch(() => {});
 }
 
+// 凭据回传（#68）：pdf job 进 awaiting_bytes 即经 SW 持凭据抓取并分块回传。
+// 每个弹窗会话只触发一次（SW 侧另有 in-flight 去重）；失败后 job 留在 awaiting_bytes，
+// 重开弹窗可重试——bridge 位图保证不重传已确认块
+let pdfFeedStarted = false;
+function triggerPdfFeed(jobs) {
+  if (pdfFeedStarted) return;
+  const pdfJob = jobs.find((job) => job.kind === 'pdf');
+  const pdfUrl = pdfJob?.pdfSource?.url ?? presetState?.pdf?.url;
+  if (!pdfJob || !pdfUrl) return;
+  pdfFeedStarted = true;
+  message({ type: 'FEED_PDF_BYTES', attemptId, pdfUrl, name: pdfJob.pdfSource?.name ?? presetState?.pdf?.name ?? null })
+    .catch((error) => show(`PDF 凭据回传失败：${error.message}。重开弹窗可重试。`, 'error'));
+}
+
 async function poll() {
   clearTimeout(pollTimer);
   try {
@@ -375,6 +389,8 @@ async function poll() {
     if (!jobs || jobs.length === 0) { attemptId = null; recoveredAttempt = false; return; }
     const view = describeAttemptView(jobs, { recovered: recoveredAttempt });
     if (!view) return;
+    // 凭据回传触发（#68）：两种页面形态共用 poll，awaiting_bytes 即开始/继续喂字节
+    if (view.pdfAwaitingBytes) triggerPdfFeed(jobs);
     // PDF 标签页形态（#67）：view 落到单面板主按钮/状态条，不触碰网页形态的 CTA 区
     if (presetState.pageKind === 'pdf-tab') {
       applyPdfTabView(view);

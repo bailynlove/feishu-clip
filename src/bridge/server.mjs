@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { LarkClient } from './lark.mjs';
 import { PairingStore } from './pairing.mjs';
-import { IMAGE_MODES, JOB_KIND, PersistentJobStore } from './job-store.mjs';
+import { IMAGE_MODES, JOB_KIND, JOB_STATUS, PDF_CHUNK_BYTES, PersistentJobStore } from './job-store.mjs';
+import { PDF_LIMITS } from './image-policy.mjs';
+import { PdfChunkStaging } from './pdf-chunks.mjs';
 import { ClipExecutor } from './executor.mjs';
 
 const JSON_LIMIT = 52 * 1024 * 1024;
@@ -44,15 +47,16 @@ function validateSnapshot(snapshot) {
   if (snapshot.iframes && (!Array.isArray(snapshot.iframes) || snapshot.iframes.length > 10)) throw new Error('TOO_MANY_IFRAMES');
 }
 
-// pdfSource（#65）：本切片只接受 url 型（bytes 型凭据通道归 #61）。
-// name/sizeBytes 是识别侧带出的展示信息，可选；校验失败直接 400
+// pdfSource（#65/#68）：url 型由 bridge 直接下载；bytes 型由扩展持凭据抓取后分块回传，
+// 提交时声明文件名/总大小/总块数/SHA-256（#61）。name/sizeBytes 对 url 型是可选展示信息；
+// 校验失败直接 400
 function validatePdfSource(value) {
   const bad = (code) => Object.assign(new Error(code), { status: 400, code });
-  if (!value || typeof value !== 'object' || value.type !== 'url') throw bad('PDF_SOURCE_REQUIRED');
+  if (!value || typeof value !== 'object' || (value.type !== 'url' && value.type !== 'bytes')) throw bad('PDF_SOURCE_REQUIRED');
   let url;
   try { url = new URL(value.url); } catch { throw bad('PDF_SOURCE_URL_REJECTED'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw bad('PDF_SOURCE_URL_REJECTED');
-  const pdfSource = { type: 'url', url: url.href };
+  const pdfSource = { type: value.type, url: url.href };
   if (value.name !== undefined && value.name !== null) {
     if (typeof value.name !== 'string' || value.name.length > 250) throw bad('PDF_SOURCE_INVALID');
     pdfSource.name = value.name;
@@ -60,6 +64,18 @@ function validatePdfSource(value) {
   if (value.sizeBytes !== undefined && value.sizeBytes !== null) {
     if (!Number.isInteger(value.sizeBytes) || value.sizeBytes <= 0) throw bad('PDF_SOURCE_INVALID');
     pdfSource.sizeBytes = value.sizeBytes;
+  }
+  if (value.type === 'bytes') {
+    // bytes 声明是整验依据：文件名/总大小必填；总块数必须与 4 MiB 切块口径一致；
+    // 大小上限与 url 型下载同一档（PDF_LIMITS.maxBytes），SHA-256 为小写 hex
+    if (!pdfSource.name) throw bad('PDF_SOURCE_INVALID');
+    if (pdfSource.sizeBytes === undefined) throw bad('PDF_SOURCE_INVALID');
+    if (pdfSource.sizeBytes > PDF_LIMITS.maxBytes) throw bad('PDF_SOURCE_TOO_LARGE');
+    const totalChunks = Math.ceil(pdfSource.sizeBytes / PDF_CHUNK_BYTES);
+    if (value.totalChunks !== totalChunks) throw bad('PDF_SOURCE_INVALID');
+    if (!/^[0-9a-f]{64}$/.test(value.sha256 || '')) throw bad('PDF_SOURCE_INVALID');
+    pdfSource.totalChunks = totalChunks;
+    pdfSource.sha256 = value.sha256;
   }
   return pdfSource;
 }
@@ -108,14 +124,19 @@ function larkQueryError(error, resource = '知识库') {
   return { status: 502, code: 'LARK_REQUEST_FAILED', message: '飞书查询失败，请稍后重试' };
 }
 
-export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console }) {
+export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console, downloadPdf }) {
   const pairing = new PairingStore(config.pairingFile);
   const store = new PersistentJobStore({ filePath: config.jobFile, jobTtlMs: config.jobTtlMs });
-  const executor = new ClipExecutor({ store, lark, logger });
+  // 分块暂存（#68）：staging 目录在 job 文件旁，executor 与分块端点共用同一实例
+  const staging = new PdfChunkStaging({ dir: path.join(path.dirname(config.jobFile), 'staging') });
+  const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}) });
   // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
-  // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出
+  // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出。
+  // staging 清理（#68）：随 recoverExpired 的 expired 列表即时 discard，再按 mtime 扫超龄孤儿
   const sweep = async () => {
-    await store.recoverExpired();
+    const recovered = await store.recoverExpired();
+    for (const attemptId of recovered.expired) await staging.discard(attemptId).catch(() => {});
+    await staging.sweep(config.jobTtlMs ?? 24 * 60 * 60 * 1_000).catch((error) => logger.error('staging sweep failed', error));
     await executor.reconcile();
     executor.kick();
   };
@@ -309,6 +330,59 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         }
         executor.kick();
         return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: jobView(submitted.job), pdfJob: pdfSubmitted ? jobView(pdfSubmitted.job) : null }, origin);
+      }
+
+      // ——— 分块通道（#61/#68）：扩展凭据回传 PDF 字节 ———
+      // GET 返回已收块位图（续传断点）；POST 写一块（4 MiB 原字节 base64 + index）。
+      // 全部到齐 + 整文件 SHA-256 验证通过 → job 转 queued（executor 走 staging 上传）；
+      // hash 不匹配 → 422 + job failed + 清理 staging。端点只服务 awaiting_bytes 的 pdf job
+      const chunksMatch = request.url?.match(/^\/v1\/jobs\/([0-9a-f-]{36})\/pdf-chunks$/i);
+      if (chunksMatch && request.method === 'GET') {
+        const job = await store.get(chunksMatch[1], JOB_KIND.PDF);
+        if (!job) return send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
+        if (job.status !== JOB_STATUS.AWAITING_BYTES) return send(response, 409, { ok: false, code: 'PDF_BYTES_NOT_EXPECTED' }, origin);
+        // declared=false 表示 url 型回退尚未补交 bytes 声明（扩展先做声明再喂块）
+        const declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
+        return send(response, 200, {
+          ok: true,
+          declared: Boolean(declared),
+          totalChunks: declared?.totalChunks ?? null,
+          sizeBytes: declared?.sizeBytes ?? null,
+          bitmap: await staging.bitmap(job.attemptId),
+        }, origin);
+      }
+      if (chunksMatch && request.method === 'POST') {
+        const job = await store.get(chunksMatch[1], JOB_KIND.PDF);
+        if (!job) return send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
+        if (job.status !== JOB_STATUS.AWAITING_BYTES) return send(response, 409, { ok: false, code: 'PDF_BYTES_NOT_EXPECTED' }, origin);
+        const declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
+        if (!declared) return send(response, 409, { ok: false, code: 'PDF_BYTES_NOT_DECLARED' }, origin);
+        const body = await readJson(request);
+        const bad = (code) => Object.assign(new Error(code), { status: 400, code });
+        if (!Number.isInteger(body?.index) || body.index < 0 || body.index >= declared.totalChunks) throw bad('PDF_CHUNK_INVALID');
+        if (body.totalChunks !== declared.totalChunks) throw bad('PDF_CHUNK_INVALID');
+        if (typeof body.dataBase64 !== 'string') throw bad('PDF_CHUNK_INVALID');
+        const buffer = Buffer.from(body.dataBase64, 'base64');
+        // 每块必须恰为声明口径：非末块 4 MiB 满块，末块 = 总大小 − 偏移
+        const expectedBytes = body.index === declared.totalChunks - 1
+          ? declared.sizeBytes - body.index * PDF_CHUNK_BYTES
+          : PDF_CHUNK_BYTES;
+        if (buffer.length !== expectedBytes || buffer.length < 1) throw bad('PDF_CHUNK_INVALID');
+        const bitmap = await staging.putChunk(job.attemptId, body.index, buffer);
+        if (bitmap.length < declared.totalChunks) {
+          return send(response, 200, { ok: true, complete: false, received: bitmap.length, totalChunks: declared.totalChunks, bitmap }, origin);
+        }
+        try {
+          await staging.verify(job.attemptId, declared);
+        } catch {
+          // 整验失败：拒收——job failed、staging 清理，不产生云盘文件
+          await staging.discard(job.attemptId);
+          await store.failBytes(job.attemptId, 'PDF 字节校验失败（SHA-256 不匹配），已拒绝接收');
+          return send(response, 422, { ok: false, code: 'PDF_HASH_MISMATCH' }, origin);
+        }
+        await store.markBytesReady(job.attemptId);
+        executor.kick();
+        return send(response, 200, { ok: true, complete: true, received: bitmap.length, totalChunks: declared.totalChunks }, origin);
       }
 
       const match = request.method === 'GET' && request.url?.match(/^\/v1\/jobs\/([0-9a-f-]{36})$/i);

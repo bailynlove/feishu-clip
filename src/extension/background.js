@@ -1,8 +1,10 @@
 import { ensurePresets } from './presets.js';
 import { buildContext, renderBody, sanitizeClipTitle } from './templates.js';
 import { isJobForPage } from './popup-state.js';
+import { createIncrementalSha256 } from './sha256.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
+const PDF_CHUNK_BYTES = 4 * 1024 * 1024;
 
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 
@@ -85,6 +87,107 @@ async function detectPdfTab() {
   }
 }
 
+// ——— 凭据回传（#68）：pdf job 进 awaiting_bytes 后，SW 持凭据抓源站、流式切块回传 ———
+// 声明必须先于分块（#61），而 SHA-256 要读完流才能算出，所以回退路径是两遍流：
+// 第一遍只算哈希与总大小（不落盘、内存恒定），声明落库后第二遍切块 POST；
+// 中断（SW 被杀）重连先查位图只补缺块——声明已在库时连第一遍都省掉
+const pdfFeedInFlight = new Map(); // attemptId → Promise（SW 内 in-flight 去重）
+
+// Uint8Array → base64：分片转 binary string，避免 4 MiB 整块 spread 爆参数栈
+function toBase64(bytes) {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+async function openPdfStream(pdfUrl) {
+  const response = await fetch(pdfUrl, { credentials: 'include' });
+  if (response.status === 401 || response.status === 403) {
+    throw Object.assign(new Error('源站仍要求登录，请先在源站登录后重试'), { code: 'PDF_SOURCE_AUTH' });
+  }
+  if (!response.ok || !response.body) {
+    throw Object.assign(new Error(`源站返回 HTTP ${response.status}，无法读取 PDF`), { code: 'PDF_SOURCE_FETCH_FAILED' });
+  }
+  return response.body.getReader();
+}
+
+// 流式过一遍源站：累计大小 + 增量 SHA-256；onChunk 用于第二遍的切块回调
+async function readPdfPass(pdfUrl, onChunk = null) {
+  const reader = await openPdfStream(pdfUrl);
+  const hash = createIncrementalSha256();
+  let sizeBytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    sizeBytes += value.byteLength;
+    hash.update(value);
+    if (onChunk) await onChunk(value);
+  }
+  return { sizeBytes, sha256: hash.hex() };
+}
+
+async function feedPdfBytes({ attemptId, pdfUrl, name = null }) {
+  if (!attemptId || !/^https?:/.test(pdfUrl || '')) {
+    throw Object.assign(new Error('PDF 回传参数不完整'), { code: 'PDF_FEED_INVALID' });
+  }
+  if (pdfFeedInFlight.has(attemptId)) return pdfFeedInFlight.get(attemptId);
+  const task = doFeedPdfBytes({ attemptId, pdfUrl, name }).finally(() => pdfFeedInFlight.delete(attemptId));
+  pdfFeedInFlight.set(attemptId, task);
+  return task;
+}
+
+async function doFeedPdfBytes({ attemptId, pdfUrl, name }) {
+  const { jobs } = await bridge(`/v1/jobs/${attemptId}`);
+  const job = (jobs ?? []).find((candidate) => candidate.kind === 'pdf');
+  if (!job || job.status !== 'awaiting_bytes') return { fed: false, status: job?.status ?? 'missing' };
+  let declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
+  if (!declared) {
+    // 第一遍流式读：只算 SHA-256 与总大小（bytes 声明必须先于分块，#61）
+    const measured = await readPdfPass(pdfUrl);
+    if (measured.sizeBytes < 1) throw Object.assign(new Error('源站返回空内容'), { code: 'PDF_SOURCE_FETCH_FAILED' });
+    declared = {
+      type: 'bytes',
+      url: job.pdfSource?.url ?? pdfUrl,
+      name: name ?? job.pdfSource?.name ?? job.title ?? 'clip.pdf',
+      sizeBytes: measured.sizeBytes,
+      totalChunks: Math.ceil(measured.sizeBytes / PDF_CHUNK_BYTES),
+      sha256: measured.sha256,
+    };
+    await bridge('/v1/jobs', { method: 'POST', body: { attemptId, pdfSource: declared } });
+  }
+  const { bitmap } = await bridge(`/v1/jobs/${attemptId}/pdf-chunks`);
+  const received = new Set(bitmap ?? []);
+  // 第二遍流式读：按 4 MiB 切块，只补位图缺失的块（bridge 侧重发幂等，断点续传）
+  let index = 0;
+  let pending = new Uint8Array(0);
+  let uploaded = 0;
+  const flush = async (final = false) => {
+    while (pending.byteLength >= PDF_CHUNK_BYTES || (final && pending.byteLength > 0)) {
+      const chunk = pending.slice(0, Math.min(PDF_CHUNK_BYTES, pending.byteLength));
+      pending = pending.slice(chunk.byteLength);
+      if (!received.has(index)) {
+        await bridge(`/v1/jobs/${attemptId}/pdf-chunks`, {
+          method: 'POST',
+          body: { index, totalChunks: declared.totalChunks, dataBase64: toBase64(chunk) },
+        });
+        uploaded += 1;
+      }
+      index += 1;
+    }
+  };
+  await readPdfPass(pdfUrl, async (value) => {
+    const merged = new Uint8Array(pending.byteLength + value.byteLength);
+    merged.set(pending);
+    merged.set(value, pending.byteLength);
+    pending = merged;
+    await flush();
+  });
+  await flush(true);
+  return { fed: true, uploaded, totalChunks: declared.totalChunks };
+}
+
 async function handle(message) {
   switch (message.type) {
     case 'PAIR': {
@@ -161,7 +264,8 @@ async function handle(message) {
     // PDF 标签页判定（#67）：弹窗打开时先于一切剪藏逻辑调用；命中即整体切换为 pdf-tab 单面板
     case 'DETECT_PDF_TAB': return detectPdfTab();
     // PDF 标签页保存（#67）：只提交 kind:'pdf' 的 job——不走 extractor、不建剪藏文档；
-    // 字节默认走 bridge 按 URL 下载（url 型 pdfSource，凭据回退归 #68）。
+    // 字节默认走 bridge 按 URL 下载（url 型 pdfSource），撞 401/403 由 bridge 转
+    // awaiting_bytes，弹窗轮询看到后走 #68 的凭据分块回传。
     // attemptId 复用支持失败后重试（bridge 对 failed pdf job 幂等复位重排）
     case 'SAVE_PDF_TAB': {
       const source = message.pdfSource;
@@ -185,6 +289,9 @@ async function handle(message) {
         return { pdf: null };
       }
     }
+    // 凭据回传（#68）：弹窗轮询看到 awaiting_bytes 后触发；SW 内 in-flight 去重，
+    // 中断重连由 bridge 位图保证只补缺块
+    case 'FEED_PDF_BYTES': return feedPdfBytes(message);
     // 任务日志（开发者模式）：bridge 侧统一记录耗时时间线，设置页透传展示
     case 'LIST_JOBS': return bridge('/v1/jobs?limit=20');
     // 预览懒提取（#37）：只抓快照、不建 job；弹窗首次展开预览时调用

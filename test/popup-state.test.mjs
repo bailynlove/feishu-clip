@@ -640,7 +640,24 @@ test('describeAttemptView：pdf-only 尝试防御性处理；空数组返回 nul
 test('describeAttemptView：单 clip job 与旧 describeJobView 行为一致（kind 缺省按 clip）', () => {
   const legacy = { status: 'succeeded', warnings: [], document: { url: 'https://example.feishu.cn/wiki/x' } };
   const view = describeAttemptView([legacy]);
-  assert.deepEqual(view, { ...describeJobView(legacy), pdfUrl: null, pdfRetry: false });
+  assert.deepEqual(view, { ...describeJobView(legacy), pdfUrl: null, pdfRetry: false, pdfAwaitingBytes: false });
+});
+
+// 凭据回退（#68）：awaiting_bytes 是进行态（非终态），呈现回传文案并亮 pdfAwaitingBytes 供弹窗触发喂字节
+test('describeAttemptView：pdf awaiting_bytes → 回传进度文案 + pdfAwaitingBytes 标记', () => {
+  const awaiting = { kind: 'pdf', status: 'awaiting_bytes', pdfSource: { type: 'url', url: 'https://pub.example.com/x.pdf' } };
+  const pdfOnly = describeAttemptView([awaiting]);
+  assert.equal(pdfOnly.kind, 'progress', 'awaiting_bytes 不是终态');
+  assert.match(pdfOnly.message, /凭据回传/);
+  assert.equal(pdfOnly.pdfAwaitingBytes, true);
+  assert.equal(pdfOnly.pdfRetry, false);
+
+  const combined = describeAttemptView([{ kind: 'clip', status: 'running' }, awaiting]);
+  assert.equal(combined.message, '文档保存中… · PDF 凭据回传中…');
+  assert.equal(combined.pdfAwaitingBytes, true);
+
+  const noPdf = describeAttemptView([{ status: 'running' }]);
+  assert.equal(noPdf.pdfAwaitingBytes, false, '无 pdf job 恒为 false');
 });
 
 // ——— PDF 存云盘会话开关（#65）：仅本次状态，不回写预设；保存/改预设时写 pdfDrive ———

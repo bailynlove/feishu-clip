@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createBridge } from '../src/bridge/server.mjs';
+import { PDF_CHUNK_BYTES } from '../src/bridge/job-store.mjs';
 
 const origin = `chrome-extension://${'b'.repeat(32)}`;
 
@@ -338,6 +339,191 @@ test('POST /v1/jobs pdf-only submission queues a single pdf job without snapshot
     assert.equal((await noSource.json()).code, 'PDF_SOURCE_REQUIRED');
     assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878', pdfSource, pdfFolderToken: 'bad token!' }) })).status, 400, '目录 token 非法');
     assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878', pdfSource: { type: 'url', url: 'ftp://example.com/x.pdf' } }) })).status, 400, 'pdfSource 校验与 clip 路径同一套');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// ——— 分块通道与凭据回退（#68）———
+
+const ATTEMPT_BYTES = '51515151-5151-4511-8511-515151515151';
+const ATTEMPT_MISMATCH = '52525252-5252-4522-8522-525252525252';
+const ATTEMPT_FALLBACK = '53535353-5353-4533-8533-535353535353';
+
+async function bootBridge({ downloadPdf, uploads } = {}) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-chunks-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'chunks-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
+    uploadDriveFile: async (options) => { uploads?.push(options); return { fileToken: 'ft-x', url: 'https://example.feishu.cn/file/ft-x' }; },
+    run: async () => ({ ok: true, data: {} }),
+  };
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+    ...(downloadPdf ? { downloadPdf } : {}),
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const raw = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  const paired = await (await raw('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+  const auth = { Authorization: `Bearer ${paired.credential}` };
+  const call = (url, options = {}) => raw(url, { ...options, headers: { ...auth, ...(options.headers || {}) } });
+  const readPdfJob = async (attemptId) => {
+    const body = await (await call(`/v1/jobs/${attemptId}`)).json();
+    return body.jobs?.find((job) => job.kind === 'pdf') ?? null;
+  };
+  const waitFor = async (attemptId, statuses) => {
+    for (let count = 0; count < 200; count += 1) {
+      const job = await readPdfJob(attemptId);
+      if (statuses.includes(job?.status)) return job;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return readPdfJob(attemptId);
+  };
+  // complete/failed 落盘先于 executor finally 的 staging discard，等收尾完成再断言
+  const waitStagingGone = async (attemptId) => {
+    const stagingDir = path.join(directory, 'staging');
+    for (let count = 0; count < 200; count += 1) {
+      const left = (await readdir(stagingDir).catch(() => [])).filter((entry) => entry.startsWith(attemptId));
+      if (left.length === 0) return [];
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return (await readdir(stagingDir).catch(() => [])).filter((entry) => entry.startsWith(attemptId));
+  };
+  return { directory, server, call, readPdfJob, waitFor, waitStagingGone };
+}
+
+test('分块通道端到端：bytes 提交 → 位图续传 → 整验 → succeeded；hash 不匹配拒收', async () => {
+  const uploads = [];
+  const { directory, server, call, readPdfJob, waitFor, waitStagingGone } = await bootBridge({ uploads });
+  const stagingDir = path.join(directory, 'staging');
+  try {
+    // 两块文件：一块整 4 MiB + 137 字节末块
+    const tail = 137;
+    const body = Buffer.concat([randomBytes(PDF_CHUNK_BYTES), randomBytes(tail)]);
+    const sha256 = createHash('sha256').update(body).digest('hex');
+    const pdfSource = { type: 'bytes', url: 'https://pub.example.com/paper.pdf', name: 'paper.pdf', sizeBytes: body.length, totalChunks: 2, sha256 };
+
+    const submitted = await call('/v1/jobs', { method: 'POST', body: JSON.stringify({ attemptId: ATTEMPT_BYTES, pdfSource, title: 'Paper' }) });
+    assert.equal(submitted.status, 202);
+    const accepted = await submitted.json();
+    assert.equal(accepted.pdfJob.status, 'awaiting_bytes', 'bytes 型提交直接落 awaiting_bytes');
+    assert.equal(accepted.pdfJob.pdfSource.sha256, sha256);
+
+    // 位图初始为空；声明已就位
+    const initial = await (await call(`/v1/jobs/${ATTEMPT_BYTES}/pdf-chunks`)).json();
+    assert.deepEqual(initial, { ok: true, declared: true, totalChunks: 2, sizeBytes: body.length, bitmap: [] });
+
+    // 非法块一律 400：index 越界 / totalChunks 不符 / 块大小不符
+    const post = (payload) => call(`/v1/jobs/${ATTEMPT_BYTES}/pdf-chunks`, { method: 'POST', body: JSON.stringify(payload) });
+    assert.equal((await post({ index: 2, totalChunks: 2, dataBase64: '' })).status, 400);
+    assert.equal((await post({ index: 0, totalChunks: 3, dataBase64: '' })).status, 400);
+    assert.equal((await post({ index: 1, totalChunks: 2, dataBase64: Buffer.alloc(10).toString('base64') })).status, 400, '末块必须恰为 137 字节');
+    assert.equal((await post({ index: 0, totalChunks: 2, dataBase64: Buffer.alloc(10).toString('base64') })).status, 400, '非末块必须 4 MiB 满块');
+
+    const first = await (await post({ index: 0, totalChunks: 2, dataBase64: body.subarray(0, PDF_CHUNK_BYTES).toString('base64') })).json();
+    assert.deepEqual({ complete: first.complete, received: first.received }, { complete: false, received: 1 });
+    // —— 模拟中断 —— 重连先查位图，只补缺块；重发已确认块幂等
+    const resumed = await (await call(`/v1/jobs/${ATTEMPT_BYTES}/pdf-chunks`)).json();
+    assert.deepEqual(resumed.bitmap, [0], '位图记录断点');
+    const again = await (await post({ index: 0, totalChunks: 2, dataBase64: body.subarray(0, PDF_CHUNK_BYTES).toString('base64') })).json();
+    assert.equal(again.received, 1, '重发已确认块幂等');
+    const last = await (await post({ index: 1, totalChunks: 2, dataBase64: body.subarray(PDF_CHUNK_BYTES).toString('base64') })).json();
+    assert.equal(last.complete, true, '末块到齐 + 整验通过');
+
+    const done = await waitFor(ATTEMPT_BYTES, ['succeeded', 'failed']);
+    assert.equal(done.status, 'succeeded');
+    assert.equal(done.document.url, 'https://example.feishu.cn/file/ft-x');
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0].fileName, 'Paper.pdf', '文件名 = 标题渲染结果 + .pdf');
+    assert.deepEqual(await waitStagingGone(ATTEMPT_BYTES), [], '终态后 staging 无残留');
+
+    // hash 不匹配：拒收、job failed、staging 清理、不产生云盘文件
+    const wrongSha = createHash('sha256').update(randomBytes(16)).digest('hex');
+    const single = randomBytes(64);
+    const mismatch = await call('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId: ATTEMPT_MISMATCH, pdfSource: { type: 'bytes', url: 'https://pub.example.com/bad.pdf', name: 'bad.pdf', sizeBytes: single.length, totalChunks: 1, sha256: wrongSha } }),
+    });
+    assert.equal(mismatch.status, 202);
+    const rejected = await call(`/v1/jobs/${ATTEMPT_MISMATCH}/pdf-chunks`, { method: 'POST', body: JSON.stringify({ index: 0, totalChunks: 1, dataBase64: single.toString('base64') }) });
+    assert.equal(rejected.status, 422);
+    assert.equal((await rejected.json()).code, 'PDF_HASH_MISMATCH');
+    const failedJob = await readPdfJob(ATTEMPT_MISMATCH);
+    assert.equal(failedJob.status, 'failed');
+    assert.match(failedJob.error, /SHA-256/);
+    assert.equal(uploads.length, 1, 'hash 不匹配不产生云盘文件');
+    const afterMismatch = await readdir(stagingDir).catch(() => []);
+    assert.deepEqual(afterMismatch.filter((entry) => entry.startsWith(ATTEMPT_MISMATCH)), [], '拒收后 staging 清理');
+
+    // 非 awaiting_bytes 状态的 job 不接受分块端点
+    assert.equal((await call(`/v1/jobs/${ATTEMPT_MISMATCH}/pdf-chunks`)).status, 409);
+    assert.equal((await call(`/v1/jobs/${ATTEMPT_BYTES}/pdf-chunks`, { method: 'POST', body: JSON.stringify({ index: 0, totalChunks: 2, dataBase64: body.subarray(0, 4).toString('base64') }) })).status, 409, '已成功 job 不再收块');
+    assert.equal((await call('/v1/jobs/99999999-9999-4999-8999-999999999999/pdf-chunks')).status, 404);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('凭据回退全链路：url 型 403 → awaiting_bytes → 声明升级 → 分块喂入 → succeeded', async () => {
+  const uploads = [];
+  let downloads = 0;
+  const downloadPdf = async () => {
+    downloads += 1;
+    throw Object.assign(new Error('PDF_HTTP_403'), { code: 'PDF_FETCH_FAILED', statusCode: 403 });
+  };
+  const { directory, server, call, readPdfJob, waitFor, waitStagingGone } = await bootBridge({ downloadPdf, uploads });
+  try {
+    const pdfUrl = 'https://pub.example.com/paywalled.pdf';
+    const submitted = await call('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId: ATTEMPT_FALLBACK, pdfSource: { type: 'url', url: pdfUrl, name: 'paywalled.pdf' }, title: 'Paywalled Paper' }),
+    });
+    assert.equal(submitted.status, 202);
+
+    // bridge 下载撞 403：不 fail，转 awaiting_bytes
+    const awaiting = await waitFor(ATTEMPT_FALLBACK, ['awaiting_bytes', 'failed']);
+    assert.equal(awaiting.status, 'awaiting_bytes');
+    assert.equal(awaiting.error, null);
+    assert.equal(downloads, 1);
+
+    // 未补声明前：位图 declared=false；直接喂块 409
+    const initial = await (await call(`/v1/jobs/${ATTEMPT_FALLBACK}/pdf-chunks`)).json();
+    assert.equal(initial.declared, false, 'url 型回退尚未有 bytes 声明');
+    assert.deepEqual(initial.bitmap, []);
+    const early = await call(`/v1/jobs/${ATTEMPT_FALLBACK}/pdf-chunks`, { method: 'POST', body: JSON.stringify({ index: 0, totalChunks: 1, dataBase64: 'AA==' }) });
+    assert.equal(early.status, 409);
+    assert.equal((await early.json()).code, 'PDF_BYTES_NOT_DECLARED');
+
+    // 扩展补交声明（同 url 升级）→ 分块喂入 → 整验通过 → executor 走 staging 上传
+    const body = Buffer.concat([Buffer.from('%PDF-1.7\n', 'latin1'), randomBytes(2048)]);
+    const declaration = {
+      type: 'bytes', url: pdfUrl, name: 'paywalled.pdf',
+      sizeBytes: body.length, totalChunks: 1,
+      sha256: createHash('sha256').update(body).digest('hex'),
+    };
+    const upgraded = await call('/v1/jobs', { method: 'POST', body: JSON.stringify({ attemptId: ATTEMPT_FALLBACK, pdfSource: declaration, title: 'Paywalled Paper' }) });
+    assert.equal(upgraded.status, 200, '升级复用同一 job，不新建');
+    const upgradedBody = await upgraded.json();
+    assert.equal(upgradedBody.pdfJob.status, 'awaiting_bytes');
+    assert.equal(upgradedBody.pdfJob.pdfSource.type, 'bytes');
+
+    const fed = await call(`/v1/jobs/${ATTEMPT_FALLBACK}/pdf-chunks`, { method: 'POST', body: JSON.stringify({ index: 0, totalChunks: 1, dataBase64: body.toString('base64') }) });
+    assert.equal((await fed.json()).complete, true);
+
+    const done = await waitFor(ATTEMPT_FALLBACK, ['succeeded', 'failed']);
+    assert.equal(done.status, 'succeeded');
+    assert.equal(downloads, 1, 'bytes 路径不再走 URL 下载');
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0].fileName, 'Paywalled Paper.pdf', '文件名仍取标题渲染结果');
+    assert.deepEqual(await waitStagingGone(ATTEMPT_FALLBACK), [], '终态后 staging 无残留');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });
