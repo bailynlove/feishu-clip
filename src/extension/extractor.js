@@ -32,12 +32,23 @@
     const inline = new Set(['A', 'SPAN', 'STRONG', 'B', 'EM', 'I', 'CODE', 'SMALL', 'MARK', 'DEL', 'S', 'SUP', 'SUB']);
     function text(node) { return (node.textContent || '').replace(/\s+/g, ' ').trim(); }
 
-    // 悬浮内容（悬停才展示的隐藏面板，如代码行内的灯泡注解）：
-    // 原页面 display:none 子树没有布局盒，用户悬停时才可见。直接在正文里渲染会无标注地混进来，
-    // 丢弃又可惜。约定：触发位置留 `悬浮内容{i}` 标记，内容作为注释段落排到所在块之后。
+    // 悬浮内容（#69 硬收窄）：只认 labuladong 灯泡注解面板——span.code-extend-tooltip 内
+    // svg.code-extend-icon（灯泡图标）的兄弟 span.code-extend-content，默认 display:none、
+    // 悬停灯泡才展示（DOM 关联形态已对真实页面确认：二者同为 tooltip 容器的直接子元素）。
+    // 原页面该子树没有布局盒，直接在正文里渲染会无标注地混进来，丢弃又可惜。
+    // 约定：触发位置留 `悬浮内容{i}` 标记，内容作为注释段落排到所在块之后。
+    // 旧版是通用启发式（任何无布局盒 + 文本≥2 字符或含图的元素都打标），arXiv 等页面大量
+    // 隐藏元素误中；其余隐藏容器一律不打标，按普通内容渲染或随垃圾清理丢弃
     const HOVER_ATTR = 'data-feishu-clip-hover';
     const HOVER_LIMIT = 20;
     const JUNK_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'NAV', 'ASIDE', 'FORM', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SVG', 'CANVAS', 'IFRAME']);
+    const hasClass = (node, name) => (node.getAttribute('class') || '').split(/\s+/).includes(name);
+    // 灯泡触发器关联判定：面板自身带 code-extend-content，且同容器内有 svg.code-extend-icon 兄弟
+    function isCodeExtendPanel(node) {
+      if (!hasClass(node, 'code-extend-content')) return false;
+      return [...(node.parentElement?.childNodes ?? [])].some((sibling) => sibling.nodeType === Node.ELEMENT_NODE
+        && (sibling.tagName || '').toUpperCase() === 'SVG' && hasClass(sibling, 'code-extend-icon'));
+    }
     // 布局盒只在原页面有意义（克隆树未挂载），所以打标在原树上做、随克隆带入；
     // 返回打标过的原元素列表，调用方负责用后 removeAttribute 还原页面
     function tagHoverPanels(sourceRoot) {
@@ -55,7 +66,7 @@
             // 纯图片面板（labuladong 的 .code-extend-content 只有一张示意图）也算悬浮内容；
             // 文本过短又无图的隐藏容器（装饰点、占位）不算
             const hasImage = child.querySelectorAll('img').length > 0;
-            if (!hasIframe && (content.length >= 2 || hasImage) && tagged.length < HOVER_LIMIT) {
+            if (!hasIframe && isCodeExtendPanel(child) && (content.length >= 2 || hasImage) && tagged.length < HOVER_LIMIT) {
               child.setAttribute(HOVER_ATTR, String(tagged.length + 1));
               tagged.push({ original: child, content });
             }
@@ -267,6 +278,17 @@
       const root = sourceRoot.cloneNode(true);
       for (const { original } of tagged) original.removeAttribute(HOVER_ATTR); // 还原原页面，标记只留在克隆树
 
+      // arXiv abs 页排版对齐（#69）：左栏的分类面包屑和论文标题在页面里是 h1，但剪藏文档
+      // 的标题（document.title）才是 h1 语义——Obsidian web clipper 样例中两者均为 ##。
+      // 只改克隆树，不动原页面
+      if (isArxivAbsPage(location.href)) {
+        for (const h1 of [...root.querySelectorAll('h1')]) {
+          const h2 = document.createElement('h2');
+          h2.append(...[...h1.childNodes]);
+          h1.replaceWith(h2);
+        }
+      }
+
       // iframe 管线（#47）：正文里的 iframe（如折叠 details 里的算法可视化面板）是有价值的内容，
       // 不能随垃圾清理丢掉。数据只取 src/title/尺寸（都在原树上），克隆树里原位留占位符，
       // 由 bridge 转写成飞书 iframe 块（block_type 26）。须在清理之前做——清理会删掉 iframe。
@@ -379,6 +401,10 @@
       // math 也清掉：KaTeX/MathJax 的 MathML 是公式的无障碍副本，正文另有可见渲染（katex-html 等），
       // 保留会让每个公式重复三遍（mrow 文本 + annotation 里的 TeX 源码 + 可见副本）；公式只留可见副本
       root.querySelectorAll('script,style,noscript,template,nav,aside,form,button,input,select,textarea,svg,canvas,iframe,math').forEach((node) => node.remove());
+      // hidden 属性元素（arXiv 的下载提示 #download-button-info、BibTeX 弹窗等）与 role=tooltip
+      // 悬浮说明（如 arXiv DOI 旁的 DataCite 提示）是控件/无障碍注解，不是正文（#69 隐藏元素噪音）。
+      // 与悬浮面板无冲突：灯泡面板是 class 控制的 display:none，不带 hidden 属性/role
+      root.querySelectorAll('[hidden],[role="tooltip"]').forEach((node) => node.remove());
 
       const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
       const clonedImages = [...root.querySelectorAll('img')];
@@ -507,6 +533,16 @@
       return null;
     }
 
+    // arXiv abs 页判定（#69）：正文根收窄与标题降级共用。与 detectMainPdf 的 arXiv 规则同形，
+    // 但用途不同（排版对齐，非 PDF 识别），两处各自维护
+    function isArxivAbsPage(pageUrl) {
+      try {
+        const page = new URL(pageUrl);
+        const isArxiv = page.hostname === 'arxiv.org' || page.hostname.endsWith('.arxiv.org');
+        return isArxiv && /^\/abs\/[^/]+/.test(page.pathname);
+      } catch { return false; }
+    }
+
     // frameset 页面（90 年代老站常见）：主文档 document.body 为空/null，正文在同源子 frame 里
     function frameBodies() {
       const bodies = [];
@@ -521,7 +557,10 @@
     // frameset 文档：body 即 FRAMESET 元素。它本身没有正文（且第三方扩展的注入物会 append 到它上面，
     // 可能超过下方 20 字符阈值导致永不回退），所以 frameset 永远跳过主文档、直接走 frame 回退
     const body = document.body?.tagName === 'FRAMESET' ? null : document.body;
-    const primary = document.querySelector('article, main, [role="main"]') || body;
+    // arXiv abs 页（#69）：正文根收窄到左栏，排除右侧 extra-services 栏目
+    // （下载按钮/浏览上下文/引用服务等导航噪音），对齐 Obsidian web clipper 产出
+    const arxivColumn = isArxivAbsPage(location.href) ? document.querySelector('#abs-outer .leftcolumn') : null;
+    const primary = arxivColumn || document.querySelector('article, main, [role="main"]') || body;
     let markdown = primary ? await extractFrom(primary) : '';
     if (markdown.length < 20) {
       const bodies = frameBodies();

@@ -222,22 +222,34 @@ test('display:none 容器内的图片：不提取、不产生锚点', async () =
   assert.ok(!result.markdown.includes('hidden.png') && !result.markdown.includes('[[FEISHU_CLIP_IMAGE:1]]'), '隐藏图片不应产生锚点');
 });
 
-// 悬浮内容（labuladong 代码行内的灯泡 hover 面板，span.code-extend-content 默认 display:none）：
-// 用户在原页面悬停时能看到这些内容，剪藏直接丢弃可惜、混进正文又无标注。约定：在悬浮触发位置
+// 悬浮内容（#69 收窄后只认 labuladong 灯泡注解面板）：真实 DOM 结构为
+// span.code-extend-tooltip > svg.code-extend-icon（灯泡图标）+ span.code-extend-content
+// （注解面板，默认 display:none 无布局盒，悬停灯泡才展示）。约定：在悬浮触发位置
 // 留 `悬浮内容{i}` 标记，真正的内容作为注释段落 `悬浮内容{i}: 内容` 排到所在块（如代码块）之后。
+function bulbIcon() {
+  const icon = element('svg');
+  icon.setAttribute('class', 'code-extend-icon');
+  return icon;
+}
+
+function codeExtendPanel(children) {
+  const panel = element('span', children);
+  panel.setAttribute('class', 'code-extend-content position-down');
+  panel.getClientRects = () => []; // display:none 子树没有布局盒，悬停才显示
+  return panel;
+}
+
 function hoverPanel(content) {
-  const node = element('span', [textNode(content)]);
-  node.getClientRects = () => []; // display:none 子树没有布局盒，悬停才显示
-  return node;
+  return element('span', [bulbIcon(), codeExtendPanel([textNode(content)])]); // span.code-extend-tooltip
 }
 
 test('pre 内悬浮面板：标记留在代码块内原位，注释排在代码块后', async () => {
-  const panel = hoverPanel('拓扑排序两种实现：BFS 基于入度，DFS 基于后序遍历逆序。');
+  const panel = codeExtendPanel([textNode('拓扑排序两种实现：BFS 基于入度，DFS 基于后序遍历逆序。')]);
   const doc = {
     title: '悬浮内容',
     body: element('body', [
       element('p', [textNode(LONG)]),
-      element('pre', [textNode('def topo_sort():\n    pass\n'), panel]),
+      element('pre', [textNode('def topo_sort():\n    pass\n'), element('span', [bulbIcon(), panel])]),
       element('p', [textNode('代码之后的段落')]),
     ]),
     querySelector: () => null,
@@ -296,12 +308,40 @@ test('普通段落内的悬浮面板：注释排在该段落之后', async () =>
   assert.ok(noteAt > markerAt && noteAt < nextPara, '注释应紧跟所在段落之后、下一段之前');
 });
 
-test('隐藏但文本过短（<2 字符）的容器不当作悬浮内容', async () => {
-  const dot = element('span', [textNode('·')]);
-  dot.getClientRects = () => [];
+// #69 硬收窄：通用启发式（任何无布局盒 + 文本≥2 字符或含图）已废弃——arXiv 页面上
+// 大量隐藏元素（下载提示、移动版链接等）误中，剪藏文档里一堆「悬浮内容{i}」标记。
+// 只有灯泡触发器（svg.code-extend-icon 兄弟）关联的 .code-extend-content 面板才打标
+test('通用隐藏容器（无灯泡触发器，文本≥2 字符）不再判定为悬浮内容', async () => {
+  const hidden = element('div', [textNode('View a PDF of the paper titled Some Paper, by Some Author')]);
+  hidden.getClientRects = () => []; // arXiv hidden 提示块，无布局盒
   const doc = {
-    title: '无文本隐藏容器',
-    body: element('body', [element('p', [textNode(LONG), dot])]),
+    title: '隐藏容器',
+    body: element('body', [element('p', [textNode(LONG)]), hidden]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('悬浮内容'), '不应产生悬浮标记或注释');
+});
+
+test('code-extend-content 面板缺 svg.code-extend-icon 兄弟（触发器缺失）不打标', async () => {
+  const orphan = codeExtendPanel([textNode('没有灯泡图标的注解面板内容')]);
+  const doc = {
+    title: '触发器缺失',
+    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('code\n'), element('span', [orphan])])]),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc);
+  assert.equal(result.error, undefined);
+  assert.ok(!result.markdown.includes('悬浮内容'), '无触发器关联的面板不应产生悬浮标记');
+});
+
+test('灯泡面板文本过短（<2 字符）又无图时不当作悬浮内容', async () => {
+  const doc = {
+    title: '短文本灯泡面板',
+    body: element('body', [element('p', [textNode(LONG)]), hoverPanel('·')]),
     querySelector: () => null,
     querySelectorAll: () => [],
   };
@@ -313,14 +353,12 @@ test('隐藏但文本过短（<2 字符）的容器不当作悬浮内容', async
 // 纯图片悬浮面板（labuladong 的实际形态：.code-extend-content 里只有一张示意图，无文字）：
 // 图片作为该面板的内容保留——按面板编号标注、锚点移到所在代码块后，而不是像 0.1.1 那样直接丢弃。
 test('纯图片悬浮面板：图片提取并按面板编号标注，锚点排在代码块后', async () => {
-  const panel = element('span', []);
-  panel.getClientRects = () => [];
   const hiddenImg = img('https://example.test/panel-only.png', '');
   hiddenImg.getClientRects = () => [];
-  panel.append(hiddenImg);
+  const panel = codeExtendPanel([hiddenImg]);
   const doc = {
     title: '纯图片悬浮面板',
-    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('def f():\n'), panel]), element('p', [textNode('后续段落')])]),
+    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('def f():\n'), element('span', [bulbIcon(), panel])]), element('p', [textNode('后续段落')])]),
     querySelector: () => null,
     querySelectorAll: () => [],
   };
@@ -341,13 +379,12 @@ test('纯图片悬浮面板：图片提取并按面板编号标注，锚点排�
 });
 
 test('悬浮面板内既有文字又有图片：注释和图片都按编号保留', async () => {
-  const panel = hoverPanel('带示意图的悬浮讲解内容');
   const hiddenImg = img('https://example.test/panel-inner.png', '');
   hiddenImg.getClientRects = () => [];
-  panel.append(hiddenImg);
+  const panel = codeExtendPanel([textNode('带示意图的悬浮讲解内容'), hiddenImg]);
   const doc = {
     title: '悬浮面板带图',
-    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('code\n'), panel])]),
+    body: element('body', [element('p', [textNode(LONG)]), element('pre', [textNode('code\n'), element('span', [bulbIcon(), panel])])]),
     querySelector: () => null,
     querySelectorAll: () => [],
   };
