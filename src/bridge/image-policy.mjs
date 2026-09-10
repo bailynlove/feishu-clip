@@ -133,12 +133,31 @@ export function pinnedLookup(record) {
   };
 }
 
+// 按主机串行化信号量（#70）：arXiv 等站点限制同 IP 并发连接数，双 job 并发同主机下载会
+// 撞出 ECONNRESET。同 hostname 的下载 FIFO 排队、单通道放行；不同 host 并行不受限。
+// 槽位授予后才创建 request（connect/response/total 计时都从 request 创建起算），
+// 因此排队等待不计入单次下载超时；槽位由调用方在 finally 中释放，单请求失败不堵队列。
+// 队列不设上限——每 host 深度天然有限（图片 ≤30/篇 + PDF 1 份），失控由 job 级 lease/TTL 兜底
+const hostTails = new Map();
+
+function acquireHostSlot(hostname) {
+  const tail = hostTails.get(hostname) ?? Promise.resolve();
+  let release;
+  const slot = new Promise((resolve) => { release = resolve; });
+  const next = tail.then(() => slot);
+  hostTails.set(hostname, next);
+  // 链尾 settle 后若无人接续则清表，避免一次性 host 在 Map 里累积
+  next.then(() => { if (hostTails.get(hostname) === next) hostTails.delete(hostname); });
+  return tail.then(() => release);
+}
+
 // 带 SSRF 钉孔（pinned lookup）的单次 GET：Content-Length 预检 + 流式字节累计双重超限快速失败。
-// label 决定错误码前缀（IMAGE_*/PDF_*）；record 由 resolvePublicHost 给出，逐跳重解析
+// label 决定错误码前缀（IMAGE_*/PDF_*）；record 由 resolvePublicHost 给出，逐跳重解析。
+// 图片与 PDF 两条下载路径都收口在这里，按主机信号量因此自动覆盖两条路径（重定向每跳重进、按各跳 host 排队）
 export function requestPublicBytes(url, record, { accept, maxBytes, label, timeouts = {} }) {
   const { connectMs = 5_000, responseMs = 10_000, totalMs = 20_000 } = timeouts;
   const client = url.protocol === 'https:' ? https : http;
-  return new Promise((resolve, reject) => {
+  return acquireHostSlot(url.hostname).then((release) => new Promise((resolve, reject) => {
     const request = client.request(url, {
       method: 'GET',
       headers: { Accept: accept, 'User-Agent': 'FeishuClip/0.1' },
@@ -178,7 +197,7 @@ export function requestPublicBytes(url, record, { accept, maxBytes, label, timeo
     request.on('error', reject);
     request.setTimeout(totalMs, () => request.destroy(Object.assign(new Error(`${label}_TOTAL_TIMEOUT`), { code: `${label}_FETCH_FAILED` })));
     request.end();
-  });
+  }).finally(release));
 }
 
 export async function downloadPublicImage(source, { limits = IMAGE_LIMITS, lookup = dns.lookup } = {}) {

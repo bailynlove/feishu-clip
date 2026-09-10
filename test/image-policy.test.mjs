@@ -194,3 +194,83 @@ test('assertPdfBytes: %PDF- 魔数须在文件头 1024 字节内', () => {
   assert.throws(() => assertPdfBytes(Buffer.from('<html><body>404</body></html>', 'latin1')), /PDF_TYPE_REJECTED/, 'HTML 错误页不得当 PDF');
   assert.throws(() => assertPdfBytes(Buffer.concat([Buffer.alloc(2000), Buffer.from('%PDF-', 'latin1')])), /PDF_TYPE_REJECTED/, '魔数超出 1024 字节窗口同样拒绝');
 });
+
+// ——— 按主机串行化信号量（#70）：同 host FIFO 单通道，不同 host 并行 ———
+
+test('host 信号量：同 host 并发下载最大在飞为 1 且 FIFO 放行', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const arrivals = [];
+  await withHttpServer((request, response) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    arrivals.push(request.url);
+    setTimeout(() => {
+      inFlight -= 1;
+      response.writeHead(200, { 'Content-Type': 'application/pdf' });
+      response.end('%PDF-');
+    }, 30);
+  }, async (base) => {
+    const paths = ['/0.pdf', '/1.pdf', '/2.pdf', '/3.pdf', '/4.pdf'];
+    await Promise.all(paths.map((path) => requestPublicBytes(new URL(`${base}${path}`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' })));
+  });
+  assert.equal(maxInFlight, 1, '同 host 单通道放行');
+  assert.deepEqual(arrivals, ['/0.pdf', '/1.pdf', '/2.pdf', '/3.pdf', '/4.pdf'], '按发起顺序 FIFO 放行');
+});
+
+test('host 信号量：不同 host 并行不受限', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  await withHttpServer((request, response) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    setTimeout(() => {
+      inFlight -= 1;
+      response.writeHead(200, { 'Content-Type': 'application/pdf' });
+      response.end('%PDF-');
+    }, 60);
+  }, async (base) => {
+    // 同一台服务器、两个 hostname 键（pinned lookup 无视主机名都回 127.0.0.1）
+    const otherHost = base.replace('127.0.0.1', 'localhost');
+    await Promise.all([
+      requestPublicBytes(new URL(`${base}/a.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      requestPublicBytes(new URL(`${otherHost}/b.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+    ]);
+  });
+  assert.equal(maxInFlight, 2, '不同 host 的在飞下载可重叠');
+});
+
+test('host 信号量：单请求 reject 后队列继续放行', async () => {
+  await withHttpServer((request, response) => {
+    if (request.url === '/boom.pdf') {
+      response.writeHead(500);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'application/pdf' });
+    response.end('%PDF-');
+  }, async (base) => {
+    const [failure, success] = await Promise.allSettled([
+      requestPublicBytes(new URL(`${base}/boom.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      requestPublicBytes(new URL(`${base}/ok.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+    ]);
+    assert.equal(failure.status, 'rejected');
+    assert.match(failure.reason.message, /PDF_HTTP_500/);
+    assert.equal(success.status, 'fulfilled', '前序请求失败在 finally 中释放槽位，后续请求照常完成');
+  });
+});
+
+test('host 信号量：排队等待不计入单次下载超时', async () => {
+  await withHttpServer((request, response) => {
+    setTimeout(() => {
+      response.writeHead(200, { 'Content-Type': 'application/pdf' });
+      response.end('%PDF-');
+    }, request.url === '/slow.pdf' ? 300 : 0);
+  }, async (base) => {
+    const slow = requestPublicBytes(new URL(`${base}/slow.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' });
+    // totalMs 远小于前序请求 300ms 的槽位占用：若排队等待计入超时，此请求必死于 TOTAL_TIMEOUT
+    const queued = requestPublicBytes(new URL(`${base}/fast.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF', timeouts: { totalMs: 100 } });
+    const [, fast] = await Promise.all([slow, queued]);
+    assert.equal(fast.buffer.toString('latin1'), '%PDF-');
+  });
+});
