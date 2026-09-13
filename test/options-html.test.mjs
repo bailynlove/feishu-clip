@@ -98,3 +98,19 @@ test('preset editor has an AI digest switch, initially off, with a hidden instru
   assert.ok(html.includes('id="f-digest-instruction"'), '应有预设级摘要指令输入框');
   assert.ok(html.includes('留空使用全局摘要指令'), '应写明留空 = 用全局指令');
 });
+
+// ——— 设置页分区折叠（#76）：第 2/3 区用 details 包裹可折叠，默认展开（open），
+// 配对/开发者模式两区不参与；折叠状态持久化逻辑在 options-state.js ———
+test('sections 2 (AI 摘要) and 3 (预设管理) are collapsible details, default open', () => {
+  for (const [id, title] of [['ai-section-collapse', '2. AI 摘要'], ['presets-section-collapse', '3. 预设管理']]) {
+    const block = html.match(new RegExp(`<details[^>]*id="${id}"[^>]*>([\\s\\S]*?)</summary>`));
+    assert.ok(block, `应有 #${id} 折叠容器`);
+    assert.ok(/<details[^>]*\bopen\b/.test(block[0]), `#${id} 默认展开（open）`);
+    assert.ok(block[1].includes(`<h2>${title}</h2>`), `#${id} 的 summary 含区标题「${title}」`);
+  }
+});
+
+test('sections 1 (配对) and 4 (开发者模式) stay plain, no collapse wrapper', () => {
+  assert.match(html, /<section class="ps-card">\s*<h2>1\. 配对本地 Bridge<\/h2>/, '配对区标题不被 details 包裹');
+  assert.match(html, /<section class="ps-card">\s*<h2>4\. 开发者模式<\/h2>/, '开发者模式区标题不被 details 包裹');
+});

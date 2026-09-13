@@ -215,8 +215,9 @@ async function handle(message) {
       await migratePresets();
       // activeAttempt 供 job 恢复；presets/defaultPresetId 供弹窗与设置页（#35/#36）；
       // developerMode 供设置页开发者模式开关（缺省 false）；
-      // aiDigestInstruction 供设置页 AI 摘要区与 CLIP 指令回落（#75，非敏感）
-      return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode', 'aiDigestInstruction']);
+      // aiDigestInstruction 供设置页 AI 摘要区与 CLIP 指令回落（#75，非敏感）；
+      // optionsUiCollapsed 供设置页分区折叠状态回填（#76）
+      return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode', 'aiDigestInstruction', 'optionsUiCollapsed']);
     }
     // AI 摘要配置（#75）：三个端点纯代理到 bridge；API key 只存 bridge 的 ai.json，
     // 扩展侧任何环节不落地（SAVE 留空的 apiKey 由 options.js 组装请求体时省略）

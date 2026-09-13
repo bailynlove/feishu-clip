@@ -19,6 +19,26 @@ export function imageModeHint(mode) {
   return (IMAGE_MODE_OPTIONS.find((option) => option.value === mode) ?? IMAGE_MODE_OPTIONS[0]).hint;
 }
 
+// ——— 分区折叠（#76）：第 2 区「AI 摘要」/ 第 3 区「预设管理」可折叠，状态存
+// chrome.storage.local 单键 optionsUiCollapsed（{ aiDigest, presets }，true = 收起）。
+// 默认展开：缺键/非法值一律归一为 false（展开）——配对区与开发者模式区不参与折叠 ———
+export const OPTIONS_COLLAPSE_KEY = 'optionsUiCollapsed';
+
+// details 元素 id → 存储字段；options.js 按此表接线 init 回填与 toggle 事件
+export const COLLAPSIBLE_SECTIONS = Object.freeze([
+  { id: 'ai-section-collapse', key: 'aiDigest' },
+  { id: 'presets-section-collapse', key: 'presets' },
+]);
+
+export function normalizeCollapsedSections(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return Object.fromEntries(COLLAPSIBLE_SECTIONS.map(({ key }) => [key, source[key] === true]));
+}
+
+export function setSectionCollapsed(state, key, collapsed) {
+  return { ...normalizeCollapsedSections(state), [key]: Boolean(collapsed) };
+}
+
 function findIndex(state, id) {
   return state.presets.findIndex((preset) => preset.id === id);
 }

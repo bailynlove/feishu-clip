@@ -334,3 +334,33 @@ test('aiHeadersToText serializes saved headers back to textarea lines', () => {
   assert.equal(aiHeadersToText(undefined), '');
   assert.equal(aiHeadersToText({}), '');
 });
+
+// ——— 设置页分区折叠（#76）：折叠状态存 chrome.storage.local 单键，默认展开 ———
+
+import {
+  COLLAPSIBLE_SECTIONS,
+  normalizeCollapsedSections,
+  setSectionCollapsed,
+} from '../src/extension/options-state.js';
+
+test('COLLAPSIBLE_SECTIONS registers exactly the AI 摘要 and 预设管理 sections', () => {
+  assert.deepEqual(COLLAPSIBLE_SECTIONS, [
+    { id: 'ai-section-collapse', key: 'aiDigest' },
+    { id: 'presets-section-collapse', key: 'presets' },
+  ]);
+});
+
+test('normalizeCollapsedSections defaults to expanded and coerces garbage', () => {
+  assert.deepEqual(normalizeCollapsedSections(undefined), { aiDigest: false, presets: false }, '首次打开（无历史状态）默认展开');
+  assert.deepEqual(normalizeCollapsedSections({ aiDigest: true }), { aiDigest: true, presets: false }, '缺键补默认');
+  assert.deepEqual(normalizeCollapsedSections({ aiDigest: 'yes', presets: 1 }), { aiDigest: false, presets: false }, '非布尔值归一为展开');
+  assert.deepEqual(normalizeCollapsedSections('junk'), { aiDigest: false, presets: false }, '非对象归一为展开');
+});
+
+test('setSectionCollapsed toggles one key immutably', () => {
+  const before = { aiDigest: false, presets: false };
+  const after = setSectionCollapsed(before, 'presets', true);
+  assert.deepEqual(after, { aiDigest: false, presets: true });
+  assert.deepEqual(before, { aiDigest: false, presets: false }, '不改动入参');
+  assert.deepEqual(setSectionCollapsed(after, 'presets', false), before, '再展开回到默认');
+});

@@ -9,6 +9,7 @@ import {
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiHeadersToText, aiTestResultView,
+  COLLAPSIBLE_SECTIONS, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, setSectionCollapsed,
 } from './options-state.js';
 import { createDriveFolder, resolveDigest, resolveImageMode, resolvePdfDrive, DEFAULT_DIGEST_INSTRUCTION } from './presets.js';
 
@@ -718,6 +719,25 @@ $('#devmode-toggle').addEventListener('click', async () => {
 
 $('#joblog-refresh').addEventListener('click', () => loadJobLog());
 
+// ——— 分区折叠（#76）：AI 摘要/预设管理两区用原生 details（键盘 Enter/Space 原生可达，
+// 收起时子树留在 DOM，未保存的表单值不丢）；open 状态持久化到 chrome.storage.local 单键。
+// 内存 collapsed 是唯一事实源：初始化回填触发的 toggle 与存储值相等，直接不落库；
+// 处理器同步更新内存再写库，避免 get→set 读改写竞态（两区快速连续 toggle 时丢另一区状态） ———
+function initCollapsibleSections(stored) {
+  let collapsed = normalizeCollapsedSections(stored);
+  for (const { id, key } of COLLAPSIBLE_SECTIONS) {
+    const node = $(`#${id}`);
+    if (!node) continue;
+    node.open = !collapsed[key];
+    node.addEventListener('toggle', async () => {
+      const next = !node.open;
+      if (next === collapsed[key]) return;
+      collapsed = setSectionCollapsed(collapsed, key, next);
+      await chrome.storage.local.set({ [OPTIONS_COLLAPSE_KEY]: collapsed });
+    });
+  }
+}
+
 async function init() {
   const settings = await message({ type: 'GET_SETTINGS' });
   state = { presets: settings.presets ?? [], defaultPresetId: settings.defaultPresetId ?? null };
@@ -726,6 +746,7 @@ async function init() {
   syncEditor();
   initBridge();
   initAiSection(settings.aiDigestInstruction);
+  initCollapsibleSections(settings.optionsUiCollapsed);
   // 开关为开时展开日志区并自动加载一次（缺省 false 不加载）
   setDeveloperMode(settings.developerMode === true);
 }

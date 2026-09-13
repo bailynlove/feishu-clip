@@ -20,7 +20,8 @@
 </section>
 
 <section class="ps-card">
-  <h2>2. AI 摘要</h2>
+  <details class="ps-collapse" id="ai-section-collapse" open>
+  <summary class="ps-collapse-summary"><h2>2. AI 摘要</h2></summary>
   <p class="ps-desc">在本机 Bridge 上配置一个 AI API；预设里开启「AI 摘要」后，剪藏文档自动带一段 AI 生成的摘要。API key 只保存在本机 Bridge，不会写入浏览器存储或上传他处。</p>
   <div class="ps-field"><span class="ps-label">API 类型</span>
     <select id="ai-api-type" class="ps-input"></select>
@@ -42,10 +43,12 @@
   </details>
   <label class="ps-field"><span class="ps-label">全局摘要指令</span><textarea id="ai-instruction" class="ps-input mono" rows="4"></textarea></label>
   <p class="ps-desc">留空使用内置默认指令；预设级指令优先于全局指令。</p>
+  </details>
 </section>
 
 <section class="ps-card pc-card">
-  <h2>3. 预设管理</h2>
+  <details class="ps-collapse" id="presets-section-collapse" open>
+  <summary class="ps-collapse-summary"><h2>3. 预设管理</h2></summary>
   <p class="ps-desc">每套预设自带保存目标、模板与 triggers 规则；标签顺序即规则命中优先级。至少保留一套预设。</p>
   <div class="ps-tabs" id="preset-tabs"></div>
   <div class="pc-form">
@@ -140,6 +143,7 @@
     <label class="ps-field"><span class="ps-label">Triggers 规则（一行一条）</span><textarea id="f-triggers" class="ps-input mono" rows="3" placeholder="https://example.com/blog&#10;/^https:\/\/.*\.zhihu\.com\//i"></textarea></label>
     <div id="trigger-errors" class="trigger-errors hidden"></div>
   </div>
+  </details>
 </section>
 
 <section class="ps-card">
