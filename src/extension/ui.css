@@ -70,6 +70,15 @@
 .options .ps-btn.danger-jelly{border:0;background:linear-gradient(rgba(255,255,255,.55),rgba(255,255,255,.06) 55%),#ec5f67;color:#fff;box-shadow:inset 0 2px 4px rgba(255,255,255,.7),inset 0 -4px 8px rgba(120,10,20,.18),0 6px 16px rgba(236,95,103,.45);transition:transform .12s,box-shadow .12s}
 .options .ps-btn.danger-jelly:active{transform:translateY(2px) scale(.98);box-shadow:inset 0 2px 3px rgba(255,255,255,.4),0 2px 6px rgba(236,95,103,.35)}
 .options .pair-submit{width:100%}
+/* AI 摘要（#75）：保存/测试连接并排按钮 + 行内结果提示（ps-note 语义色沿用全局） */
+.options .ai-actions{display:flex;gap:10px;margin-bottom:10px}
+.options .ai-actions .ps-btn{flex:1}
+.options #ai-result{margin-bottom:12px}
+/* 高级设置：折叠区与卡片同色系，summary 小手 + 左侧竖线标识从属 */
+.options .ps-advanced{margin-bottom:12px;border:1px solid #eef1f6;border-radius:10px;padding:8px 12px}
+.options .ps-advanced summary{cursor:pointer;font-size:13px;font-weight:600;color:#4b5563;user-select:none}
+.options .ps-advanced[open] summary{margin-bottom:8px}
+.options .ps-advanced code{font-size:11px;background:#f3f4f6;border-radius:4px;padding:0 4px}
 .options .picker-confirm{flex:1}
 .options .ps-dialog-mask{position:fixed;inset:0;z-index:20;background:rgba(20,30,50,.4)}
 .options .ps-dialog{position:fixed;z-index:21;top:50%;left:50%;transform:translate(-50%,-50%);width:340px;background:#fff;border-radius:18px;padding:22px 22px 18px;box-shadow:0 18px 50px rgba(20,30,50,.3)}

@@ -654,3 +654,57 @@ test('awaiting_bytes 可取消；超龄走 job TTL → expired', async () => {
     assert.equal((await store.get('attempt-stale', 'pdf')).status, 'expired');
   }, { now: () => now, jobTtlMs: 10_000 });
 });
+
+// ——— AI 摘要（#75）：digest 请求随提交落库；digestText 经 recordDigest 缓存 ———
+
+test('clip job 的 digest 字段随提交落库，存量 job 读取补 null', async () => {
+  await withStore(async ({ store, filePath }) => {
+    const withDigest = await store.submit({
+      attemptId: 'attempt-1',
+      sourceUrl: 'https://example.test/article',
+      digest: { enabled: true, instruction: '总结成三点' },
+    });
+    assert.deepEqual(withDigest.job.digest, { enabled: true, instruction: '总结成三点' });
+    assert.equal(withDigest.job.digestText, null);
+
+    const plain = await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/other' });
+    assert.equal(plain.job.digest, null, '缺省 digest 落 null');
+    assert.equal(plain.job.digestText, null);
+
+    // 存量 job 文件没有 digest 字段，读取侧补 null（与 kind 迁移同一约定）
+    const data = JSON.parse(await readFile(filePath, 'utf8'));
+    for (const job of data.jobs) {
+      delete job.digest;
+      delete job.digestText;
+    }
+    await writeFile(filePath, JSON.stringify(data));
+    const legacy = await store.get('attempt-1', 'clip');
+    assert.equal(legacy.digest, null);
+    assert.equal(legacy.digestText, null);
+  });
+});
+
+test('recordDigest 缓存摘要结果：worker 守卫仿 recordDocument（但不要求 createInFlight）', async () => {
+  await withStore(async ({ store, filePath }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', digest: { enabled: true, instruction: '总结' } });
+
+    // 非 running 状态不得写
+    await assert.rejects(() => store.recordDigest('attempt-1', 'worker-a', '摘要'), /active worker/);
+    await store.claim('attempt-1', 'worker-a');
+    // 非活跃 worker 不得写
+    await assert.rejects(() => store.recordDigest('attempt-1', 'worker-b', '摘要'), /active worker/);
+    // digest 阶段在建档前：无 beginCreate 也能写（与 recordDocument 的差别）
+    const recorded = await store.recordDigest('attempt-1', 'worker-a', '摘要内容');
+    assert.equal(recorded.digestText, '摘要内容');
+    assert.equal(recorded.status, 'running', 'recordDigest 不动状态机');
+
+    // 非字符串拒绝
+    await assert.rejects(() => store.recordDigest('attempt-1', 'worker-a', null), /digestText is required/);
+
+    // 持久化往返 + 重启后可读（重跑 #execute 靠它复用缓存不调 AI）
+    const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+    assert.equal(persisted.jobs[0].digestText, '摘要内容');
+    const reloaded = new PersistentJobStore({ filePath });
+    assert.equal((await reloaded.get('attempt-1', 'clip')).digestText, '摘要内容');
+  });
+});

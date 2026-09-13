@@ -69,6 +69,33 @@ test('renderBody returns the content unchanged for an empty or blank template', 
   assert.equal(renderBody('   \n  ', ctx), snapshot.markdown);
 });
 
+// ——— AI 摘要（#75）：digestEnabled 时 {{digest}} 以自指字面量穿过渲染，最终替换在 bridge 侧 ———
+
+test('buildContext with digestEnabled injects the self-referential {{digest}} literal', () => {
+  const enabled = buildContext(snapshot, { digestEnabled: true });
+  assert.equal(enabled.digest, '{{digest}}');
+  assert.equal(renderTemplate('{{digest}}', enabled), '{{digest}}', '占位符原样保留进正文');
+  assert.equal(renderTemplate('{{ digest }}', enabled), '{{digest}}', '带空格写法归一为无空格字面量');
+  assert.equal(renderTemplate('前文 {{digest}} 后文', enabled), '前文 {{digest}} 后文');
+});
+
+test('buildContext without digestEnabled leaves digest unknown and blanked', () => {
+  assert.equal('digest' in ctx, false, '默认不设 digest 键');
+  assert.equal(buildContext(snapshot, {}).digest, undefined);
+  assert.equal(buildContext(snapshot, { digestEnabled: false }).digest, undefined);
+  assert.equal(renderTemplate('{{digest}}', ctx), '', '未知变量置空的既有行为');
+});
+
+test('renderBody keeps {{digest}} literal when enabled: in-place and content-append semantics', () => {
+  const enabled = buildContext(snapshot, { digestEnabled: true });
+  assert.equal(renderBody('{{digest}}\n\n{{content}}', enabled), `{{digest}}\n\n${snapshot.markdown}`, '含 {{content}} 时原位保留');
+  // 无 {{content}} 的追加语义：占位符随追加段一起保留
+  assert.equal(renderBody('{{digest}}', enabled), `${snapshot.markdown}\n\n{{digest}}`);
+  // 关闭时按未知变量置空
+  assert.equal(renderBody('{{digest}}\n\n{{content}}', ctx), `\n\n${snapshot.markdown}`);
+  assert.equal(renderBody('{{digest}}', ctx), `${snapshot.markdown}\n\n`);
+});
+
 test('renderTitle falls back to ctx.title when the render is empty or blank', () => {
   assert.equal(renderTitle('{{unknown}}', ctx), sanitizeFilename(snapshot.title));
   assert.equal(renderTitle('   ', ctx), sanitizeFilename(snapshot.title));

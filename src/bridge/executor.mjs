@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { FAILURE_STAGE, IMAGE_MODES, JOB_KIND, JOB_KIND_STRATEGY, JOB_STATUS } from './job-store.mjs';
 import { downloadPublicImage, downloadPublicPdf, IMAGE_LIMITS, PDF_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
+import { applyDigest, generateDigest as requestDigest } from './ai-digest.mjs';
 
 // 尝试标记：写在元信息引用块里（prepareMarkdown），reconcile 靠它在 wiki 里反查认领文档
 const ATTEMPT_MARKER_PREFIX = '剪藏尝试：';
@@ -44,6 +45,16 @@ function pdfErrorMessage(error) {
   if (error?.code === 'PDF_TYPE_REJECTED') return '下载到的内容不是 PDF 文件';
   if (error?.code === 'PDF_SSRF_REJECTED') return 'PDF 地址不安全，已拒绝下载';
   return error?.message || 'PDF 上传失败';
+}
+
+// AI 摘要失败的中文文案（#75）：机器码翻译成可读提示，其余透传原始消息；
+// executor 的 digest 警告与 server 的 /v1/ai/test 失败响应共用这一份
+export function aiErrorMessage(error) {
+  if (error?.code === 'AI_NOT_CONFIGURED') return '未配置 AI API';
+  if (error?.code === 'AI_AUTH_FAILED') return 'AI API 密钥无效或没有权限';
+  if (error?.code === 'AI_RATE_LIMITED') return 'AI API 触发限流，请稍后重试';
+  if (error?.code === 'AI_TIMEOUT') return 'AI API 请求超时';
+  return error?.message || 'AI 摘要生成失败';
 }
 
 // 凭据回退判定（#68）：url 型下载撞 401/403 不算失败，转 awaiting_bytes 等扩展分块回传。
@@ -184,12 +195,16 @@ function isServerTimeout(error) {
 }
 
 export class ClipExecutor {
-  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, staging = null, sleep = defaultSleep }) {
+  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, staging = null, sleep = defaultSleep, generateDigest = requestDigest, getAiConfig = async () => null }) {
     this.store = store;
     this.lark = lark;
     this.logger = logger;
     // pdf 下载函数可注入（测试 stub；生产默认走 image-policy 的 SSRF 校验下载）
     this.downloadPdf = downloadPdf;
+    // AI 摘要（#75）：generateDigest/getAiConfig 可注入（测试 fake，仿 downloadPdf）；
+    // 生产默认接 ai-digest.mjs，配置由 server 传入的 ai.json store 读取
+    this.generateDigest = generateDigest;
+    this.getAiConfig = getAiConfig;
     // 重试退避 sleep 可注入（测试不等真实退避；生产为 setTimeout）
     this.sleep = sleep;
     // 分块暂存（#68）：bytes 型 pdf job 的字节来源；null 时 bytes 路径不可用（仅测试场景）
@@ -375,7 +390,27 @@ export class ClipExecutor {
     try {
       // 任务级图片写入模式：合法三态直用；存量任务只有 includeImages 布尔，false → off，其余 → preview
       const imageMode = IMAGE_MODES.includes(job.imageMode) ? job.imageMode : (job.includeImages === false ? 'off' : 'preview');
-      const prepared = prepareMarkdown(job.snapshot, job.attemptId, { imageMode });
+      // AI 摘要阶段（#75）：建档（prepareMarkdown/create_document）之前对正文生成摘要。
+      // 开关关 → 整段跳过；digestText 已落库 → 直接复用缓存不调 AI（#72-8，重跑安全）；
+      // 失败绝不 fail job——记 timeline + 警告（与图片警告同一通道并入 complete 的 warnings，
+      // 部分成功降级 #72-7），占位符置空/默认布局省略由 applyDigest 保证
+      let digestWarning = null;
+      let digestText = job.digestText ?? null;
+      if (job.digest?.enabled && digestText === null) {
+        const digestAt = Date.now();
+        try {
+          digestText = await this.generateDigest({ config: await this.getAiConfig(), instruction: job.digest.instruction, content: job.snapshot.markdown });
+          await this.store.recordDigest(job.attemptId, workerId, digestText);
+          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt });
+        } catch (error) {
+          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: String(error?.message || error).slice(0, 300) });
+          digestWarning = `AI 摘要生成失败：${aiErrorMessage(error)}`;
+        }
+      }
+      const prepared = prepareMarkdown(
+        { ...job.snapshot, markdown: applyDigest(job.snapshot.markdown, job.digest?.enabled ? digestText : null) },
+        job.attemptId, { imageMode },
+      );
       if (!document) {
         const createStageAt = Date.now();
         await this.store.beginCreate(job.attemptId, workerId);
@@ -419,7 +454,8 @@ export class ClipExecutor {
         timeline.push({ kind: 'stage', name: 'create_document', ms: Date.now() - createStageAt });
       }
 
-      const warnings = [];
+      // digest 失败警告（#75）与图片/iframe 警告同一通道，随 complete 落库呈现为部分成功
+      const warnings = digestWarning ? [digestWarning] : [];
       let totalBytes = 0;
       // 图片/iframe 两个阶段共用的文档块操作辅助（原图片阶段内部函数提升）：
       // 频控退避、原生块 API 调用、全量块拉取、占位符文本替换

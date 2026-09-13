@@ -4,8 +4,9 @@
 
 import { createDefaultPreset } from './presets.js';
 
-// 模板变量快捷插入（决议 #30 的 v1 变量集）
-export const TEMPLATE_VARIABLES = ['title', 'url', 'host', 'date', 'time', 'datetime', 'content'];
+// 模板变量快捷插入（决议 #30 的 v1 变量集；#75 增加 digest——仅预设开了 AI 摘要开关时
+// 占位符才会被替换，否则按未知变量置空，插入按钮不做开关感知）
+export const TEMPLATE_VARIABLES = ['title', 'url', 'host', 'date', 'time', 'datetime', 'content', 'digest'];
 
 // 图片写入模式三态（#53）：选项顺序即设置页分段控件顺序；说明文案体现三者的取舍
 export const IMAGE_MODE_OPTIONS = [
@@ -194,8 +195,8 @@ export function jobDisplayTitle(job) {
   }
 }
 
-// stage 的 name 是机器标识，展示用中文名
-const STAGE_LABELS = { create_document: '创建文档', images: '图片处理', pdf_download: '下载 PDF' };
+// stage 的 name 是机器标识，展示用中文名（digest 阶段见 #75）
+const STAGE_LABELS = { create_document: '创建文档', images: '图片处理', pdf_download: '下载 PDF', digest: 'AI 摘要' };
 
 // 展开明细行：页面提取（扩展侧 clientTiming）+ bridge timeline 按原顺序平铺。
 // 每行 { label, value, indent, failed }；indent 用于缩进层级（stage 0 / image 1 / cli 2）。
@@ -218,4 +219,92 @@ export function jobDetailRows(job) {
     }
   }
   return rows;
+}
+
+// ——— AI 摘要（#75）：设置页 AI API 配置的纯展示/归约逻辑 ———
+// API key 只存 bridge 的 ai.json，扩展侧不落地；这里只有表单草稿 → 请求体的归约与结果展示
+
+// API 类型下拉选项（value = bridge 契约的 apiType，label 为设置页展示名）
+export const AI_API_TYPE_OPTIONS = [
+  { value: 'responses', label: 'OpenAI Responses' },
+  { value: 'chat-completions', label: 'OpenAI Chat Completions' },
+  { value: 'messages', label: 'Anthropic Messages' },
+];
+
+// 各类型的默认 Base URL（与 bridge 契约一致）：messages 的 base 不带 /v1
+export const AI_DEFAULT_BASE_URLS = {
+  responses: 'https://api.openai.com/v1',
+  'chat-completions': 'https://api.openai.com/v1',
+  messages: 'https://api.anthropic.com',
+};
+
+export function aiDefaultBaseUrl(apiType) {
+  return AI_DEFAULT_BASE_URLS[apiType] ?? AI_DEFAULT_BASE_URLS.responses;
+}
+
+// 「高级设置」textarea 逐行解析：每行 `Name: value`，空行跳过；缺冒号/空头名即报错
+// （设置页 catch 后行内展示），不静默丢弃用户输入
+export function aiHeadersFromText(text) {
+  const headers = {};
+  for (const line of String(text ?? '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colon = trimmed.indexOf(':');
+    if (colon <= 0) throw new Error(`请求头格式错误：「${trimmed}」应为 Name: value`);
+    const name = trimmed.slice(0, colon).trim();
+    const value = trimmed.slice(colon + 1).trim();
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) throw new Error(`请求头名「${name}」非法`);
+    headers[name] = value;
+  }
+  return headers;
+}
+
+// 已存 headers 对象 → textarea 回填文本（与 aiHeadersFromText 互逆）
+export function aiHeadersToText(headers) {
+  return Object.entries(headers ?? {}).map(([name, value]) => `${name}: ${value}`).join('\n');
+}
+
+// 最大输出 tokens 输入框：留空 = 未设置；否则须为正整数（范围由 bridge 校验）
+export function aiMaxOutputTokensFromText(text) {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) throw new Error('最大输出 tokens 必须是正整数');
+  return Number.parseInt(trimmed, 10);
+}
+
+// 表单草稿 → 保存/测试请求体：baseUrl 留空用类型默认值；apiKey 留空不放进 body
+// （bridge 语义：省略/空串 = 保留已存 key）；apiType 非法值归一为 responses。
+// 高级设置两项留空同样不进 body（bridge 回落已存/内置默认）；格式非法抛错由调用方展示
+export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText } = {}) {
+  const type = AI_DEFAULT_BASE_URLS[apiType] ? apiType : 'responses';
+  const payload = {
+    apiType: type,
+    baseUrl: String(baseUrl ?? '').trim() || aiDefaultBaseUrl(type),
+    model: String(model ?? '').trim(),
+  };
+  const key = String(apiKey ?? '').trim();
+  if (key) payload.apiKey = key;
+  const headers = aiHeadersFromText(headersText);
+  if (Object.keys(headers).length) payload.headers = headers;
+  const maxOutputTokens = aiMaxOutputTokensFromText(maxOutputTokensText);
+  if (maxOutputTokens !== undefined) payload.maxOutputTokens = maxOutputTokens;
+  return payload;
+}
+
+// 测试连接失败的中文文案：已知机器码用固定文案，未知错误透传 bridge 返回的 message
+const AI_ERROR_LABELS = {
+  AI_NOT_CONFIGURED: '尚未配置 AI API，请先保存配置',
+  AI_AUTH_FAILED: 'API key 无效或权限不足',
+  AI_RATE_LIMITED: '请求被限流，请稍后重试',
+  AI_TIMEOUT: '请求超时',
+};
+
+// 测试连接的行内结果：成功显示延迟与回复摘录；失败显示中文错误
+// 入参为 bridge POST /v1/ai/test 的响应体（{ ok:true, latencyMs, reply } | { ok:false, code, message }）
+export function aiTestResultView(result) {
+  if (result?.ok === true) {
+    const reply = String(result.reply ?? '').trim();
+    return { tone: 'success', text: `连接成功 ✓ 延迟 ${formatDuration(result.latencyMs)}${reply ? `，回复摘录：${reply}` : ''}` };
+  }
+  return { tone: 'error', text: `连接失败：${AI_ERROR_LABELS[result?.code] ?? String(result?.message ?? '未知错误')}` };
 }

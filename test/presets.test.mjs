@@ -147,3 +147,48 @@ test('resolvePdfDrive：完整结构透传 folderToken 与 folderName（picker �
     folderName: '论文',
   });
 });
+
+// ——— AI 摘要预设字段（#75）：读取时迁移，非法值一律归一为 null ———
+
+import { DEFAULT_DIGEST_INSTRUCTION, resolveDigest, resolveDigestInstruction } from '../src/extension/presets.js';
+
+test('createDefaultPreset 的 digest 缺省为 null（关闭态）', () => {
+  assert.equal(createDefaultPreset().digest, null);
+});
+
+test('DEFAULT_DIGEST_INSTRUCTION 是内置默认摘要指令文案', () => {
+  assert.equal(DEFAULT_DIGEST_INSTRUCTION, '请用与正文相同的语言，把以下网页正文总结为 3-6 条要点，每条一句话，直接输出要点列表，不要输出额外解释。');
+});
+
+test('resolveDigest：缺字段/非法值一律归一为 null', () => {
+  for (const preset of [
+    {},
+    { digest: null },
+    { digest: 'on' },
+    { digest: { enabled: false } },
+    { digest: { enabled: 'yes' } },
+    { digest: { enabled: true, instruction: '' }, extra: true }, // 合法，见下个断言
+    null,
+    undefined,
+  ]) {
+    if (preset?.digest?.enabled === true) {
+      assert.deepEqual(resolveDigest(preset), { enabled: true, instruction: '' }, '多余字段不携带');
+    } else {
+      assert.equal(resolveDigest(preset), null, JSON.stringify(preset));
+    }
+  }
+});
+
+test('resolveDigest：enabled:true 透传 instruction；非字符串 instruction 归一为空串（= 用全局）', () => {
+  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: '只保留结论' } }), { enabled: true, instruction: '只保留结论' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true } }), { enabled: true, instruction: '' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: 42 } }), { enabled: true, instruction: '' });
+});
+
+test('resolveDigestInstruction：预设级 > 全局 > 内置默认；空串/非字符串视为未设置', () => {
+  assert.equal(resolveDigestInstruction('预设指令', '全局指令'), '预设指令', '预设级优先');
+  assert.equal(resolveDigestInstruction('', '全局指令'), '全局指令', '预设空串回落全局');
+  assert.equal(resolveDigestInstruction(undefined, '全局指令'), '全局指令');
+  assert.equal(resolveDigestInstruction('  ', null), DEFAULT_DIGEST_INSTRUCTION, '空白全局都未设置回落内置默认');
+  assert.equal(resolveDigestInstruction(null, undefined), DEFAULT_DIGEST_INSTRUCTION);
+});

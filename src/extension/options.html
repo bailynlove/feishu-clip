@@ -19,8 +19,33 @@
   </div>
 </section>
 
+<section class="ps-card">
+  <h2>2. AI 摘要</h2>
+  <p class="ps-desc">在本机 Bridge 上配置一个 AI API；预设里开启「AI 摘要」后，剪藏文档自动带一段 AI 生成的摘要。API key 只保存在本机 Bridge，不会写入浏览器存储或上传他处。</p>
+  <div class="ps-field"><span class="ps-label">API 类型</span>
+    <select id="ai-api-type" class="ps-input"></select>
+  </div>
+  <label class="ps-field"><span class="ps-label">Base URL</span><input id="ai-base-url" class="ps-input mono" autocomplete="off"></label>
+  <label class="ps-field"><span class="ps-label">Model</span><input id="ai-model" class="ps-input mono" autocomplete="off" placeholder="如 gpt-5-mini / claude-haiku-4-5"></label>
+  <label class="ps-field"><span class="ps-label">API key</span><input id="ai-api-key" class="ps-input mono" type="password" autocomplete="off"></label>
+  <div class="ai-actions">
+    <button id="ai-save" class="ps-btn primary" type="button">保存</button>
+    <button id="ai-test" class="ps-btn" type="button">测试连接</button>
+  </div>
+  <div id="ai-result" class="ps-note hidden"></div>
+  <details class="ps-advanced">
+    <summary>高级设置</summary>
+    <label class="ps-field"><span class="ps-label">自定义请求头（选填）</span><textarea id="ai-headers" class="ps-input mono" rows="3" placeholder="x-opencode-session: your-session-id"></textarea></label>
+    <p class="ps-desc">每行一条 <code>Name: value</code>。某些网关（如 opencode-go）要求额外请求头才能路由。</p>
+    <label class="ps-field"><span class="ps-label">最大输出 tokens（选填）</span><input id="ai-max-output-tokens" class="ps-input mono" inputmode="numeric" autocomplete="off" placeholder="2048"></label>
+    <p class="ps-desc">推理模型（gpt-5 系 / o 系等）推理过程也占用输出额度，出现 max_output_tokens 类报错时调大。</p>
+  </details>
+  <label class="ps-field"><span class="ps-label">全局摘要指令</span><textarea id="ai-instruction" class="ps-input mono" rows="4"></textarea></label>
+  <p class="ps-desc">留空使用内置默认指令；预设级指令优先于全局指令。</p>
+</section>
+
 <section class="ps-card pc-card">
-  <h2>2. 预设管理</h2>
+  <h2>3. 预设管理</h2>
   <p class="ps-desc">每套预设自带保存目标、模板与 triggers 规则；标签顺序即规则命中优先级。至少保留一套预设。</p>
   <div class="ps-tabs" id="preset-tabs"></div>
   <div class="pc-form">
@@ -90,6 +115,14 @@
       </details>
     </div>
 
+    <div class="ps-field"><span class="ps-label">AI 摘要</span>
+      <button class="ps-switch-row" id="f-digest" type="button" aria-pressed="false">
+        <span class="ps-switch-text"><span class="ps-switch-label">剪藏时生成 AI 摘要</span><span class="ps-switch-sub">由本机 Bridge 调用配置的 AI API 生成；正文模板中的 {{digest}} 占位符原位插入，否则摘要排在正文之前</span></span>
+        <span class="ps-switch"></span>
+      </button>
+      <label class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea></label>
+    </div>
+
     <label class="ps-field"><span class="ps-label">标题模板</span><input id="f-title" class="ps-input mono" autocomplete="off" placeholder="{{title}}"></label>
     <div class="ps-vars" data-field="f-title"></div>
 
@@ -110,7 +143,7 @@
 </section>
 
 <section class="ps-card">
-  <h2>3. 开发者模式</h2>
+  <h2>4. 开发者模式</h2>
   <button class="ps-switch-row" id="devmode-toggle" type="button" aria-pressed="false">
     <span class="ps-switch-text"><span class="ps-switch-label">开发者模式</span><span class="ps-switch-sub">记录并展示每次剪藏任务的耗时与日志</span></span>
     <span class="ps-switch"></span>

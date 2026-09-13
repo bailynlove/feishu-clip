@@ -1,4 +1,4 @@
-import { ensurePresets } from './presets.js';
+import { ensurePresets, resolveDigestInstruction } from './presets.js';
 import { buildContext, renderBody, sanitizeClipTitle } from './templates.js';
 import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
@@ -214,9 +214,15 @@ async function handle(message) {
     case 'GET_SETTINGS': {
       await migratePresets();
       // activeAttempt 供 job 恢复；presets/defaultPresetId 供弹窗与设置页（#35/#36）；
-      // developerMode 供设置页开发者模式开关（缺省 false）
-      return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode']);
+      // developerMode 供设置页开发者模式开关（缺省 false）；
+      // aiDigestInstruction 供设置页 AI 摘要区与 CLIP 指令回落（#75，非敏感）
+      return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode', 'aiDigestInstruction']);
     }
+    // AI 摘要配置（#75）：三个端点纯代理到 bridge；API key 只存 bridge 的 ai.json，
+    // 扩展侧任何环节不落地（SAVE 留空的 apiKey 由 options.js 组装请求体时省略）
+    case 'GET_AI_CONFIG': return bridge('/v1/ai/config');
+    case 'SAVE_AI_CONFIG': return bridge('/v1/ai/config', { method: 'POST', body: message.config });
+    case 'TEST_AI': return bridge('/v1/ai/test', { method: 'POST', body: message.overrides ?? {} });
     case 'SAVE_PRESETS': {
       // 设置页整体写回预设列表 + 默认预设（#35）；列表为空或默认预设悬空时拒绝/修复
       if (!Array.isArray(message.presets) || message.presets.length === 0) throw new Error('至少保留一套预设');
@@ -259,9 +265,18 @@ async function handle(message) {
       // 弹窗可编辑标题（#36）：渲染/手改结果随 CLIP 发来，清洗后覆盖；为空回退 extractor 标题
       const title = sanitizeClipTitle(message.title);
       if (title) snapshot.title = title;
+      // AI 摘要（#75）：开关开启时让 {{digest}} 以字面量穿过正文渲染（最终替换在 bridge 侧），
+      // 并在 CLIP 路径解析指令兜底（预设级 > 全局 > 内置默认）——弹窗只透传预设级原值，
+      // 在这里解析可防陈旧弹窗发来空指令；instruction 上限 4000 字符（bridge 校验口径），超长截断
+      const digestEnabled = message.digestEnabled === true;
+      let digest = null;
+      if (digestEnabled) {
+        const stored = await localGet(['aiDigestInstruction']);
+        digest = { enabled: true, instruction: resolveDigestInstruction(message.digestInstruction, stored.aiDigestInstruction).slice(0, 4000) };
+      }
       // 正文合成（#37，#40 起有效模板 = 弹窗自定义正文框内容）：与弹窗预览同调 renderBody；
       // ctx 在标题覆盖之后构建，正文模板看到的即最终标题
-      snapshot.markdown = renderBody(message.customBody, buildContext(snapshot));
+      snapshot.markdown = renderBody(message.customBody, buildContext(snapshot, { digestEnabled }));
       // 重试 PDF（#65）：弹窗「重试 PDF」复用同一 attemptId，bridge 侧 clip job 幂等命中、
       // pdf job 失败态复位重跑；正常保存总是新 attemptId
       const attemptId = message.attemptId ?? crypto.randomUUID();
@@ -272,7 +287,7 @@ async function handle(message) {
         : null;
       // pdf 目标目录（#66）：弹窗 chip 选定的 folderToken（null = 云盘根目录），随 job 透传
       const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource, pdfFolderToken } });
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource, pdfFolderToken, digest } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }

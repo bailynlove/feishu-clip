@@ -8,7 +8,8 @@ import { PairingStore } from './pairing.mjs';
 import { IMAGE_MODES, JOB_KIND, JOB_STATUS, PDF_CHUNK_BYTES, PersistentJobStore, normalizePdfSource } from './job-store.mjs';
 import { PDF_LIMITS } from './image-policy.mjs';
 import { PdfChunkStaging } from './pdf-chunks.mjs';
-import { ClipExecutor } from './executor.mjs';
+import { ClipExecutor, aiErrorMessage } from './executor.mjs';
+import { AiConfigStore, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, sanitizeAiConfig } from './ai-digest.mjs';
 
 const JSON_LIMIT = 52 * 1024 * 1024;
 
@@ -107,12 +108,15 @@ function larkQueryError(error, resource = '知识库') {
   return { status: 502, code: 'LARK_REQUEST_FAILED', message: '飞书查询失败，请稍后重试' };
 }
 
-export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console, downloadPdf }) {
+export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console, downloadPdf, aiConfigStore }) {
   const pairing = new PairingStore(config.pairingFile);
   const store = new PersistentJobStore({ filePath: config.jobFile, jobTtlMs: config.jobTtlMs });
+  // AI 摘要配置（#75）：ai.json store 可注入（测试可替）；bridge.json 缺 aiConfigFile 时
+  // 端点按未配置处理（GET 返回 config:null，POST/test 400 AI_NOT_CONFIGURED）
+  const aiStore = aiConfigStore ?? (config.aiConfigFile ? new AiConfigStore(config.aiConfigFile) : null);
   // 分块暂存（#68）：staging 目录在 job 文件旁，executor 与分块端点共用同一实例
   const staging = new PdfChunkStaging({ dir: path.join(path.dirname(config.jobFile), 'staging') });
-  const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}) });
+  const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? () => aiStore.read() : async () => null });
   // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
   // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出。
   // staging 清理（#68）：随 recoverExpired 的 expired 列表即时 discard，再按 mtime 扫超龄孤儿；
@@ -178,6 +182,47 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           return send(response, 200, { ok: true, destination }, origin);
         } catch (error) {
           return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin);
+        }
+      }
+
+      // ——— AI 摘要配置（#75）：key 只落 ai.json，任何端点都不回显（GET/保存后均返回 sanitized config） ———
+      if (request.method === 'GET' && request.url === '/v1/ai/config') {
+        const saved = aiStore ? await aiStore.read() : null;
+        return send(response, 200, { ok: true, config: saved ? sanitizeAiConfig(saved) : null }, origin);
+      }
+
+      if (request.method === 'POST' && request.url === '/v1/ai/config') {
+        if (!aiStore) return send(response, 400, { ok: false, code: 'AI_NOT_CONFIGURED', message: 'Bridge 未配置 aiConfigFile' }, origin);
+        const body = await readJson(request);
+        let input;
+        try {
+          // 首次保存 apiKey 必填；已有 key 时省略/空串 = 保留已存 key
+          input = normalizeAiConfigInput(body, { requireKey: !(await aiStore.read())?.apiKey });
+        } catch (error) {
+          return send(response, 400, { ok: false, code: error.code || 'AI_CONFIG_INVALID', message: error.message }, origin);
+        }
+        const saved = await aiStore.save(input);
+        return send(response, 200, { ok: true, config: sanitizeAiConfig(saved) }, origin);
+      }
+
+      // 测试连接：请求体逐项覆盖已存配置，发一条最小真实请求（max tokens 16）验证连通性 + key + model
+      if (request.method === 'POST' && request.url === '/v1/ai/test') {
+        if (!aiStore) return send(response, 400, { ok: false, code: 'AI_NOT_CONFIGURED', message: 'Bridge 未配置 aiConfigFile' }, origin);
+        const body = await readJson(request);
+        let merged;
+        try {
+          merged = mergeAiTestConfig(body ?? {}, await aiStore.read());
+        } catch (error) {
+          return send(response, 400, { ok: false, code: error.code || 'AI_NOT_CONFIGURED', message: error.message }, origin);
+        }
+        try {
+          const startedAt = Date.now();
+          // 不传显式 maxOutputTokens：走 merged.maxOutputTokens ?? 内置默认（2048）。
+          // 硬编码小预算会让 reasoning 模型在推理阶段耗尽 output tokens（incomplete/max_output_tokens）
+          const reply = await generateDigest({ config: merged, instruction: 'You are a connectivity probe.', content: 'Reply with: ok' });
+          return send(response, 200, { ok: true, latencyMs: Date.now() - startedAt, reply: reply.slice(0, 100) }, origin);
+        } catch (error) {
+          return send(response, 200, { ok: false, code: error.code || 'AI_REQUEST_FAILED', message: aiErrorMessage(error) }, origin);
         }
       }
 
@@ -293,6 +338,15 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
         // 图片写入模式（#53）：合法三态直用；非法/缺省回退旧 includeImages 布尔语义（false → off，其余 → preview）
         const imageMode = IMAGE_MODES.includes(body.imageMode) ? body.imageMode : (body.includeImages === false ? 'off' : 'preview');
+        // AI 摘要（#75）：digest.enabled===true 时要求非空 instruction ≤4000 字符；pdf-only 路径忽略
+        let digest = null;
+        if (body.digest?.enabled === true) {
+          const instruction = body.digest.instruction;
+          if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 4000) {
+            return send(response, 400, { ok: false, code: 'DIGEST_INVALID', message: '开启 AI 摘要时必须提供非空摘要指令（≤4000 字符）' }, origin);
+          }
+          digest = { enabled: true, instruction };
+        }
         const submitted = await store.submit({
           attemptId: body.attemptId,
           sourceUrl: body.snapshot.sourceUrl,
@@ -301,6 +355,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           includeImages: imageMode !== 'off',
           imageMode,
           clientTiming,
+          digest,
         });
         // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名；
         // folderToken（#66）是 picker/弹窗选定的云盘目录，null 即根目录

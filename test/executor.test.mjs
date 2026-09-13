@@ -106,11 +106,13 @@ function fakeStore(job) {
   const store = {
     completed: null,
     failed: null,
+    digestRecorded: null,
     settled,
     async list() { return drained ? [] : [job]; },
     async claim() {},
     async beginCreate() {},
     async recordDocument() {},
+    async recordDigest(_id, _worker, digestText) { store.digestRecorded = digestText; },
     async complete(_id, _worker, result) { store.completed = result; drained = true; onSettled(); },
     async get() { return { status: 'succeeded' }; },
     async fail(_id, _worker, result) { store.failed = result; drained = true; onSettled(); },
@@ -1053,4 +1055,115 @@ test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清�
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+// ——— AI 摘要阶段（#75）：claim 之后、prepareMarkdown 之前；失败降级不 fail；digestText 缓存复用 ———
+
+import { readFile } from 'node:fs/promises';
+
+// 无图片的 clip job（imageMode off 跳过图片阶段）；假 lark 在 docs +create 时读出
+// 落盘的 content.md（摘要是经 applyDigest 注入后再 prepareMarkdown，直接验证最终正文）
+function digestSetup({ markdown, digest = null, digestText = null }) {
+  const job = fakeJob({ markdown, images: [] });
+  job.imageMode = 'off';
+  if (digest) job.digest = digest;
+  if (digestText !== null) job.digestText = digestText;
+  const store = fakeStore(job);
+  const contents = [];
+  const lark = {
+    async run(args, options) {
+      if (args.includes('@content.md')) contents.push(await readFile(path.join(options.cwd, 'content.md'), 'utf8'));
+      return { ok: true, data: { document: { document_id: 'doc1', url: 'https://doc1' } } };
+    },
+  };
+  return { store, lark, contents };
+}
+
+const AI_CONFIG = { apiType: 'responses', baseUrl: 'https://api.example.com/v1', model: 'gpt-5', apiKey: 'sk-t' };
+
+test('AI 摘要：开启后生成摘要原位替换 {{digest}}，结果经 recordDigest 落库缓存', async () => {
+  let calls = 0;
+  const generateDigest = async ({ config, instruction, content }) => {
+    calls += 1;
+    assert.deepEqual(config, AI_CONFIG, 'config 来自 getAiConfig');
+    assert.equal(instruction, '总结成三点');
+    assert.equal(content, '# T\n\n前文 {{digest}} 后文', '正文原样（含占位符）喂给 AI');
+    return 'AI 要点';
+  };
+  const { store, lark, contents } = digestSetup({
+    markdown: '# T\n\n前文 {{digest}} 后文',
+    digest: { enabled: true, instruction: '总结成三点' },
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.equal(calls, 1);
+  assert.equal(store.digestRecorded, 'AI 要点', '摘要结果落库缓存');
+  assert.equal(contents.length, 1);
+  assert.match(contents[0], /前文 AI 要点 后文/, '占位符原位替换');
+  assert.doesNotMatch(contents[0], /\{\{\s*digest\s*\}\}/);
+  assert.doesNotMatch(contents[0], /# Digest/, '占位符替换不含默认标题（标题只由默认布局添加）');
+  assert.deepEqual(store.completed.warnings, []);
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'digest' && typeof entry.ms === 'number'), 'digest 阶段计时');
+});
+
+test('AI 摘要：模板无占位符时注入 # Digest / # RAW content 默认布局', async () => {
+  const { store, lark, contents } = digestSetup({
+    markdown: '# T\n\n正文',
+    digest: { enabled: true, instruction: '总结' },
+  });
+  const generateDigest = async () => 'AI 要点';
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.match(contents[0], /# Digest\n\nAI 要点\n\n# RAW content\n\n# T\n\n正文/, '默认两节布局');
+});
+
+test('AI 摘要：生成失败不拖垮剪藏——占位符置空、警告并入 warnings、job 仍成功', async () => {
+  const { store, lark, contents } = digestSetup({
+    markdown: '# T\n\n前文 {{digest}} 后文',
+    digest: { enabled: true, instruction: '总结' },
+  });
+  const generateDigest = async () => { throw Object.assign(new Error('invalid key'), { code: 'AI_AUTH_FAILED' }); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, 'digest 失败不 fail job（部分成功降级）');
+  assert.equal(store.failed, null);
+  assert.equal(store.completed.warnings.length, 1);
+  assert.equal(store.completed.warnings[0], 'AI 摘要生成失败：AI API 密钥无效或没有权限');
+  assert.match(contents[0], /前文 {2}后文/, '占位符置空');
+  assert.equal(store.digestRecorded, null, '失败不写缓存');
+  const entry = store.completed.timeline.find((item) => item.kind === 'stage' && item.name === 'digest');
+  assert.ok(entry?.detail, '失败在 timeline 留 detail');
+});
+
+test('AI 摘要：digestText 已缓存时重跑不调 AI，直接复用缓存', async () => {
+  const { store, lark, contents } = digestSetup({
+    markdown: '# T\n\n正文',
+    digest: { enabled: true, instruction: '总结' },
+    digestText: '缓存摘要',
+  });
+  let calls = 0;
+  const generateDigest = async () => { calls += 1; throw new Error('缓存命中不得调 AI'); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.equal(calls, 0, '缓存命中不再调 AI');
+  assert.match(contents[0], /# Digest\n\n缓存摘要\n\n# RAW content/, '缓存摘要走默认布局');
+  assert.deepEqual(store.completed.warnings, []);
+});
+
+test('AI 摘要：开关关时行为与现状一致——不调 AI、不动正文、无 digest 阶段', async () => {
+  const { store, lark, contents } = digestSetup({ markdown: '# T\n\n正文' });
+  let calls = 0;
+  const generateDigest = async () => { calls += 1; throw new Error('开关关不得调 AI'); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.equal(calls, 0);
+  assert.match(contents[0], /# T\n\n正文/);
+  assert.doesNotMatch(contents[0], /# Digest/);
+  assert.deepEqual(store.completed.warnings, []);
+  assert.ok(!store.completed.timeline.some((entry) => entry.name === 'digest'), '开关关没有 digest 阶段');
 });

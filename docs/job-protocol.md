@@ -66,6 +66,14 @@ When the url-type download hits 401/403 (paywalled sources that need the user's 
 
 The extension side runs two streaming passes over `fetch(pdfUrl, { credentials: 'include' })`: the first computes the incremental SHA-256 and total size needed for the declaration (no disk, constant memory), the second re-reads the stream and POSTs only the chunks missing from the bitmap. A declaration already in the store lets a resumed feed skip the first pass entirely.
 
+## AI digest stage (#75)
+
+A clip job may carry an optional `digest: { enabled, instruction }` request (validated on `POST /v1/jobs`: `enabled === true` requires a non-empty `instruction` of at most 4000 chars; pdf-only submissions ignore it). The clip consumer runs a **digest stage after `claim` and before `prepareMarkdown`/document creation**: it calls the user-configured AI API (config lives in `ai.json`, managed via `GET/POST /v1/ai/config` and probed via `POST /v1/ai/test`; the API key is never returned by any endpoint) and feeds the result into the markdown through `applyDigest` — either substituted in place of a `{{digest}}` placeholder or prepended as the default `# Digest` / `# RAW content` layout.
+
+- **Caching**: a successful digest is persisted with `recordDigest` into `job.digestText`. Any re-execution of `#execute` (ambiguous-create requeue, lease recovery) reuses the cached text and never calls the AI again.
+- **Degradation**: a digest failure never fails the job. It is recorded in the timeline (`{ kind: 'stage', name: 'digest', detail }`), surfaced as a warning (`AI 摘要生成失败：…`) through the same `warnings` channel as image failures (partial success), and `applyDigest` blanks the placeholder or omits the default section entirely.
+- The digest stage is a phase inside the clip consumer, not a new job kind: `JOB_KIND` / `JOB_KIND_STRATEGY` / `FAILURE_STAGE` are unchanged.
+
 ## PDF-tab submissions (#67)
 
 When the tab itself is a PDF (the browser's built-in viewer), `POST /v1/jobs` accepts a pdf-only body — `{ attemptId, pdfSource, pdfFolderToken?, title? }` with no `snapshot`/`destination` — and queues exactly one `pdf` job. Detection runs in the extension: a `chrome.scripting` probe reads `document.contentType === 'application/pdf'` (the Zotero signal; zero permission increment over `activeTab` + `scripting`), falling back to a `\.pdf$` suffix test on `tab.url` (ignoring query/hash) only when injection fails. The pdf job's `sourceUrl` is the PDF URL itself, so the popup's same-page recovery (`isJobForPage`) works unchanged. The popup renders a single panel for this page form (no preset chips, no preview, no clip job) and the save button re-submits the same `attemptId` after a failure, reusing the failed-pdf retry semantics above. Credential-carrying PDF URLs are out of scope here (#68): the bytes travel via the Bridge's url-type download, which only fits public URLs.

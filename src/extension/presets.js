@@ -13,9 +13,15 @@ export function createDefaultPreset(overrides = {}) {
     triggers: [],
     // PDF 存云盘（#65）：null | { enabled, folderToken, folderName }；folderToken 为 null 即云盘根目录
     pdfDrive: null,
+    // AI 摘要（#75）：null | { enabled: true, instruction }；instruction 空串 = 用全局指令
+    digest: null,
     ...overrides,
   };
 }
+
+// 内置默认摘要指令（#75）：预设级与全局指令都未设置时的最终兜底（解析顺序见 resolveDigestInstruction）；
+// 同时作为设置页全局指令输入框的 placeholder
+export const DEFAULT_DIGEST_INSTRUCTION = '请用与正文相同的语言，把以下网页正文总结为 3-6 条要点，每条一句话，直接输出要点列表，不要输出额外解释。';
 
 // 图片写入模式（#53）：preview 预览优先 / download 下载优先 / off 不保存。
 // 存量预设只有 includeImages 布尔：false → off，其余 → preview；读取时迁移，不强转存储格式。
@@ -42,6 +48,23 @@ export function resolvePdfDrive(preset) {
   const value = preset?.pdfDrive;
   if (!value || typeof value !== 'object' || value.enabled !== true) return null;
   return { enabled: true, ...createDriveFolder(value) };
+}
+
+// AI 摘要预设字段（#75）：读取时迁移——缺字段/非法值一律归一为 null；
+// enabled:true + instruction:'' = 开启但用全局指令（空串语义在 resolveDigestInstruction 解析）
+export function resolveDigest(preset) {
+  const value = preset?.digest;
+  if (!value || typeof value !== 'object' || value.enabled !== true) return null;
+  return { enabled: true, instruction: typeof value.instruction === 'string' ? value.instruction : '' };
+}
+
+// 摘要指令解析顺序（#75）：预设级 > 全局（chrome.storage.local 的 aiDigestInstruction）> 内置默认；
+// 空串/非字符串视为未设置。在 background CLIP 路径解析，弹窗只透传预设级原值
+export function resolveDigestInstruction(presetInstruction, globalInstruction) {
+  for (const value of [presetInstruction, globalInstruction]) {
+    if (typeof value === 'string' && value.trim() !== '') return value;
+  }
+  return DEFAULT_DIGEST_INSTRUCTION;
 }
 
 // 幂等：service worker 冷启动会反复调用。无 presets 时从旧 destination 迁移；

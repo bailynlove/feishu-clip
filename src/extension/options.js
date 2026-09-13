@@ -8,8 +8,9 @@ import {
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
+  AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiHeadersToText, aiTestResultView,
 } from './options-state.js';
-import { createDriveFolder, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDriveFolder, resolveDigest, resolveImageMode, resolvePdfDrive, DEFAULT_DIGEST_INSTRUCTION } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -252,6 +253,13 @@ function syncEditor() {
   $('#f-pdf-folder').classList.toggle('hidden', !pdfEnabled);
   $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
   if (!pdfEnabled) closeDrivePicker();
+  // AI 摘要（#75）：读取时迁移——缺字段/非法 digest 一律显示为关；开启时才显示预设级指令框
+  const digest = resolveDigest(preset);
+  const digestEnabled = digest?.enabled === true;
+  $('#f-digest').classList.toggle('on', digestEnabled);
+  $('#f-digest').setAttribute('aria-pressed', String(digestEnabled));
+  $('#f-digest-instruction-row').classList.toggle('hidden', !digestEnabled);
+  $('#f-digest-instruction').value = digest?.instruction ?? '';
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
   for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
@@ -447,6 +455,21 @@ $('#f-pdf-drive').addEventListener('click', () => {
   syncEditor();
 });
 
+// AI 摘要预设开关（#75）：开启写 { enabled:true, instruction:'' }（空串 = 用全局指令），
+// 关闭归一为 null；预设级指令留空即用全局，均随预设整体经 SAVE_PRESETS 写回
+$('#f-digest').addEventListener('click', () => {
+  const enabled = !(resolveDigest(editingPreset())?.enabled === true);
+  applyMutation(updatePreset(state, editingId, {
+    digest: enabled ? { enabled: true, instruction: resolveDigest(editingPreset())?.instruction ?? '' } : null,
+  }));
+  syncEditor();
+});
+$('#f-digest-instruction').addEventListener('input', () => {
+  applyMutation(updatePreset(state, editingId, {
+    digest: { enabled: true, instruction: $('#f-digest-instruction').value },
+  }), { quiet: true });
+});
+
 // 变量快捷插入：在光标处插入 {{xxx}}，并沿用字段自身的保存路径
 for (const row of document.querySelectorAll('.ps-vars')) {
   const field = $(`#${row.dataset.field}`);
@@ -516,6 +539,98 @@ async function initBridge() {
     show(error.code === 'BRIDGE_OFFLINE' ? '本地 Bridge 未运行，请启动服务后重试。' : '扩展尚未与本地 Bridge 配对，请粘贴配对码完成配对。', 'error');
   }
 }
+
+// ——— AI 摘要（#75）：AI API 配置存 bridge 的 ai.json（key 不落 chrome.storage），
+// 读取/保存/测试都经 background 代理端点；全局摘要指令是单键配置，直写 chrome.storage.local
+// （与 developerMode 同一先例）。本段只做 DOM 接线，归约逻辑在 options-state.js ———
+let aiHasKey = false; // 已保存配置里是否有 key（bridge 不回传 key 本身，只回 hasKey）
+
+function aiFormDraft() {
+  return {
+    apiType: $('#ai-api-type').value,
+    baseUrl: $('#ai-base-url').value,
+    model: $('#ai-model').value,
+    apiKey: $('#ai-api-key').value,
+    headersText: $('#ai-headers').value,
+    maxOutputTokensText: $('#ai-max-output-tokens').value,
+  };
+}
+
+function showAiResult(view) {
+  const node = $('#ai-result');
+  node.textContent = view.text;
+  node.className = `ps-note ${NOTICE_TONES[view.tone] ?? 'info'}`;
+}
+
+// Base URL 占位符跟随所选 API 类型的默认值（用户已填内容不动）
+function syncAiBaseUrlPlaceholder() {
+  $('#ai-base-url').placeholder = aiDefaultBaseUrl($('#ai-api-type').value);
+}
+
+function syncAiKeyPlaceholder() {
+  $('#ai-api-key').placeholder = aiHasKey ? '已保存，留空则保持不变' : '';
+}
+
+async function initAiSection(aiDigestInstruction) {
+  const typeSelect = $('#ai-api-type');
+  for (const option of AI_API_TYPE_OPTIONS) {
+    const node = document.createElement('option');
+    node.value = option.value;
+    node.textContent = option.label;
+    typeSelect.append(node);
+  }
+  syncAiBaseUrlPlaceholder();
+  syncAiKeyPlaceholder();
+  // 全局指令：placeholder 即内置默认指令（留空 = 用默认），已存值原样回填
+  $('#ai-instruction').placeholder = DEFAULT_DIGEST_INSTRUCTION;
+  $('#ai-instruction').value = typeof aiDigestInstruction === 'string' ? aiDigestInstruction : '';
+  // 读取已保存配置回填表单；bridge 离线/老版本无此端点时保持空表单并提示
+  try {
+    const { config } = await message({ type: 'GET_AI_CONFIG' });
+    if (config) {
+      typeSelect.value = config.apiType;
+      $('#ai-base-url').value = config.baseUrl ?? '';
+      $('#ai-model').value = config.model ?? '';
+      // 高级设置回填（headers 对象 → 逐行文本；maxOutputTokens 未配置留空）
+      $('#ai-headers').value = aiHeadersToText(config.headers);
+      $('#ai-max-output-tokens').value = config.maxOutputTokens ? String(config.maxOutputTokens) : '';
+      aiHasKey = config.hasKey === true;
+      syncAiBaseUrlPlaceholder();
+      syncAiKeyPlaceholder();
+    }
+  } catch {
+    showAiResult({ tone: 'info', text: '未读取到已保存的 AI 配置（Bridge 未连接或版本过旧）。' });
+  }
+}
+
+$('#ai-api-type').addEventListener('change', syncAiBaseUrlPlaceholder);
+
+$('#ai-save').addEventListener('click', async () => {
+  try {
+    const { config } = await message({ type: 'SAVE_AI_CONFIG', config: aiConfigPayload(aiFormDraft()) });
+    aiHasKey = config?.hasKey === true;
+    $('#ai-api-key').value = '';
+    syncAiKeyPlaceholder();
+    showAiResult({ tone: 'success', text: 'AI 配置已保存 ✓' });
+  } catch (error) {
+    showAiResult({ tone: 'error', text: `保存失败：${error.message}` });
+  }
+});
+
+$('#ai-test').addEventListener('click', async () => {
+  showAiResult({ tone: 'info', text: '正在测试连接…' });
+  try {
+    showAiResult(aiTestResultView(await message({ type: 'TEST_AI', overrides: aiConfigPayload(aiFormDraft()) })));
+  } catch (error) {
+    showAiResult({ tone: 'error', text: `连接失败：${error.message}` });
+  }
+});
+
+// 全局摘要指令：单键直写（同 developerMode 先例），留空即删除回落到内置默认
+$('#ai-instruction').addEventListener('input', async () => {
+  await chrome.storage.local.set({ aiDigestInstruction: $('#ai-instruction').value });
+});
+
 
 // ——— 开发者模式：开关直写 chrome.storage.local（options 页是 trusted context，无需经 background
 // 中转；与 SAVE_PRESETS 不同，这是单 key 不涉及归约校验）。任务日志经 LIST_JOBS 从 bridge 读取。 ———
@@ -610,6 +725,7 @@ async function init() {
   renderTabs();
   syncEditor();
   initBridge();
+  initAiSection(settings.aiDigestInstruction);
   // 开关为开时展开日志区并自动加载一次（缺省 false 不加载）
   setDeveloperMode(settings.developerMode === true);
 }

@@ -1,7 +1,7 @@
 import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireDrivePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
 import { createDrivePicker } from './drive-picker.js';
-import { describeAttemptView, initPopupPresets, initPdfTabState, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName } from './popup-state.js';
+import { describeAttemptView, initPopupPresets, initPdfTabState, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName, clipDigest } from './popup-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -556,6 +556,8 @@ async function clipToFeishu() {
       pdfEnabled: presetState.pdfOn && Boolean(presetState.pdf),
       pdfSource: presetState.pdf,
       pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
+      // AI 摘要（#75）：预设开关 + 预设级指令；全局回落在 background 解析
+      ...clipDigest(presetState),
     });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
@@ -583,6 +585,8 @@ async function retryPdf() {
       pdfEnabled: true,
       pdfSource: presetState.pdf,
       pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
+      // AI 摘要（#75）：与主保存同一口径，重试重排沿用预设开关
+      ...clipDigest(presetState),
     });
     poll();
   } catch (error) {

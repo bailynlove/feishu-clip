@@ -26,9 +26,9 @@ test('picker-more/back/retry start hidden (renderPicker toggles them)', () => {
 });
 
 // 开发者模式卡片（任务耗时日志）：开关初始关、日志区初始隐藏，由 options.js 按
-// chrome.storage.local 的 developerMode 开关
+// chrome.storage.local 的 developerMode 开关（#75 起为第 4 节，前面插入「AI 摘要」）
 test('devmode card exists with toggle off and joblog hidden initially', () => {
-  assert.match(html, /<h2>3\. 开发者模式<\/h2>/, '应有「3. 开发者模式」卡片');
+  assert.match(html, /<h2>4\. 开发者模式<\/h2>/, '应有「4. 开发者模式」卡片');
   assert.ok(!classAttr('devmode-toggle').includes('on'), '#devmode-toggle 初始应为关');
   assert.ok(classAttr('joblog').includes('hidden'), '#joblog 初始应隐藏');
   assert.ok(html.includes('id="joblog-refresh"'), '应有刷新按钮');
@@ -70,4 +70,31 @@ test('preset editor has a PDF folder row and drive picker panel (#66)', () => {
   assert.ok(advanced[1].includes('id="drive-token"'), '应有目录 token 输入框');
   assert.ok(advanced[1].includes('留空表示云盘根目录'), '应写明留空即根目录');
   assert.ok(advanced[1].includes('id="save-drive-target"'), '应有验证并保存按钮');
+});
+
+// AI 摘要设置区（#75）：第 2 节，位于「配对」之后、「预设管理」之前（后调整：配置先行，
+// 预设里的开关引用它）——API 类型下拉（选项由 options.js 按 AI_API_TYPE_OPTIONS 动态填充）、
+// Base URL/Model/API key 输入框、保存 + 测试连接按钮 + 行内结果（初始隐藏）、全局摘要指令 textarea
+test('AI 摘要 section sits between pairing and presets with the config form skeleton', () => {
+  assert.match(html, /<h2>2\. AI 摘要<\/h2>/, '应有「2. AI 摘要」卡片');
+  assert.ok(html.indexOf('<h2>2. AI 摘要</h2>') < html.indexOf('<h2>3. 预设管理</h2>'), 'AI 摘要在预设管理之前');
+  assert.ok(html.indexOf('<h2>3. 预设管理</h2>') < html.indexOf('<h2>4. 开发者模式</h2>'), '预设管理在开发者模式之前');
+  for (const id of ['ai-api-type', 'ai-base-url', 'ai-model', 'ai-api-key', 'ai-save', 'ai-test', 'ai-instruction']) {
+    assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
+  }
+  const keyInput = html.match(/<input[^>]*id="ai-api-key"[^>]*>/);
+  assert.ok(keyInput[0].includes('type="password"'), 'API key 用密码框');
+  assert.ok(classAttr('ai-result').includes('hidden'), '行内结果初始隐藏');
+  assert.ok(html.includes('API key 只保存在本机 Bridge'), '应说明 key 不落浏览器存储');
+});
+
+// 预设编辑区的 AI 摘要开关（#75）：初始关、预设级指令框初始隐藏（开关开启才显示）
+test('preset editor has an AI digest switch, initially off, with a hidden instruction field', () => {
+  const row = html.match(/<button[^>]*id="f-digest"[^>]*>([\s\S]*?)<\/button>/);
+  assert.ok(row, '应有 #f-digest 开关');
+  assert.ok(row[0].includes('aria-pressed="false"'), '#f-digest 初始应为关');
+  assert.ok(!classAttr('f-digest').includes('on'), '#f-digest 初始不带 on 类');
+  assert.ok(classAttr('f-digest-instruction-row').includes('hidden'), '预设级指令框初始隐藏');
+  assert.ok(html.includes('id="f-digest-instruction"'), '应有预设级摘要指令输入框');
+  assert.ok(html.includes('留空使用全局摘要指令'), '应写明留空 = 用全局指令');
 });

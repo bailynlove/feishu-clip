@@ -339,6 +339,19 @@ test('POST /v1/jobs pdf-only submission queues a single pdf job without snapshot
     assert.equal((await noSource.json()).code, 'PDF_SOURCE_REQUIRED');
     assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878', pdfSource, pdfFolderToken: 'bad token!' }) })).status, 400, '目录 token 非法');
     assert.equal((await call('/v1/jobs', { method: 'POST', headers: auth, body: JSON.stringify({ attemptId: '78787878-7878-4878-8878-787878787878', pdfSource: { type: 'url', url: 'ftp://example.com/x.pdf' } }) })).status, 400, 'pdfSource 校验与 clip 路径同一套');
+
+    // AI 摘要（#75）：pdf-only 路径忽略 digest 字段，不校验 instruction、不产生 clip job
+    const pdfDigest = await call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ attemptId: '79797979-7979-4979-8979-797979797979', pdfSource, digest: { enabled: true } }),
+    });
+    assert.equal(pdfDigest.status, 202, 'pdf-only 忽略 digest');
+    assert.equal((await pdfDigest.json()).job, null);
+    for (let count = 0; count < 100; count += 1) {
+      const current = await (await call('/v1/jobs/79797979-7979-4979-8979-797979797979', { headers: auth })).json();
+      if (current.jobs[0].status === 'failed') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });
@@ -551,6 +564,183 @@ test('凭据回退全链路：url 型 403 → awaiting_bytes → 声明升级 �
     assert.equal(uploads.length, 1);
     assert.equal(uploads[0].localFileName, 'Paywalled Paper.pdf', '落盘文件名仍取标题渲染结果');
     assert.deepEqual(await waitStagingGone(ATTEMPT_FALLBACK), [], '终态后 staging 无残留');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// ——— AI 摘要配置端点（#75）———
+
+import { createServer as createHttpServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { AiConfigStore } from '../src/bridge/ai-digest.mjs';
+
+// 本地假 AI 服务：chat-completions 契约，按 Bearer key 决定 200/401
+async function fakeAiServer(goodKey, reply = 'ok') {
+  const aiServer = createHttpServer((request, response) => {
+    if (request.headers.authorization !== `Bearer ${goodKey}`) {
+      response.writeHead(401, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'invalid api key' } }));
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: reply } }] }));
+  });
+  await new Promise((resolve) => aiServer.listen(0, '127.0.0.1', resolve));
+  return { server: aiServer, baseUrl: `http://127.0.0.1:${aiServer.address().port}/v1` };
+}
+
+test('AI 配置端点：校验 400、key 不回显、留空保 key、测试连接逐项覆盖', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-ai-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const aiFile = path.join(directory, 'ai.json');
+  const code = 'ai-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const ai = await fakeAiServer('sk-good');
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    run: async () => ({ ok: true, data: {} }),
+  };
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+    aiConfigStore: new AiConfigStore(aiFile),
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+
+    // 未配对一律 401
+    assert.equal((await call('/v1/ai/config')).status, 401);
+    assert.equal((await call('/v1/ai/config', { method: 'POST', body: '{}' })).status, 401);
+    assert.equal((await call('/v1/ai/test', { method: 'POST', body: '{}' })).status, 401);
+
+    // 初始未配置
+    assert.deepEqual(await (await call('/v1/ai/config', { headers: auth })).json(), { ok: true, config: null });
+
+    // 校验 400 + 机器码：非法 apiType / 非 http(s) baseUrl / 空 model / 首次保存缺 key
+    const post = (body) => call('/v1/ai/config', { method: 'POST', headers: auth, body: JSON.stringify(body) });
+    assert.equal((await (await post({ apiType: 'gpt4', model: 'm', apiKey: 'k' })).json()).code, 'AI_TYPE_INVALID');
+    assert.equal((await (await post({ apiType: 'responses', baseUrl: 'ftp://x', model: 'm', apiKey: 'k' })).json()).code, 'AI_BASE_URL_INVALID');
+    assert.equal((await (await post({ apiType: 'responses', model: '', apiKey: 'k' })).json()).code, 'AI_MODEL_INVALID');
+    assert.equal((await (await post({ apiType: 'responses', model: 'm' })).json()).code, 'AI_KEY_REQUIRED', '首次保存 apiKey 必填');
+    // 测试连接：无已存配置且未给全 → 400 AI_NOT_CONFIGURED
+    const notConfigured = await call('/v1/ai/test', { method: 'POST', headers: auth, body: JSON.stringify({ apiType: 'chat-completions', model: 'm' }) });
+    assert.equal(notConfigured.status, 400);
+    assert.equal((await notConfigured.json()).code, 'AI_NOT_CONFIGURED');
+
+    // 保存成功：返回 sanitized config，key 不出现在响应里
+    const saved = await post({ apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-model', apiKey: 'sk-good' });
+    assert.equal(saved.status, 200);
+    const savedBody = await saved.json();
+    assert.deepEqual(savedBody.config, { apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-model', hasKey: true });
+    assert.ok(!JSON.stringify(savedBody).includes('sk-good'), '保存响应不回显 key');
+
+    // GET 同样不回显 key
+    const got = await (await call('/v1/ai/config', { headers: auth })).json();
+    assert.equal(got.config.hasKey, true);
+    assert.ok(!JSON.stringify(got).includes('sk-good'), 'GET 不回显 key');
+
+    // 后续保存省略 apiKey = 保留已存 key
+    const kept = await post({ apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-model' });
+    assert.equal(kept.status, 200, '已有 key 时省略 apiKey 不再必填');
+    assert.equal(JSON.parse(await readFile(aiFile, 'utf8')).apiKey, 'sk-good', '已存 key 保留');
+
+    // 测试连接成功：{ ok, latencyMs, reply }
+    const tested = await (await call('/v1/ai/test', { method: 'POST', headers: auth, body: '{}' })).json();
+    assert.equal(tested.ok, true);
+    assert.equal(typeof tested.latencyMs, 'number');
+    assert.equal(tested.reply, 'ok');
+
+    // 逐项覆盖不落库：覆盖坏 key → ok:false AI_AUTH_FAILED；已存 key 不受影响
+    const failed = await (await call('/v1/ai/test', { method: 'POST', headers: auth, body: JSON.stringify({ apiKey: 'sk-bad' }) })).json();
+    assert.equal(failed.ok, false);
+    assert.equal(failed.code, 'AI_AUTH_FAILED');
+    assert.ok(failed.message, '失败带中文文案');
+    assert.equal(JSON.parse(await readFile(aiFile, 'utf8')).apiKey, 'sk-good', 'test 覆盖不写入配置');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => ai.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction ≤4000 字符，合法值随 job 落库', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-digest-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'digest-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
+    run: async () => ({ ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } }),
+  };
+  // 不挂 aiConfigStore：bridge.json 缺 aiConfigFile 时 digest 开启的任务降级为警告（未配置 AI API），仍应成功
+  const { server } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {} },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+    const snapshot = { title: '摘要网页', sourceUrl: 'https://example.com/digest', capturedAt: new Date().toISOString(), markdown: '# 正文' };
+    const submit = (attemptId, digest) => call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ attemptId, destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot, ...(digest !== undefined ? { digest } : {}) }),
+    });
+    const readClipJob = async (id) => {
+      const body = await (await call(`/v1/jobs/${id}`, { headers: auth })).json();
+      return body.jobs?.find((job) => job.kind === 'clip') ?? null;
+    };
+
+    // enabled===true 时：缺 instruction / 空串 / 超长 一律 400 DIGEST_INVALID
+    for (const [index, digest] of [
+      { enabled: true },
+      { enabled: true, instruction: '' },
+      { enabled: true, instruction: '   ' },
+      { enabled: true, instruction: 'x'.repeat(4001) },
+      { enabled: true, instruction: 42 },
+    ].entries()) {
+      const rejected = await submit(`8888888${index}-1111-4111-8111-111111111111`, digest);
+      assert.equal(rejected.status, 400, `digest=${JSON.stringify(digest).slice(0, 60)} 应被拒绝`);
+      assert.equal((await rejected.json()).code, 'DIGEST_INVALID');
+    }
+
+    // 合法 digest 随 job 落库；enabled:false 归一为 null
+    const valid = await submit('81818181-1111-4111-8111-111111111111', { enabled: true, instruction: '总结成三点' });
+    assert.equal(valid.status, 202);
+    const off = await submit('82828282-1111-4111-8111-111111111111', { enabled: false });
+    assert.equal(off.status, 202);
+
+    // 等任务收尾再断言/清理：未配置 AI 时 digest 开启 → 降级警告，job 仍成功
+    let digestJob;
+    for (let count = 0; count < 100; count += 1) {
+      digestJob = await readClipJob('81818181-1111-4111-8111-111111111111');
+      if (digestJob && !['queued', 'running'].includes(digestJob.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(digestJob.digest, { enabled: true, instruction: '总结成三点' }, 'digest 随 job 落库');
+    assert.equal(digestJob.status, 'succeeded_with_warnings', '未配置 AI 降级为部分成功');
+    assert.ok(digestJob.warnings.some((warning) => warning.includes('AI 摘要生成失败：未配置 AI API')));
+    assert.ok(digestJob.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'digest'), 'timeline 含 digest 阶段');
+
+    let offJob;
+    for (let count = 0; count < 100; count += 1) {
+      offJob = await readClipJob('82828282-1111-4111-8111-111111111111');
+      if (offJob && !['queued', 'running'].includes(offJob.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(offJob.digest, null, 'enabled:false 归一为 null');
+    assert.equal(offJob.status, 'succeeded');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });

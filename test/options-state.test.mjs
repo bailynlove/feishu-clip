@@ -167,8 +167,8 @@ test('insertVariable inserts {{name}} at the cursor and reports the new cursor',
   assert.equal(clamped.text, 'abc{{date}}');
 });
 
-test('TEMPLATE_VARIABLES covers the v1 variable set (#30)', () => {
-  assert.deepEqual(TEMPLATE_VARIABLES, ['title', 'url', 'host', 'date', 'time', 'datetime', 'content']);
+test('TEMPLATE_VARIABLES covers the v1 variable set (#30) plus digest (#75)', () => {
+  assert.deepEqual(TEMPLATE_VARIABLES, ['title', 'url', 'host', 'date', 'time', 'datetime', 'content', 'digest']);
 });
 
 // ——— 开发者模式：任务耗时日志展示逻辑 ———
@@ -252,4 +252,85 @@ test('jobDetailRows tolerates missing timing data', () => {
     [{ label: 'unknown_stage', value: '100ms', indent: 0, failed: false }],
     '未知 stage 名原样透出',
   );
+});
+
+// ——— AI 摘要（#75）：digest 阶段中文名 + 设置页 AI 配置的常量与归约 ———
+
+import {
+  AI_API_TYPE_OPTIONS,
+  AI_DEFAULT_BASE_URLS,
+  aiConfigPayload,
+  aiDefaultBaseUrl,
+  aiHeadersToText,
+  aiTestResultView,
+} from '../src/extension/options-state.js';
+
+test('jobDetailRows renders the digest stage with its Chinese label (#75)', () => {
+  assert.deepEqual(
+    jobDetailRows({ timeline: [{ kind: 'stage', name: 'digest', ms: 1200 }] }),
+    [{ label: 'AI 摘要', value: '1.2s', indent: 0, failed: false }],
+  );
+});
+
+test('AI_API_TYPE_OPTIONS lists the three contract apiTypes with display labels', () => {
+  assert.deepEqual(AI_API_TYPE_OPTIONS.map((option) => option.value), ['responses', 'chat-completions', 'messages']);
+  for (const option of AI_API_TYPE_OPTIONS) assert.ok(option.label, `${option.value} 应有展示名`);
+});
+
+test('AI_DEFAULT_BASE_URLS matches the bridge contract defaults; messages base has no /v1', () => {
+  assert.equal(AI_DEFAULT_BASE_URLS.responses, 'https://api.openai.com/v1');
+  assert.equal(AI_DEFAULT_BASE_URLS['chat-completions'], 'https://api.openai.com/v1');
+  assert.equal(AI_DEFAULT_BASE_URLS.messages, 'https://api.anthropic.com');
+  assert.equal(aiDefaultBaseUrl('messages'), 'https://api.anthropic.com');
+  assert.equal(aiDefaultBaseUrl('bogus'), AI_DEFAULT_BASE_URLS.responses, '未知类型回落 responses 默认');
+});
+
+test('aiConfigPayload fills the default baseUrl and omits a blank apiKey (keep stored key)', () => {
+  assert.deepEqual(aiConfigPayload({ apiType: 'messages', baseUrl: '', model: 'claude-haiku-4-5', apiKey: '' }), {
+    apiType: 'messages',
+    baseUrl: 'https://api.anthropic.com',
+    model: 'claude-haiku-4-5',
+  }, '空 apiKey 不进 body');
+  assert.deepEqual(aiConfigPayload({ apiType: 'chat-completions', baseUrl: ' https://proxy.local/v1 ', model: ' gpt-5-mini ', apiKey: 'sk-x' }), {
+    apiType: 'chat-completions',
+    baseUrl: 'https://proxy.local/v1',
+    model: 'gpt-5-mini',
+    apiKey: 'sk-x',
+  }, '显式 baseUrl/model 去空白后透传');
+  assert.equal(aiConfigPayload({ apiType: 'weird' }).apiType, 'responses', '非法 apiType 归一为 responses');
+});
+
+test('aiTestResultView renders success with latency and reply excerpt, failure with Chinese message', () => {
+  const ok = aiTestResultView({ ok: true, latencyMs: 820, reply: 'ok' });
+  assert.equal(ok.tone, 'success');
+  assert.match(ok.text, /连接成功/);
+  assert.match(ok.text, /820ms/);
+  assert.match(ok.text, /ok/);
+  assert.equal(aiTestResultView({ ok: false, code: 'AI_AUTH_FAILED', message: 'invalid key' }).text, '连接失败：API key 无效或权限不足', '已知机器码用固定中文文案');
+  assert.equal(aiTestResultView({ ok: false, code: 'AI_REQUEST_FAILED', message: 'HTTP 500' }).text, '连接失败：HTTP 500', '未知错误透传 message');
+  assert.equal(aiTestResultView(null).tone, 'error');
+});
+
+
+test('aiConfigPayload parses 高级设置：headersText 逐行解析 + maxOutputTokensText 整数', () => {
+  const payload = aiConfigPayload({
+    apiType: 'responses', model: 'gpt-5-mini', apiKey: 'sk-x',
+    headersText: 'x-opencode-session: sess-1\n\n  x-foo:  bar  ', maxOutputTokensText: ' 4096 ',
+  });
+  assert.deepEqual(payload.headers, { 'x-opencode-session': 'sess-1', 'x-foo': 'bar' }, '逐行 Name: value，去空白、跳过空行');
+  assert.equal(payload.maxOutputTokens, 4096);
+
+  const bare = aiConfigPayload({ apiType: 'responses', model: 'm', headersText: ' \n  ', maxOutputTokensText: '' });
+  assert.ok(!('headers' in bare) && !('maxOutputTokens' in bare), '留空则两项都不进 body（bridge 回落已存/默认）');
+
+  assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', headersText: 'no-colon-line' }), /请求头/);
+  assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', headersText: ': v' }), /请求头/);
+  assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', maxOutputTokensText: 'abc' }), /tokens/i);
+  assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', maxOutputTokensText: '3.5' }), /tokens/i);
+});
+
+test('aiHeadersToText serializes saved headers back to textarea lines', () => {
+  assert.equal(aiHeadersToText({ 'x-opencode-session': 'sess-1', 'x-foo': 'bar' }), 'x-opencode-session: sess-1\nx-foo: bar');
+  assert.equal(aiHeadersToText(undefined), '');
+  assert.equal(aiHeadersToText({}), '');
 });

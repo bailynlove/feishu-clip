@@ -182,7 +182,7 @@ export class PersistentJobStore {
     this.#jobTtlMs = jobTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null, digest = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
     if (!JOB_KINDS.has(kind)) throw new TypeError(`Unknown job kind: ${kind}`);
     // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名；
@@ -275,6 +275,10 @@ export class PersistentJobStore {
         includeImages,
         // 图片写入模式（#53）：preview/download/off；缺省由 includeImages 布尔推导
         imageMode: imageMode ?? (includeImages === false ? 'off' : 'preview'),
+        // AI 摘要（#75）：digest 是提交时的请求 { enabled, instruction }；digestText 是生成
+        // 结果缓存——落库后重跑（reconcile 重排/任何原因重入 #execute）都不再调 AI
+        digest: digest ? structuredClone(digest) : null,
+        digestText: null,
         status: JOB_STATUS.QUEUED,
         step: JOB_STEP.CREATE_DOCUMENT,
         document: null,
@@ -404,6 +408,19 @@ export class PersistentJobStore {
       job.document = structuredClone(document);
       job.step = JOB_STEP.WRITE_BODY;
       job.createInFlight = false;
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
+  // AI 摘要结果缓存（#75）：worker 守卫仿 recordDocument，但不要求 createInFlight——
+  // digest 阶段在建档（beginCreate）之前运行
+  async recordDigest(attemptId, workerId, digestText) {
+    if (typeof digestText !== 'string') throw new TypeError('digestText is required');
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId);
+      this.#assertActiveWorker(job, workerId);
+      job.digestText = digestText;
       job.updatedAt = this.#now();
       return { result: structuredClone(job), changed: true };
     });
@@ -618,6 +635,11 @@ export class PersistentJobStore {
         // 存量 pdf job 没有 folderToken（#66 前目录固定根目录），读取时补 null
         job.kind = jobKind(job);
         if (job.kind === JOB_KIND.PDF) job.folderToken ??= null;
+        // AI 摘要（#75）：存量 clip job 没有 digest/digestText，读取时补 null
+        if (job.kind === JOB_KIND.CLIP) {
+          job.digest ??= null;
+          job.digestText ??= null;
+        }
       }
       return data;
     } catch (error) {

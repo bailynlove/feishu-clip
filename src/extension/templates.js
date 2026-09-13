@@ -1,6 +1,8 @@
 // {{}} 模板引擎：纯函数、不依赖 chrome API，node:test 可直接测。
 // 语法决议见 #30：变量 title/url/host/date/time/datetime/content，
 // filter 仅 {{date|date:FORMAT}}（token YYYY MM DD HH mm ss），未知变量/非法 filter 置空。
+// digest（#75）：仅 AI 摘要开关开启时由 buildContext 注入自指字面量 '{{digest}}'，
+// 让占位符原样穿过渲染进入 snapshot.markdown（{{digest}} 的最终替换发生在 bridge 侧）。
 
 const PLACEHOLDER = /\{\{\s*([^{}]+?)\s*\}\}/g;
 const CONTENT_PLACEHOLDER = /\{\{\s*content\s*\}\}/;
@@ -30,7 +32,10 @@ function formatDate(date, format) {
 }
 
 // snapshot 是 extractor 的产出 {title, sourceUrl, capturedAt, markdown, images}
-export function buildContext(snapshot) {
+// digestEnabled（#75）：为真时注入 context.digest = '{{digest}}' 自指字面量——占位符原样
+// 穿过 renderTemplate 进入 snapshot.markdown（{{ digest }} 等空格写法一并归一），最终替换
+// 由 bridge 在完成 AI 摘要后执行；为假时不设 digest 键，走未知变量置空的既有行为
+export function buildContext(snapshot, { digestEnabled = false } = {}) {
   const url = typeof snapshot.sourceUrl === 'string' ? snapshot.sourceUrl : '';
   let host = '';
   try {
@@ -49,6 +54,7 @@ export function buildContext(snapshot) {
     datetime: valid ? formatDate(captured, 'YYYY-MM-DD HH:mm') : '',
     content: typeof snapshot.markdown === 'string' ? snapshot.markdown : '',
   };
+  if (digestEnabled) context.digest = '{{digest}}';
   // filter 重排 date/time/datetime 需要原始时间；不可枚举，不影响渲染与断言
   Object.defineProperty(context, '_date', { value: valid ? captured : null, enumerable: false });
   return context;

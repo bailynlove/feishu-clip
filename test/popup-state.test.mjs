@@ -531,6 +531,47 @@ test('composeClip falls back to the extractor title when the rendered title is b
   assert.equal(composeClip(state, clipSnapshot).title, '深入理解剪藏');
 });
 
+// ——— AI 摘要（#75）：预览保留 {{digest}} 字面量；CLIP 消息携带预设开关与预设级指令 ———
+
+import { clipDigest } from '../src/extension/popup-state.js';
+
+test('composeClip keeps the {{digest}} literal in preview/export when the preset digest toggle is on', () => {
+  const digestPresets = [{ ...presets[0], digest: { enabled: true, instruction: '' } }];
+  let state = initPopupPresets({ presets: digestPresets, defaultPresetId: 'p1' }, tab, now);
+  state = editCustomBody(state, '{{digest}}\n\n{{content}}');
+  assert.equal(composeClip(state, clipSnapshot).body, '{{digest}}\n\n# 正文\n\n内容');
+  assert.equal(previewBody(state, clipSnapshot), '{{digest}}\n\n# 正文\n\n内容', '预览 === 保存内容');
+  // 带空格写法同样归一
+  state = editCustomBody(state, '{{ digest }} {{content}}');
+  assert.equal(composeClip(state, clipSnapshot).body, '{{digest}} # 正文\n\n内容');
+});
+
+test('composeClip blanks {{digest}} when the preset digest toggle is off or invalid', () => {
+  for (const variants of [
+    [{ ...presets[0] }], // 存量预设无 digest 字段
+    [{ ...presets[0], digest: null }],
+    [{ ...presets[0], digest: { enabled: 'yes', instruction: 'x' } }],
+  ]) {
+    let state = initPopupPresets({ presets: variants, defaultPresetId: 'p1' }, tab, now);
+    state = editCustomBody(state, '{{digest}} {{content}}');
+    assert.equal(composeClip(state, clipSnapshot).body, ' # 正文\n\n内容', JSON.stringify(variants[0].digest ?? null));
+  }
+});
+
+test('clipDigest carries the preset toggle and raw preset instruction (global fallback lives in background)', () => {
+  const digestPresets = [
+    { ...presets[0], digest: { enabled: true, instruction: '预设指令' } },
+    { ...presets[1], digest: { enabled: true, instruction: '' } },
+  ];
+  let state = initPopupPresets({ presets: digestPresets, defaultPresetId: 'p1' }, tab, now);
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令' });
+  state = selectPreset(state, 'p2');
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '' }, '空串原样透传（= 用全局），弹窗不读全局设置');
+
+  const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.deepEqual(clipDigest(plain), { digestEnabled: false, digestInstruction: '' }, '预设未开开关');
+});
+
 test('clipFilename sanitizes filesystem-unsafe characters and falls back to clip', () => {
   assert.equal(clipFilename('我的 标题/收藏?'), '我的 标题-收藏-.md');
   assert.equal(clipFilename('  正常标题  '), '正常标题.md');

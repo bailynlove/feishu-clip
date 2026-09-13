@@ -1,7 +1,7 @@
 // 弹窗 job 状态的纯归约逻辑。recovered 表示该 attempt 是打开弹窗时从存储恢复的旧会话：
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
-import { createDefaultPreset, createDriveFolder, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDefaultPreset, createDriveFolder, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
 import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
@@ -435,9 +435,19 @@ export function previewBody(state, snapshot) {
 // 导出内容合成：与 background CLIP 同一规则——标题走语义 B 渲染 + sanitizeClipTitle
 // 清洗、空白回退 extractor 标题；正文 = renderBody(自定义正文框内容)。
 // 保存/复制/文件/预览四处共用此路径，保证内容一致。
+// AI 摘要（#75）：预设开了 digest 开关时 {{digest}} 以字面量存活在预览/导出内容里
+// （意为「此处将生成摘要」），保持 预览 === 保存内容 的不变量；最终替换发生在 bridge 侧
 export function composeClip(state, snapshot) {
   const title = sanitizeClipTitle(finalTitle(state)) ?? (typeof snapshot?.title === 'string' ? snapshot.title : '');
-  return { title, body: renderBody(state.customBody, buildContext({ ...snapshot, title })) };
+  const digestEnabled = resolveDigest(currentPreset(state))?.enabled === true;
+  return { title, body: renderBody(state.customBody, buildContext({ ...snapshot, title }, { digestEnabled })) };
+}
+
+// 弹窗 CLIP 消息携带的 AI 摘要字段（#75）：预设开关 + 预设级指令原值（空串 = 用全局）；
+// 全局指令与内置默认的回落在 background 解析，弹窗不读全局设置
+export function clipDigest(state) {
+  const digest = resolveDigest(currentPreset(state));
+  return { digestEnabled: digest?.enabled === true, digestInstruction: digest?.instruction ?? '' };
 }
 
 // 导出文件名：渲染标题做文件系统安全清洗，空则回退 clip
