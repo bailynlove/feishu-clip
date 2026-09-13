@@ -202,7 +202,8 @@ export class ClipExecutor {
     // pdf 下载函数可注入（测试 stub；生产默认走 image-policy 的 SSRF 校验下载）
     this.downloadPdf = downloadPdf;
     // AI 摘要（#75）：generateDigest/getAiConfig 可注入（测试 fake，仿 downloadPdf）；
-    // 生产默认接 ai-digest.mjs，配置由 server 传入的 ai.json store 读取
+    // 生产默认接 ai-digest.mjs，配置由 server 传入的 ai.json store 读取。
+    // getAiConfig(name)（#78）：name 非空按名取 provider，null 走默认 provider
     this.generateDigest = generateDigest;
     this.getAiConfig = getAiConfig;
     // 重试退避 sleep 可注入（测试不等真实退避；生产为 setTimeout）
@@ -393,18 +394,27 @@ export class ClipExecutor {
       // AI 摘要阶段（#75）：建档（prepareMarkdown/create_document）之前对正文生成摘要。
       // 开关关 → 整段跳过；digestText 已落库 → 直接复用缓存不调 AI（#72-8，重跑安全）；
       // 失败绝不 fail job——记 timeline + 警告（与图片警告同一通道并入 complete 的 warnings，
-      // 部分成功降级 #72-7），占位符置空/默认布局省略由 applyDigest 保证
+      // 部分成功降级 #72-7），占位符置空/默认布局省略由 applyDigest 保证。
+      // provider（#78）：digest.provider 非空 = 按名取该 provider；为空调 getAiConfig(null) 走
+      // 默认 provider。按名取不到（被删/bridge 未配置）→ 不调 AI，warning 指明 provider 名
       let digestWarning = null;
       let digestText = job.digestText ?? null;
       if (job.digest?.enabled && digestText === null) {
         const digestAt = Date.now();
-        try {
-          digestText = await this.generateDigest({ config: await this.getAiConfig(), instruction: job.digest.instruction, content: job.snapshot.markdown });
-          await this.store.recordDigest(job.attemptId, workerId, digestText);
-          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt });
-        } catch (error) {
-          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: String(error?.message || error).slice(0, 300) });
-          digestWarning = `AI 摘要生成失败：${aiErrorMessage(error)}`;
+        const providerName = typeof job.digest.provider === 'string' && job.digest.provider ? job.digest.provider : null;
+        const config = await this.getAiConfig(providerName);
+        if (providerName && !config) {
+          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: `provider「${providerName}」不存在` });
+          digestWarning = `AI provider「${providerName}」不存在（可能已被删除），本次未生成摘要`;
+        } else {
+          try {
+            digestText = await this.generateDigest({ config, instruction: job.digest.instruction, content: job.snapshot.markdown });
+            await this.store.recordDigest(job.attemptId, workerId, digestText);
+            timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt });
+          } catch (error) {
+            timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: String(error?.message || error).slice(0, 300) });
+            digestWarning = `AI 摘要生成失败：${aiErrorMessage(error)}`;
+          }
         }
       }
       const prepared = prepareMarkdown(

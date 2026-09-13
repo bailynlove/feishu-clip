@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AI_DEFAULT_BASE_URL, AI_MAX_INPUT_CHARS, AiConfigStore, applyDigest, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, sanitizeAiConfig } from '../src/bridge/ai-digest.mjs';
+import { AI_DEFAULT_BASE_URL, AI_MAX_INPUT_CHARS, AiConfigStore, applyDigest, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeAiConfig, sanitizeProvider } from '../src/bridge/ai-digest.mjs';
 
 // 捕获请求的 fake fetch + 可编程应答；body 做成可异步迭代（与 fetch 的 Response.body 同形）
 function fakeFetch(respond) {
@@ -247,27 +247,89 @@ async function withAiStore(run) {
   }
 }
 
-test('AiConfigStore：读写往返 + 0600 权限 + 文件不存在按未配置读（null）', async () => {
+const DS = { apiType: 'chat-completions', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: 'sk-ds' };
+
+// ——— 多 provider 存储（#77）：ai.json 形态 { providers: { 名字: 配置 } }，「默认」为保留名 ———
+
+test('normalizeProviderName：非空 ≤64 字符，去空白；非法值带机器码', () => {
+  assert.equal(normalizeProviderName('  ds '), 'ds');
+  assert.equal(normalizeProviderName('默认'), '默认');
+  const badName = (value) => assert.throws(() => normalizeProviderName(value), (error) => error.code === 'AI_PROVIDER_NAME_INVALID');
+  for (const value of [undefined, null, '', '   ', 42, 'x'.repeat(65)]) badName(value);
+});
+
+test('AiConfigStore：旧版单配置（#75 形态）首次读取自动迁移为「默认」provider 并原子落盘', async () => {
+  await withAiStore(async (store, filePath) => {
+    const legacy = { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5-mini', apiKey: 'sk-old', headers: { 'x-s': '1' }, maxOutputTokens: 4096 };
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    const migrated = await store.read();
+    assert.deepEqual(migrated.providers['默认'], legacy, '原配置（含 key/高级设置）原样成为「默认」');
+    const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+    assert.deepEqual(persisted, { providers: { 默认: legacy } }, '迁移立即落盘');
+    assert.equal((await stat(filePath)).mode & 0o777, 0o600, '迁移后仍 0600');
+  });
+});
+
+test('AiConfigStore 多 provider：saveProvider 增改、list 默认在前、readProvider、空文件按 null 读', async () => {
   await withAiStore(async (store, filePath) => {
     assert.equal(await store.read(), null, '文件不存在按未配置');
-    const saved = await store.save({ apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'sk-secret' });
-    assert.equal(saved.apiKey, 'sk-secret');
-    assert.deepEqual(await store.read(), saved);
+    assert.deepEqual(await store.list(), [], '无文件时 list 为空');
+    await store.saveProvider('默认', { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'sk-main' });
+    await store.saveProvider('ds', DS);
+    assert.deepEqual((await store.list()).map((p) => p.name), ['默认', 'ds'], 'list 默认在前');
+    assert.equal((await store.readProvider('ds')).model, 'deepseek-chat');
+    assert.equal(await store.readProvider('nope'), null);
     const persisted = JSON.parse(await readFile(filePath, 'utf8'));
-    assert.equal(persisted.apiKey, 'sk-secret');
+    assert.equal(persisted.providers.ds.apiKey, 'sk-ds');
     assert.equal((await stat(filePath)).mode & 0o777, 0o600, 'key 文件 0600');
   });
 });
 
-test('AiConfigStore：后续保存省略/空串 apiKey 保留已存 key', async () => {
+test('AiConfigStore：按 provider 保留已存 key；renameFrom 改名搬 key 并删旧名', async () => {
   await withAiStore(async (store) => {
-    await store.save({ apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'sk-secret' });
+    await store.saveProvider('默认', { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'sk-main' });
+    await store.saveProvider('ds', DS);
+    // 省略/空串 apiKey 保留该 provider 自己的已存 key（互不影响）
     for (const apiKey of ['', undefined]) {
-      const saved = await store.save({ apiType: 'messages', baseUrl: 'https://api.anthropic.com', model: 'claude-x', apiKey });
-      assert.equal(saved.apiKey, 'sk-secret', `apiKey=${String(apiKey)} 保留已存 key`);
-      assert.equal(saved.apiType, 'messages', '其余字段以新值为准');
+      const saved = await store.saveProvider('ds', { ...DS, model: 'deepseek-v4', apiKey });
+      assert.equal(saved.apiKey, 'sk-ds', `apiKey=${String(apiKey)} 保留 ds 已存 key`);
+      assert.equal((await store.readProvider('默认')).apiKey, 'sk-main', '默认的 key 不受影响');
     }
+    // 改名：ds → deepseek，key 搬走，旧名删除
+    const renamed = await store.saveProvider('deepseek', { ...DS, model: 'deepseek-v4', apiKey: '' }, { renameFrom: 'ds' });
+    assert.equal(renamed.apiKey, 'sk-ds', '改名继承旧 key');
+    assert.equal(await store.readProvider('ds'), null, '旧名已删');
+    assert.deepEqual((await store.list()).map((p) => p.name), ['默认', 'deepseek']);
   });
+});
+
+test('AiConfigStore：deleteProvider 删除存在项返回 true，缺项 false', async () => {
+  await withAiStore(async (store) => {
+    await store.saveProvider('默认', { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'sk-main' });
+    await store.saveProvider('ds', DS);
+    assert.equal(await store.deleteProvider('ds'), true);
+    assert.deepEqual((await store.list()).map((p) => p.name), ['默认']);
+    assert.equal(await store.deleteProvider('ds'), false, '重复删除返回 false');
+  });
+});
+
+test('AiConfigStore：readDefault 回落——有「默认」用它，没有则用第一套，空为 null', async () => {
+  await withAiStore(async (store) => {
+    assert.equal(await store.readDefault(), null);
+    await store.saveProvider('ds', DS);
+    assert.equal((await store.readDefault()).model, 'deepseek-chat', '无「默认」时回落第一套');
+    await store.saveProvider('默认', { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'sk-main' });
+    assert.equal((await store.readDefault()).model, 'gpt-5', '有「默认」优先');
+  });
+});
+
+test('sanitizeProvider：随名单套脱敏（hasKey 不回显 key）', () => {
+  const safe = sanitizeProvider('ds', { ...DS, maxOutputTokens: 4096 });
+  assert.equal(safe.name, 'ds');
+  assert.equal(safe.hasKey, true);
+  assert.equal(safe.maxOutputTokens, 4096);
+  assert.ok(!JSON.stringify(safe).includes('sk-ds'));
 });
 
 

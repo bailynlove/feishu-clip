@@ -364,3 +364,49 @@ test('setSectionCollapsed toggles one key immutably', () => {
   assert.deepEqual(before, { aiDigest: false, presets: false }, '不改动入参');
   assert.deepEqual(setSectionCollapsed(after, 'presets', false), before, '再展开回到默认');
 });
+
+// ——— AI provider 预设管理（#77）：列表选中解析 + 保存请求体带 name/renameFrom ———
+
+import {
+  aiDigestProviderOptions,
+  aiProviderByName,
+  resolveAiProviderSelection,
+} from '../src/extension/options-state.js';
+
+test('aiConfigPayload carries provider name and renameFrom when given', () => {
+  const payload = aiConfigPayload({ apiType: 'responses', model: 'm', apiKey: 'k', name: ' ds ', renameFrom: 'old' });
+  assert.equal(payload.name, 'ds');
+  assert.equal(payload.renameFrom, 'old');
+  const plain = aiConfigPayload({ apiType: 'responses', model: 'm' });
+  assert.ok(!('name' in plain) && !('renameFrom' in plain), '省略时两键不进 body');
+});
+
+test('aiProviderByName / resolveAiProviderSelection：命中、被删回落「默认」、再回落第一个、空列表 null', () => {
+  const providers = [
+    { name: '默认', apiType: 'responses', hasKey: true },
+    { name: 'ds', apiType: 'chat-completions', hasKey: true },
+  ];
+  assert.equal(aiProviderByName(providers, 'ds').apiType, 'chat-completions');
+  assert.equal(aiProviderByName(providers, 'ghost'), null);
+  assert.equal(resolveAiProviderSelection(providers, 'ds'), 'ds', '选中有效原样保留');
+  assert.equal(resolveAiProviderSelection(providers, 'ghost'), '默认', '选中不存在回落「默认」');
+  assert.equal(resolveAiProviderSelection([{ name: 'ds' }], null), 'ds', '无「默认」回落第一个');
+  assert.equal(resolveAiProviderSelection([], null), null, '空列表 → null（新建草稿态）');
+  assert.equal(resolveAiProviderSelection(undefined, 'x'), null, 'undefined 列表按空处理');
+});
+
+// 预设表单的 provider 下拉选项（#78）：首项固定「默认」（value '' = 跟随默认 provider），
+// 其后为各命名 provider（名为「默认」的已含于首项语义，不重复列）；列表不可用 → 仅首项
+test('aiDigestProviderOptions：默认首项 + 命名 provider，列表缺失时仅默认项', () => {
+  assert.deepEqual(aiDigestProviderOptions([
+    { name: '默认', hasKey: true },
+    { name: 'ds', hasKey: true },
+    { name: 'xx', hasKey: false },
+  ]), [
+    { value: '', label: '默认' },
+    { value: 'ds', label: 'ds' },
+    { value: 'xx', label: 'xx' },
+  ]);
+  assert.deepEqual(aiDigestProviderOptions(undefined), [{ value: '', label: '默认' }], 'bridge 拿不到列表降级为仅默认');
+  assert.deepEqual(aiDigestProviderOptions([]), [{ value: '', label: '默认' }]);
+});

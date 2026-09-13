@@ -219,11 +219,12 @@ async function handle(message) {
       // optionsUiCollapsed 供设置页分区折叠状态回填（#76）
       return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode', 'aiDigestInstruction', 'optionsUiCollapsed']);
     }
-    // AI 摘要配置（#75）：三个端点纯代理到 bridge；API key 只存 bridge 的 ai.json，
+    // AI provider 预设（#77）：四个端点纯代理到 bridge；API key 只存 bridge 的 ai.json，
     // 扩展侧任何环节不落地（SAVE 留空的 apiKey 由 options.js 组装请求体时省略）
-    case 'GET_AI_CONFIG': return bridge('/v1/ai/config');
-    case 'SAVE_AI_CONFIG': return bridge('/v1/ai/config', { method: 'POST', body: message.config });
-    case 'TEST_AI': return bridge('/v1/ai/test', { method: 'POST', body: message.overrides ?? {} });
+    case 'LIST_AI_PROVIDERS': return bridge('/v1/ai/providers');
+    case 'SAVE_AI_PROVIDER': return bridge('/v1/ai/providers', { method: 'POST', body: message.provider });
+    case 'DELETE_AI_PROVIDER': return bridge('/v1/ai/providers/delete', { method: 'POST', body: { name: message.name } });
+    case 'TEST_AI': return bridge('/v1/ai/test', { method: 'POST', body: { ...(message.name ? { name: message.name } : {}), ...(message.overrides ?? {}) } });
     case 'SAVE_PRESETS': {
       // 设置页整体写回预设列表 + 默认预设（#35）；列表为空或默认预设悬空时拒绝/修复
       if (!Array.isArray(message.presets) || message.presets.length === 0) throw new Error('至少保留一套预设');
@@ -274,6 +275,10 @@ async function handle(message) {
       if (digestEnabled) {
         const stored = await localGet(['aiDigestInstruction']);
         digest = { enabled: true, instruction: resolveDigestInstruction(message.digestInstruction, stored.aiDigestInstruction).slice(0, 4000) };
+        // provider（#78）：预设选用的 provider 名；空白/缺省不带键（bridge = 默认 provider），
+        // 上限 64 字符与 bridge 校验口径一致，超长截断
+        const provider = typeof message.digestProvider === 'string' ? message.digestProvider.trim().slice(0, 64) : '';
+        if (provider) digest.provider = provider;
       }
       // 正文合成（#37，#40 起有效模板 = 弹窗自定义正文框内容）：与弹窗预览同调 renderBody；
       // ctx 在标题覆盖之后构建，正文模板看到的即最终标题

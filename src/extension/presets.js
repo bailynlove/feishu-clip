@@ -51,11 +51,16 @@ export function resolvePdfDrive(preset) {
 }
 
 // AI 摘要预设字段（#75）：读取时迁移——缺字段/非法值一律归一为 null；
-// enabled:true + instruction:'' = 开启但用全局指令（空串语义在 resolveDigestInstruction 解析）
+// enabled:true + instruction:'' = 开启但用全局指令（空串语义在 resolveDigestInstruction 解析）；
+// provider（#78）：选用的 AI provider 名，空串/缺省 = 默认 provider
 export function resolveDigest(preset) {
   const value = preset?.digest;
   if (!value || typeof value !== 'object' || value.enabled !== true) return null;
-  return { enabled: true, instruction: typeof value.instruction === 'string' ? value.instruction : '' };
+  return {
+    enabled: true,
+    instruction: typeof value.instruction === 'string' ? value.instruction : '',
+    provider: typeof value.provider === 'string' ? value.provider.trim() : '',
+  };
 }
 
 // 摘要指令解析顺序（#75）：预设级 > 全局（chrome.storage.local 的 aiDigestInstruction）> 内置默认；

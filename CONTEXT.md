@@ -48,6 +48,10 @@ _Avoid_: 格式串、占位文本
 由 Bridge 调用用户配置的 AI API 对剪藏正文生成的摘要文本；经 `{{digest}}` 占位符或默认布局进入剪藏文档；生成失败按部分成功降级，不阻断剪藏。
 _Avoid_: 网页导读、内容总结报告
 
+**AI provider 预设（AI Provider Preset）**:
+Bridge 端 `ai.json` 里一套命名的 AI API 配置（apiType / baseUrl / model / apiKey + 高级设置 headers / maxOutputTokens）；「默认」由旧单配置迁移而来，可编辑不可删除/改名；模板预设按名选用（`digest.provider`），空 = 默认 provider，悬空引用按摘要失败降级。
+_Avoid_: 模型配置、API 档案
+
 **悬浮内容（Hover Content）**:
 labuladong 代码行内的灯泡注解面板：`span.code-extend-tooltip` 内 `svg.code-extend-icon`（灯泡图标）的兄弟 `span.code-extend-content`，默认隐藏、悬停灯泡才展示。判定硬收窄为此精确触发器关联——其他站点的类似悬停注解、一般隐藏容器一律不算悬浮内容（按普通内容渲染或随容器丢弃）。剪藏时在触发位置留 `悬浮内容{i}` 标记，文字内容作为注释段落 `悬浮内容{i}: 内容` 排到所在块之后（列表项内的提升到整个列表之后），面板内的图片锚定在同一位置、锚点前带 `悬浮内容{i}：` 编号标签段。含 iframe 的隐藏容器不作悬浮打标。
 _Avoid_: 隐藏内容、提示框、工具提示、通用悬停面板

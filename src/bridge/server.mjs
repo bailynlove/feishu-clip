@@ -9,9 +9,14 @@ import { IMAGE_MODES, JOB_KIND, JOB_STATUS, PDF_CHUNK_BYTES, PersistentJobStore,
 import { PDF_LIMITS } from './image-policy.mjs';
 import { PdfChunkStaging } from './pdf-chunks.mjs';
 import { ClipExecutor, aiErrorMessage } from './executor.mjs';
-import { AiConfigStore, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, sanitizeAiConfig } from './ai-digest.mjs';
+import { AiConfigStore, DEFAULT_PROVIDER_NAME, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeProvider } from './ai-digest.mjs';
 
 const JSON_LIMIT = 52 * 1024 * 1024;
+
+// 与 normalizeAiConfigInput / normalizePdfSource 同一约定：TypeError + code，端点 catch 翻译成 400
+function badRequest(code, message) {
+  return Object.assign(new TypeError(message), { code });
+}
 
 function send(response, status, value, origin = null) {
   const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
@@ -116,7 +121,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
   const aiStore = aiConfigStore ?? (config.aiConfigFile ? new AiConfigStore(config.aiConfigFile) : null);
   // 分块暂存（#68）：staging 目录在 job 文件旁，executor 与分块端点共用同一实例
   const staging = new PdfChunkStaging({ dir: path.join(path.dirname(config.jobFile), 'staging') });
-  const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? () => aiStore.read() : async () => null });
+  const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? (name) => (name ? aiStore.readProvider(name) : aiStore.readDefault()) : async () => null });
   // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
   // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出。
   // staging 清理（#68）：随 recoverExpired 的 expired 列表即时 discard，再按 mtime 扫超龄孤儿；
@@ -185,33 +190,59 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         }
       }
 
-      // ——— AI 摘要配置（#75）：key 只落 ai.json，任何端点都不回显（GET/保存后均返回 sanitized config） ———
-      if (request.method === 'GET' && request.url === '/v1/ai/config') {
-        const saved = aiStore ? await aiStore.read() : null;
-        return send(response, 200, { ok: true, config: saved ? sanitizeAiConfig(saved) : null }, origin);
+      // ——— AI provider 预设（#77）：ai.json 多套命名配置；key 只落 ai.json，任何端点不回显
+      // （列表/保存后均返回 sanitizeProvider 结果）。「默认」受保护：可编辑，不可删除/改名 ———
+      if (request.method === 'GET' && request.url === '/v1/ai/providers') {
+        const providers = aiStore ? await aiStore.list() : [];
+        return send(response, 200, { ok: true, providers: providers.map((p) => sanitizeProvider(p.name, p)) }, origin);
       }
 
-      if (request.method === 'POST' && request.url === '/v1/ai/config') {
+      if (request.method === 'POST' && request.url === '/v1/ai/providers') {
         if (!aiStore) return send(response, 400, { ok: false, code: 'AI_NOT_CONFIGURED', message: 'Bridge 未配置 aiConfigFile' }, origin);
         const body = await readJson(request);
-        let input;
         try {
-          // 首次保存 apiKey 必填；已有 key 时省略/空串 = 保留已存 key
-          input = normalizeAiConfigInput(body, { requireKey: !(await aiStore.read())?.apiKey });
+          const name = normalizeProviderName(body?.name);
+          const renameFrom = body?.renameFrom === undefined ? undefined : normalizeProviderName(body.renameFrom);
+          if (renameFrom !== undefined) {
+            if (renameFrom === DEFAULT_PROVIDER_NAME) throw badRequest('AI_PROVIDER_PROTECTED', '「默认」provider 不可改名');
+            if (name === renameFrom) throw badRequest('AI_RENAME_NOOP', '新旧名称相同');
+            if (!(await aiStore.readProvider(renameFrom))) throw badRequest('AI_PROVIDER_NOT_FOUND', `provider「${renameFrom}」不存在`);
+            if (await aiStore.readProvider(name)) throw badRequest('AI_PROVIDER_EXISTS', `provider「${name}」已存在`);
+          }
+          // 新建（目标名与改名来源都无已存 key）时 apiKey 必填；已有 key 时省略/空串 = 保留
+          const keySource = (await aiStore.readProvider(name)) ?? (renameFrom ? await aiStore.readProvider(renameFrom) : null);
+          const input = normalizeAiConfigInput(body, { requireKey: !keySource?.apiKey });
+          const saved = await aiStore.saveProvider(name, input, { renameFrom });
+          return send(response, 200, { ok: true, provider: sanitizeProvider(name, saved) }, origin);
         } catch (error) {
           return send(response, 400, { ok: false, code: error.code || 'AI_CONFIG_INVALID', message: error.message }, origin);
         }
-        const saved = await aiStore.save(input);
-        return send(response, 200, { ok: true, config: sanitizeAiConfig(saved) }, origin);
       }
 
-      // 测试连接：请求体逐项覆盖已存配置，发一条最小真实请求（max tokens 16）验证连通性 + key + model
+      if (request.method === 'POST' && request.url === '/v1/ai/providers/delete') {
+        if (!aiStore) return send(response, 400, { ok: false, code: 'AI_NOT_CONFIGURED', message: 'Bridge 未配置 aiConfigFile' }, origin);
+        const body = await readJson(request);
+        try {
+          const name = normalizeProviderName(body?.name);
+          if (name === DEFAULT_PROVIDER_NAME) throw badRequest('AI_PROVIDER_PROTECTED', '「默认」provider 不可删除');
+          if (!(await aiStore.deleteProvider(name))) throw badRequest('AI_PROVIDER_NOT_FOUND', `provider「${name}」不存在`);
+          return send(response, 200, { ok: true }, origin);
+        } catch (error) {
+          return send(response, 400, { ok: false, code: error.code || 'AI_CONFIG_INVALID', message: error.message }, origin);
+        }
+      }
+
+      // 测试连接：name 指定已存 provider（缺省 = 默认），请求体字段逐项覆盖；发一条最小真实请求验证连通性 + key + model
       if (request.method === 'POST' && request.url === '/v1/ai/test') {
         if (!aiStore) return send(response, 400, { ok: false, code: 'AI_NOT_CONFIGURED', message: 'Bridge 未配置 aiConfigFile' }, origin);
         const body = await readJson(request);
         let merged;
         try {
-          merged = mergeAiTestConfig(body ?? {}, await aiStore.read());
+          const saved = body?.name
+            ? await aiStore.readProvider(normalizeProviderName(body.name))
+            : await aiStore.readDefault();
+          if (body?.name && !saved) throw badRequest('AI_PROVIDER_NOT_FOUND', `provider「${normalizeProviderName(body.name)}」不存在`);
+          merged = mergeAiTestConfig(body ?? {}, saved);
         } catch (error) {
           return send(response, 400, { ok: false, code: error.code || 'AI_NOT_CONFIGURED', message: error.message }, origin);
         }
@@ -338,7 +369,8 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
         // 图片写入模式（#53）：合法三态直用；非法/缺省回退旧 includeImages 布尔语义（false → off，其余 → preview）
         const imageMode = IMAGE_MODES.includes(body.imageMode) ? body.imageMode : (body.includeImages === false ? 'off' : 'preview');
-        // AI 摘要（#75）：digest.enabled===true 时要求非空 instruction ≤4000 字符；pdf-only 路径忽略
+        // AI 摘要（#75）：digest.enabled===true 时要求非空 instruction ≤4000 字符；pdf-only 路径忽略。
+        // provider（#78）：选填，非空字符串 ≤64（与 provider 命名上限一致）；缺省 = 默认 provider
         let digest = null;
         if (body.digest?.enabled === true) {
           const instruction = body.digest.instruction;
@@ -346,6 +378,13 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
             return send(response, 400, { ok: false, code: 'DIGEST_INVALID', message: '开启 AI 摘要时必须提供非空摘要指令（≤4000 字符）' }, origin);
           }
           digest = { enabled: true, instruction };
+          const provider = body.digest.provider;
+          if (provider !== undefined) {
+            if (typeof provider !== 'string' || !provider.trim() || provider.length > 64) {
+              return send(response, 400, { ok: false, code: 'DIGEST_INVALID', message: 'digest.provider 必须是非空字符串（≤64 字符）' }, origin);
+            }
+            digest.provider = provider.trim();
+          }
         }
         const submitted = await store.submit({
           attemptId: body.attemptId,

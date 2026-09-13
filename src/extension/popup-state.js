@@ -444,10 +444,11 @@ export function composeClip(state, snapshot) {
 }
 
 // 弹窗 CLIP 消息携带的 AI 摘要字段（#75）：预设开关 + 预设级指令原值（空串 = 用全局）；
+// provider（#78）：预设选用的 provider 名原值（空串 = 默认 provider）。
 // 全局指令与内置默认的回落在 background 解析，弹窗不读全局设置
 export function clipDigest(state) {
   const digest = resolveDigest(currentPreset(state));
-  return { digestEnabled: digest?.enabled === true, digestInstruction: digest?.instruction ?? '' };
+  return { digestEnabled: digest?.enabled === true, digestInstruction: digest?.instruction ?? '', digestProvider: digest?.provider ?? '' };
 }
 
 // 导出文件名：渲染标题做文件系统安全清洗，空则回退 clip

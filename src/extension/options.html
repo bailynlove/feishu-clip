@@ -22,7 +22,9 @@
 <section class="ps-card">
   <details class="ps-collapse" id="ai-section-collapse" open>
   <summary class="ps-collapse-summary"><h2>2. AI 摘要</h2></summary>
-  <p class="ps-desc">在本机 Bridge 上配置一个 AI API；预设里开启「AI 摘要」后，剪藏文档自动带一段 AI 生成的摘要。API key 只保存在本机 Bridge，不会写入浏览器存储或上传他处。</p>
+  <p class="ps-desc">在本机 Bridge 上配置 AI provider 预设；预设里开启「AI 摘要」后，剪藏文档自动带一段 AI 生成的摘要。API key 只保存在本机 Bridge，不会写入浏览器存储或上传他处。</p>
+  <div class="ps-tabs" id="ai-provider-tabs"></div>
+  <label class="ps-field"><span class="ps-label">名称</span><input id="ai-name" class="ps-input" autocomplete="off" placeholder="如 ds / xx"></label>
   <div class="ps-field"><span class="ps-label">API 类型</span>
     <select id="ai-api-type" class="ps-input"></select>
   </div>
@@ -32,6 +34,7 @@
   <div class="ai-actions">
     <button id="ai-save" class="ps-btn primary" type="button">保存</button>
     <button id="ai-test" class="ps-btn" type="button">测试连接</button>
+    <button id="ai-delete" class="ps-btn hidden" type="button">删除</button>
   </div>
   <div id="ai-result" class="ps-note hidden"></div>
   <details class="ps-advanced">
@@ -123,6 +126,7 @@
         <span class="ps-switch-text"><span class="ps-switch-label">剪藏时生成 AI 摘要</span><span class="ps-switch-sub">由本机 Bridge 调用配置的 AI API 生成；正文模板中的 {{digest}} 占位符原位插入，否则摘要排在正文之前</span></span>
         <span class="ps-switch"></span>
       </button>
+      <label class="ps-field hidden" id="f-digest-provider-row"><span class="ps-label">AI provider</span><select id="f-digest-provider" class="ps-input"></select><span class="ps-desc hidden" id="f-digest-provider-hint">未读取到 provider 列表，仅可选「默认」</span></label>
       <label class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea></label>
     </div>
 

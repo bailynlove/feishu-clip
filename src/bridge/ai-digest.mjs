@@ -324,30 +324,88 @@ export function sanitizeAiConfig(config) {
   return safe;
 }
 
-// 仿 PairingStore（src/bridge/pairing.mjs）：原子写 + 0600；文件不存在按「未配置」读（null）
+// ——— 多 provider（#77）：ai.json 形态 { providers: { 名字: 单套配置 } } ———
+
+// 保留名：旧版单配置（#75）迁移而来，端点层强制其可编辑但不可删除/改名
+export const DEFAULT_PROVIDER_NAME = '默认';
+
+export function normalizeProviderName(value) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 64) {
+    throw bad('AI_PROVIDER_NAME_INVALID', 'provider 名称必须是非空字符串（≤64 字符）');
+  }
+  return value.trim();
+}
+
+// 随名脱敏：在 sanitizeAiConfig 之上带名字（列表端点与设置页回填用）
+export function sanitizeProvider(name, config) {
+  return { name, ...sanitizeAiConfig(config) };
+}
+
+// 仿 PairingStore（src/bridge/pairing.mjs）：原子写 + 0600；文件不存在按「未配置」读（null）。
+// 旧版单配置形态（顶层带 apiType）首次读取时自动包成「默认」provider 并立即落盘
 export class AiConfigStore {
   constructor(filePath) {
     this.filePath = filePath;
   }
 
+  async writeAll(data) {
+    await mkdir(path.dirname(this.filePath), { recursive: true });
+    const temporary = `${this.filePath}.new`;
+    await writeFile(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+    await rename(temporary, this.filePath);
+    await chmod(this.filePath, 0o600);
+  }
+
   async read() {
+    let raw;
     try {
-      return JSON.parse(await readFile(this.filePath, 'utf8'));
+      raw = JSON.parse(await readFile(this.filePath, 'utf8'));
     } catch (error) {
       if (error.code === 'ENOENT') return null;
       throw error;
     }
+    if (raw?.providers && typeof raw.providers === 'object') return { providers: raw.providers };
+    // 旧版单配置 → 迁移为「默认」provider（原 key/高级设置原样保留）并落盘
+    const migrated = { providers: { [DEFAULT_PROVIDER_NAME]: raw } };
+    await this.writeAll(migrated);
+    return migrated;
   }
 
-  async save(config) {
-    // 留空/省略 apiKey = 保留已存 key（首次保存的必填校验在 server 层）
-    const existing = await this.read();
-    const next = { ...config, apiKey: config.apiKey || existing?.apiKey || '' };
-    await mkdir(path.dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.new`;
-    await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    await rename(temporary, this.filePath);
-    await chmod(this.filePath, 0o600);
-    return next;
+  // 列表：「默认」恒在最前，其余按插入序
+  async list() {
+    const providers = (await this.read())?.providers ?? {};
+    return [DEFAULT_PROVIDER_NAME, ...Object.keys(providers).filter((name) => name !== DEFAULT_PROVIDER_NAME)]
+      .filter((name) => providers[name])
+      .map((name) => ({ name, ...providers[name] }));
+  }
+
+  async readProvider(name) {
+    return (await this.read())?.providers?.[name] ?? null;
+  }
+
+  // 默认 provider 语义：有「默认」用它；没有（全新安装直接建了别的名字）回落第一套
+  async readDefault() {
+    const providers = (await this.read())?.providers ?? {};
+    return providers[DEFAULT_PROVIDER_NAME] ?? Object.values(providers)[0] ?? null;
+  }
+
+  // upsert：留空/省略 apiKey = 保留该 provider 已存 key（首次保存的必填校验在 server 层）；
+  // renameFrom 把旧名的已存 key 一并搬过来并删除旧名（改名不丢 key）
+  async saveProvider(name, config, { renameFrom } = {}) {
+    const providers = { ...((await this.read())?.providers ?? {}) };
+    const existing = providers[name] ?? (renameFrom ? providers[renameFrom] : null);
+    providers[name] = { ...config, apiKey: config.apiKey || existing?.apiKey || '' };
+    if (renameFrom && renameFrom !== name) delete providers[renameFrom];
+    await this.writeAll({ providers });
+    return providers[name];
+  }
+
+  async deleteProvider(name) {
+    const providers = (await this.read())?.providers ?? {};
+    if (!providers[name]) return false;
+    const next = { ...providers };
+    delete next[name];
+    await this.writeAll({ providers: next });
+    return true;
   }
 }

@@ -558,18 +558,18 @@ test('composeClip blanks {{digest}} when the preset digest toggle is off or inva
   }
 });
 
-test('clipDigest carries the preset toggle and raw preset instruction (global fallback lives in background)', () => {
+test('clipDigest carries the preset toggle, raw preset instruction and provider pick (#78)', () => {
   const digestPresets = [
-    { ...presets[0], digest: { enabled: true, instruction: '预设指令' } },
+    { ...presets[0], digest: { enabled: true, instruction: '预设指令', provider: 'ds' } },
     { ...presets[1], digest: { enabled: true, instruction: '' } },
   ];
   let state = initPopupPresets({ presets: digestPresets, defaultPresetId: 'p1' }, tab, now);
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令' });
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'ds' });
   state = selectPreset(state, 'p2');
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '' }, '空串原样透传（= 用全局），弹窗不读全局设置');
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '', digestProvider: '' }, '空串原样透传（= 用全局/默认），弹窗不读全局设置');
 
   const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
-  assert.deepEqual(clipDigest(plain), { digestEnabled: false, digestInstruction: '' }, '预设未开开关');
+  assert.deepEqual(clipDigest(plain), { digestEnabled: false, digestInstruction: '', digestProvider: '' }, '预设未开开关');
 });
 
 test('clipFilename sanitizes filesystem-unsafe characters and falls back to clip', () => {

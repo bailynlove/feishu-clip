@@ -97,6 +97,10 @@ test('preset editor has an AI digest switch, initially off, with a hidden instru
   assert.ok(classAttr('f-digest-instruction-row').includes('hidden'), '预设级指令框初始隐藏');
   assert.ok(html.includes('id="f-digest-instruction"'), '应有预设级摘要指令输入框');
   assert.ok(html.includes('留空使用全局摘要指令'), '应写明留空 = 用全局指令');
+  // provider 选用（#78）：与指令框同排初始隐藏，选项由 options.js 按 bridge 列表动态填充
+  assert.ok(classAttr('f-digest-provider-row').includes('hidden'), 'provider 选用行初始隐藏');
+  assert.ok(html.includes('id="f-digest-provider"'), '应有 provider 下拉');
+  assert.ok(classAttr('f-digest-provider-hint').includes('hidden'), '降级提示初始隐藏（读到列表后不显示）');
 });
 
 // ——— 设置页分区折叠（#76）：第 2/3 区用 details 包裹可折叠，默认展开（open），
@@ -113,4 +117,13 @@ test('sections 2 (AI 摘要) and 3 (预设管理) are collapsible details, defau
 test('sections 1 (配对) and 4 (开发者模式) stay plain, no collapse wrapper', () => {
   assert.match(html, /<section class="ps-card">\s*<h2>1\. 配对本地 Bridge<\/h2>/, '配对区标题不被 details 包裹');
   assert.match(html, /<section class="ps-card">\s*<h2>4\. 开发者模式<\/h2>/, '开发者模式区标题不被 details 包裹');
+});
+
+// AI provider 预设管理（#77）：AI 摘要区从单表单升级为 tabs + 名称/删除的提供者管理骨架；
+// 原有字段 id 全部保留（options.js 复用），全局摘要指令不动
+test('AI 摘要 section has provider tabs, name field, delete button; config fields unchanged', () => {
+  for (const id of ['ai-provider-tabs', 'ai-name', 'ai-delete', 'ai-api-type', 'ai-base-url', 'ai-model', 'ai-api-key', 'ai-save', 'ai-test', 'ai-instruction', 'ai-headers', 'ai-max-output-tokens']) {
+    assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
+  }
+  assert.match(html, /<div class="ps-tabs" id="ai-provider-tabs"><\/div>/, 'provider tabs 容器初始为空（由 options.js 渲染）');
 });

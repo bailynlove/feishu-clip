@@ -172,7 +172,7 @@ test('resolveDigest：缺字段/非法值一律归一为 null', () => {
     undefined,
   ]) {
     if (preset?.digest?.enabled === true) {
-      assert.deepEqual(resolveDigest(preset), { enabled: true, instruction: '' }, '多余字段不携带');
+      assert.deepEqual(resolveDigest(preset), { enabled: true, instruction: '', provider: '' }, '多余字段不携带');
     } else {
       assert.equal(resolveDigest(preset), null, JSON.stringify(preset));
     }
@@ -180,9 +180,17 @@ test('resolveDigest：缺字段/非法值一律归一为 null', () => {
 });
 
 test('resolveDigest：enabled:true 透传 instruction；非字符串 instruction 归一为空串（= 用全局）', () => {
-  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: '只保留结论' } }), { enabled: true, instruction: '只保留结论' });
-  assert.deepEqual(resolveDigest({ digest: { enabled: true } }), { enabled: true, instruction: '' });
-  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: 42 } }), { enabled: true, instruction: '' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: '只保留结论' } }), { enabled: true, instruction: '只保留结论', provider: '' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true } }), { enabled: true, instruction: '', provider: '' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: 42 } }), { enabled: true, instruction: '', provider: '' });
+});
+
+// provider（#78）：预设选用的 AI provider 名；空串 = 默认 provider。缺省/非字符串归一为空串
+test('resolveDigest：provider 字段透传与归一', () => {
+  assert.equal(resolveDigest({ digest: { enabled: true, instruction: '', provider: 'ds' } }).provider, 'ds');
+  assert.equal(resolveDigest({ digest: { enabled: true, instruction: '', provider: ' xx ' } }).provider, 'xx', '去空白');
+  assert.equal(resolveDigest({ digest: { enabled: true, instruction: '', provider: 42 } }).provider, '', '非字符串归一为空串');
+  assert.equal(resolveDigest({ digest: { enabled: true, instruction: '' } }).provider, '', '缺省 = 默认 provider');
 });
 
 test('resolveDigestInstruction：预设级 > 全局 > 内置默认；空串/非字符串视为未设置', () => {

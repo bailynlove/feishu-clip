@@ -294,8 +294,9 @@ export function aiMaxOutputTokensFromText(text) {
 
 // 表单草稿 → 保存/测试请求体：baseUrl 留空用类型默认值；apiKey 留空不放进 body
 // （bridge 语义：省略/空串 = 保留已存 key）；apiType 非法值归一为 responses。
-// 高级设置两项留空同样不进 body（bridge 回落已存/内置默认）；格式非法抛错由调用方展示
-export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText } = {}) {
+// 高级设置两项留空同样不进 body（bridge 回落已存/内置默认）；格式非法抛错由调用方展示。
+// name/renameFrom（#77 多 provider）：name 为保存目标名；改名时 renameFrom 带原名
+export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText, name, renameFrom } = {}) {
   const type = AI_DEFAULT_BASE_URLS[apiType] ? apiType : 'responses';
   const payload = {
     apiType: type,
@@ -308,7 +309,34 @@ export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, 
   if (Object.keys(headers).length) payload.headers = headers;
   const maxOutputTokens = aiMaxOutputTokensFromText(maxOutputTokensText);
   if (maxOutputTokens !== undefined) payload.maxOutputTokens = maxOutputTokens;
+  const providerName = String(name ?? '').trim();
+  if (providerName) payload.name = providerName;
+  if (renameFrom) payload.renameFrom = String(renameFrom).trim();
   return payload;
+}
+
+// ——— provider 列表（#77）：bridge GET /v1/ai/providers 的 sanitized 数组（无 key 本身） ———
+
+// 默认 provider 名（与 bridge DEFAULT_PROVIDER_NAME 契约一致；两个运行时无法共享模块，各自定义）
+export const DEFAULT_AI_PROVIDER_NAME = '默认';
+
+export function aiProviderByName(providers, name) {
+  return (providers ?? []).find((provider) => provider.name === name) ?? null;
+}
+
+// 选中名解析：当前选中有效原样保留；失效（被删/首载）回落「默认」，再回落第一个；
+// 空列表 → null（设置页据此进入新建草稿态）
+export function resolveAiProviderSelection(providers, selected) {
+  if (aiProviderByName(providers, selected)) return selected;
+  return aiProviderByName(providers, DEFAULT_AI_PROVIDER_NAME)?.name ?? providers?.[0]?.name ?? null;
+}
+
+// 预设表单的 provider 下拉选项（#78）：首项固定「默认」（value '' = 跟随默认 provider）；
+// 名为「默认」的 provider 已含于首项语义，不重复列；bridge 列表拿不到时仅首项（降级）
+export function aiDigestProviderOptions(providers) {
+  const named = (providers ?? []).filter((provider) => provider.name !== DEFAULT_AI_PROVIDER_NAME)
+    .map((provider) => ({ value: provider.name, label: provider.name }));
+  return [{ value: '', label: DEFAULT_AI_PROVIDER_NAME }, ...named];
 }
 
 // 测试连接失败的中文文案：已知机器码用固定文案，未知错误透传 bridge 返回的 message

@@ -8,8 +8,8 @@ import {
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
-  AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiHeadersToText, aiTestResultView,
-  COLLAPSIBLE_SECTIONS, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, setSectionCollapsed,
+  AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
+  COLLAPSIBLE_SECTIONS, DEFAULT_AI_PROVIDER_NAME, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, resolveAiProviderSelection, setSectionCollapsed,
 } from './options-state.js';
 import { createDriveFolder, resolveDigest, resolveImageMode, resolvePdfDrive, DEFAULT_DIGEST_INSTRUCTION } from './presets.js';
 
@@ -255,12 +255,15 @@ function syncEditor() {
   $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
   if (!pdfEnabled) closeDrivePicker();
   // AI 摘要（#75）：读取时迁移——缺字段/非法 digest 一律显示为关；开启时才显示预设级指令框
+  // 与 provider 选用行（#78；选项随 bridge 列表重建，悬空引用补「已删除」幽灵项）
   const digest = resolveDigest(preset);
   const digestEnabled = digest?.enabled === true;
   $('#f-digest').classList.toggle('on', digestEnabled);
   $('#f-digest').setAttribute('aria-pressed', String(digestEnabled));
   $('#f-digest-instruction-row').classList.toggle('hidden', !digestEnabled);
+  $('#f-digest-provider-row').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-instruction').value = digest?.instruction ?? '';
+  renderDigestProviderOptions();
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
   for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
@@ -456,20 +459,49 @@ $('#f-pdf-drive').addEventListener('click', () => {
   syncEditor();
 });
 
-// AI 摘要预设开关（#75）：开启写 { enabled:true, instruction:'' }（空串 = 用全局指令），
+// AI 摘要预设开关（#75）：开启写 { enabled:true, instruction:'', provider 保留 }（空串 = 用全局指令），
 // 关闭归一为 null；预设级指令留空即用全局，均随预设整体经 SAVE_PRESETS 写回
 $('#f-digest').addEventListener('click', () => {
-  const enabled = !(resolveDigest(editingPreset())?.enabled === true);
+  const current = resolveDigest(editingPreset());
+  const enabled = !(current?.enabled === true);
   applyMutation(updatePreset(state, editingId, {
-    digest: enabled ? { enabled: true, instruction: resolveDigest(editingPreset())?.instruction ?? '' } : null,
+    digest: enabled ? { enabled: true, instruction: current?.instruction ?? '', provider: current?.provider ?? '' } : null,
   }));
   syncEditor();
 });
 $('#f-digest-instruction').addEventListener('input', () => {
   applyMutation(updatePreset(state, editingId, {
-    digest: { enabled: true, instruction: $('#f-digest-instruction').value },
+    digest: { enabled: true, instruction: $('#f-digest-instruction').value, provider: resolveDigest(editingPreset())?.provider ?? '' },
   }), { quiet: true });
 });
+
+// provider 选用（#78）：下拉值即 provider 名（'' = 默认 provider），随预设整体写回
+$('#f-digest-provider').addEventListener('change', () => {
+  applyMutation(updatePreset(state, editingId, {
+    digest: { enabled: true, instruction: resolveDigest(editingPreset())?.instruction ?? '', provider: $('#f-digest-provider').value },
+  }), { quiet: true });
+});
+
+// provider 下拉选项重建（bridge 列表变化后调用）：保留当前选中；预设引用了已删除的
+// provider 时补一个「（已删除）」幽灵项，避免选择被静默改写
+function renderDigestProviderOptions() {
+  const select = $('#f-digest-provider');
+  const current = resolveDigest(editingPreset())?.provider ?? '';
+  const options = aiDigestProviderOptions(aiProviders);
+  if (current && !options.some((option) => option.value === current)) {
+    options.push({ value: current, label: `${current}（已删除）` });
+  }
+  select.replaceChildren();
+  for (const option of options) {
+    const node = document.createElement('option');
+    node.value = option.value;
+    node.textContent = option.label;
+    select.append(node);
+  }
+  select.value = current;
+  // bridge 列表拿不到时下拉只剩「默认」一项，给出降级提示而非静默只剩一个选项
+  $('#f-digest-provider-hint').classList.toggle('hidden', aiProvidersReady);
+}
 
 // 变量快捷插入：在光标处插入 {{xxx}}，并沿用字段自身的保存路径
 for (const row of document.querySelectorAll('.ps-vars')) {
@@ -541,13 +573,22 @@ async function initBridge() {
   }
 }
 
-// ——— AI 摘要（#75）：AI API 配置存 bridge 的 ai.json（key 不落 chrome.storage），
-// 读取/保存/测试都经 background 代理端点；全局摘要指令是单键配置，直写 chrome.storage.local
+// ——— AI provider 预设（#77）：多套命名配置存 bridge 的 ai.json（key 不落 chrome.storage），
+// 列表/保存/删除/测试都经 background 代理端点；全局摘要指令是单键配置，直写 chrome.storage.local
 // （与 developerMode 同一先例）。本段只做 DOM 接线，归约逻辑在 options-state.js ———
-let aiHasKey = false; // 已保存配置里是否有 key（bridge 不回传 key 本身，只回 hasKey）
+let aiProviders = []; // bridge 列表（sanitized，只回 hasKey 不回 key）
+let aiSelected = null; // 当前编辑的 provider 名；null = 新建草稿态（尚未保存）
+let aiProvidersReady = false; // 是否成功读到 bridge 列表；false 时预设下拉降级并显示提示（#78）
+
+function showAiResult(view) {
+  const node = $('#ai-result');
+  node.textContent = view.text;
+  node.className = `ps-note ${NOTICE_TONES[view.tone] ?? 'info'}`;
+}
 
 function aiFormDraft() {
   return {
+    name: $('#ai-name').value,
     apiType: $('#ai-api-type').value,
     baseUrl: $('#ai-base-url').value,
     model: $('#ai-model').value,
@@ -557,19 +598,83 @@ function aiFormDraft() {
   };
 }
 
-function showAiResult(view) {
-  const node = $('#ai-result');
-  node.textContent = view.text;
-  node.className = `ps-note ${NOTICE_TONES[view.tone] ?? 'info'}`;
-}
-
 // Base URL 占位符跟随所选 API 类型的默认值（用户已填内容不动）
 function syncAiBaseUrlPlaceholder() {
   $('#ai-base-url').placeholder = aiDefaultBaseUrl($('#ai-api-type').value);
 }
 
 function syncAiKeyPlaceholder() {
-  $('#ai-api-key').placeholder = aiHasKey ? '已保存，留空则保持不变' : '';
+  const hasKey = aiSelected ? aiProviderByName(aiProviders, aiSelected)?.hasKey === true : false;
+  $('#ai-api-key').placeholder = hasKey ? '已保存，留空则保持不变' : '';
+}
+
+// tabs 沿用预设管理的 ps-tab 模式；「默认」带 badge 且不可删改名的约束在 bridge 端强制
+function renderAiTabs() {
+  const bar = $('#ai-provider-tabs');
+  bar.replaceChildren();
+  for (const provider of aiProviders) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = `ps-tab${provider.name === aiSelected ? ' on' : ''}`;
+    const name = document.createElement('span');
+    name.className = 'ps-tab-name';
+    name.textContent = provider.name;
+    tab.append(name);
+    if (provider.name === DEFAULT_AI_PROVIDER_NAME) {
+      const badge = document.createElement('span');
+      badge.className = 'ps-tab-badge';
+      badge.textContent = DEFAULT_AI_PROVIDER_NAME;
+      tab.append(badge);
+    }
+    tab.addEventListener('click', () => {
+      if (provider.name !== aiSelected) {
+        aiSelected = provider.name;
+        renderAiTabs();
+        fillAiForm();
+      }
+    });
+    bar.append(tab);
+  }
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = `ps-tab ps-tab-add${aiSelected === null ? ' on' : ''}`;
+  add.textContent = '＋ 新建';
+  add.addEventListener('click', () => {
+    if (aiSelected !== null) {
+      aiSelected = null;
+      renderAiTabs();
+      fillAiForm();
+    }
+  });
+  bar.append(add);
+}
+
+// 表单回填：新建草稿态清空、名称可编辑；已有 provider 回填各字段，「默认」名称锁定
+function fillAiForm() {
+  const provider = aiSelected ? aiProviderByName(aiProviders, aiSelected) : null;
+  $('#ai-name').value = provider?.name ?? '';
+  $('#ai-name').disabled = provider?.name === DEFAULT_AI_PROVIDER_NAME;
+  $('#ai-api-type').value = provider?.apiType ?? 'responses';
+  $('#ai-base-url').value = provider?.baseUrl ?? '';
+  $('#ai-model').value = provider?.model ?? '';
+  $('#ai-api-key').value = '';
+  $('#ai-headers').value = aiHeadersToText(provider?.headers);
+  $('#ai-max-output-tokens').value = provider?.maxOutputTokens ? String(provider.maxOutputTokens) : '';
+  $('#ai-delete').classList.toggle('hidden', !provider || provider.name === DEFAULT_AI_PROVIDER_NAME);
+  syncAiBaseUrlPlaceholder();
+  syncAiKeyPlaceholder();
+}
+
+// 拉取列表并解析选中名（被删/首载回落「默认」；空列表 → 新建草稿态）。
+// 列表变化同步刷新预设表单的 provider 下拉（#78）
+async function reloadAiProviders(selectName = aiSelected) {
+  const { providers } = await message({ type: 'LIST_AI_PROVIDERS' });
+  aiProviders = providers ?? [];
+  aiProvidersReady = true;
+  aiSelected = resolveAiProviderSelection(aiProviders, selectName);
+  renderAiTabs();
+  fillAiForm();
+  syncEditor();
 }
 
 async function initAiSection(aiDigestInstruction) {
@@ -581,26 +686,17 @@ async function initAiSection(aiDigestInstruction) {
     typeSelect.append(node);
   }
   syncAiBaseUrlPlaceholder();
-  syncAiKeyPlaceholder();
   // 全局指令：placeholder 即内置默认指令（留空 = 用默认），已存值原样回填
   $('#ai-instruction').placeholder = DEFAULT_DIGEST_INSTRUCTION;
   $('#ai-instruction').value = typeof aiDigestInstruction === 'string' ? aiDigestInstruction : '';
-  // 读取已保存配置回填表单；bridge 离线/老版本无此端点时保持空表单并提示
+  // 读取 provider 列表回填；bridge 离线/老版本无端点时保持空表单并提示
   try {
-    const { config } = await message({ type: 'GET_AI_CONFIG' });
-    if (config) {
-      typeSelect.value = config.apiType;
-      $('#ai-base-url').value = config.baseUrl ?? '';
-      $('#ai-model').value = config.model ?? '';
-      // 高级设置回填（headers 对象 → 逐行文本；maxOutputTokens 未配置留空）
-      $('#ai-headers').value = aiHeadersToText(config.headers);
-      $('#ai-max-output-tokens').value = config.maxOutputTokens ? String(config.maxOutputTokens) : '';
-      aiHasKey = config.hasKey === true;
-      syncAiBaseUrlPlaceholder();
-      syncAiKeyPlaceholder();
-    }
+    await reloadAiProviders(null);
   } catch {
-    showAiResult({ tone: 'info', text: '未读取到已保存的 AI 配置（Bridge 未连接或版本过旧）。' });
+    renderAiTabs();
+    fillAiForm();
+    syncEditor(); // 列表读取失败：预设下拉降级为仅「默认」，渲染出降级提示
+    showAiResult({ tone: 'info', text: '未读取到 AI provider 列表（Bridge 未连接或版本过旧）。' });
   }
 }
 
@@ -608,11 +704,13 @@ $('#ai-api-type').addEventListener('change', syncAiBaseUrlPlaceholder);
 
 $('#ai-save').addEventListener('click', async () => {
   try {
-    const { config } = await message({ type: 'SAVE_AI_CONFIG', config: aiConfigPayload(aiFormDraft()) });
-    aiHasKey = config?.hasKey === true;
-    $('#ai-api-key').value = '';
-    syncAiKeyPlaceholder();
-    showAiResult({ tone: 'success', text: 'AI 配置已保存 ✓' });
+    const draft = aiFormDraft();
+    if (!draft.name.trim()) throw new Error('请填写 provider 名称');
+    // 改名：已有非「默认」provider 的名称被改动 → renameFrom 带原名（bridge 搬 key 删旧名）
+    const renameFrom = aiSelected && aiSelected !== DEFAULT_AI_PROVIDER_NAME && draft.name.trim() !== aiSelected ? aiSelected : undefined;
+    const { provider } = await message({ type: 'SAVE_AI_PROVIDER', provider: aiConfigPayload({ ...draft, renameFrom }) });
+    await reloadAiProviders(provider?.name ?? draft.name.trim());
+    showAiResult({ tone: 'success', text: 'AI provider 已保存 ✓' });
   } catch (error) {
     showAiResult({ tone: 'error', text: `保存失败：${error.message}` });
   }
@@ -621,9 +719,26 @@ $('#ai-save').addEventListener('click', async () => {
 $('#ai-test').addEventListener('click', async () => {
   showAiResult({ tone: 'info', text: '正在测试连接…' });
   try {
-    showAiResult(aiTestResultView(await message({ type: 'TEST_AI', overrides: aiConfigPayload(aiFormDraft()) })));
+    const overrides = aiConfigPayload({ ...aiFormDraft(), name: undefined });
+    // 新建草稿没有已存配置可回落，apiKey 必须现填；已有 provider 走 name + 覆盖合并
+    const request = aiSelected ? { name: aiSelected, overrides } : { overrides };
+    if (!aiSelected && !overrides.apiKey) throw new Error('新 provider 请先填写 API key 再测试');
+    showAiResult(aiTestResultView(await message({ type: 'TEST_AI', ...request })));
   } catch (error) {
     showAiResult({ tone: 'error', text: `连接失败：${error.message}` });
+  }
+});
+
+$('#ai-delete').addEventListener('click', async () => {
+  if (!aiSelected || aiSelected === DEFAULT_AI_PROVIDER_NAME) return;
+  const name = aiSelected;
+  if (!window.confirm(`删除 provider「${name}」？引用它的预设剪藏时将不再生成摘要（任务会带警告）。`)) return;
+  try {
+    await message({ type: 'DELETE_AI_PROVIDER', name });
+    await reloadAiProviders(null);
+    showAiResult({ tone: 'success', text: `provider「${name}」已删除` });
+  } catch (error) {
+    showAiResult({ tone: 'error', text: `删除失败：${error.message}` });
   }
 });
 

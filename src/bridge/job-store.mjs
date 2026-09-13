@@ -275,7 +275,7 @@ export class PersistentJobStore {
         includeImages,
         // 图片写入模式（#53）：preview/download/off；缺省由 includeImages 布尔推导
         imageMode: imageMode ?? (includeImages === false ? 'off' : 'preview'),
-        // AI 摘要（#75）：digest 是提交时的请求 { enabled, instruction }；digestText 是生成
+        // AI 摘要（#75）：digest 是提交时的请求 { enabled, instruction, provider? }（provider #78）；digestText 是生成
         // 结果缓存——落库后重跑（reconcile 重排/任何原因重入 #execute）都不再调 AI
         digest: digest ? structuredClone(digest) : null,
         digestText: null,

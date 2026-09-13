@@ -1167,3 +1167,41 @@ test('AI 摘要：开关关时行为与现状一致——不调 AI、不动正�
   assert.deepEqual(store.completed.warnings, []);
   assert.ok(!store.completed.timeline.some((entry) => entry.name === 'digest'), '开关关没有 digest 阶段');
 });
+
+// ——— provider 按名解析（#78）：digest.provider 交给 getAiConfig；悬空引用降级不调 AI ———
+
+test('AI 摘要（#78）：预设指定 provider 时按名取配置；未指定传 null（默认语义）', async () => {
+  const asked = [];
+  const getAiConfig = async (name) => { asked.push(name); return AI_CONFIG; };
+  const generateDigest = async () => '要点';
+
+  const named = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction: '总结', provider: 'ds' } });
+  new ClipExecutor({ store: named.store, lark: named.lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig }).kick();
+  await named.store.settled;
+  assert.deepEqual(asked, ['ds'], '按 digest.provider 名取配置');
+  assert.match(named.contents[0], /# Digest\n\n要点/, '摘要照常生成');
+
+  const plain = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction: '总结' } });
+  new ClipExecutor({ store: plain.store, lark: plain.lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig }).kick();
+  await plain.store.settled;
+  assert.deepEqual(asked, ['ds', null], '未指定 provider 传 null（= 默认 provider）');
+});
+
+test('AI 摘要（#78）：provider 不存在 → 剪藏成功、占位符置空、warning 指明 provider 名，不调 AI', async () => {
+  const { store, lark, contents } = digestSetup({
+    markdown: '# T\n\n前文 {{digest}} 后文',
+    digest: { enabled: true, instruction: '总结', provider: 'ghost' },
+  });
+  let calls = 0;
+  const generateDigest = async () => { calls += 1; return 'x'; };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async (name) => (name === 'ghost' ? null : AI_CONFIG) }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, '悬空 provider 不 fail job');
+  assert.equal(calls, 0, 'provider 缺失不调 AI');
+  assert.equal(store.digestRecorded, null, '不写缓存');
+  assert.deepEqual(store.completed.warnings, ['AI provider「ghost」不存在（可能已被删除），本次未生成摘要']);
+  assert.doesNotMatch(contents[0], /\{\{\s*digest\s*\}\}/, '占位符置空');
+  const entry = store.completed.timeline.find((item) => item.kind === 'stage' && item.name === 'digest');
+  assert.ok(entry?.detail?.includes('ghost'), 'timeline 留 detail');
+});

@@ -29,8 +29,9 @@ let tabUrl = PAGE; // 当前标签页 URL 桩（#67 探测用例会换 URL）
 let pdfTabProbeResult = null; // DETECT_PDF_TAB 探针（func 注入）返回值
 let pdfTabProbeError = null; // 非 null 时探针注入失败（走 URL 后缀兜底）
 let pdfHeadStub = 'application/pdf'; // 兜底 HEAD 的 content-type；null = HEAD 网络失败
-// ——— AI 摘要（#75）：GET/SAVE/TEST_AI 代理端点的桩状态 ———
-let lastAiConfigBody = null; // SAVE_AI_CONFIG 转发给 bridge 的 POST /v1/ai/config 请求体
+// ——— AI 摘要（#75）/ provider 预设（#77）：LIST/SAVE/DELETE/TEST 代理端点的桩状态 ———
+let lastAiProviderBody = null; // SAVE_AI_PROVIDER 转发给 bridge 的 POST /v1/ai/providers 请求体
+let lastAiDeleteBody = null; // DELETE_AI_PROVIDER 转发给 bridge 的 POST /v1/ai/providers/delete 请求体
 let lastAiTestBody = null; // TEST_AI 转发给 bridge 的 POST /v1/ai/test 请求体
 // ——— 凭据回传（#68）FEED_PDF_BYTES 用例的桩状态 ———
 const PDF_SOURCE_URL = 'https://pub.example.com/paywalled.pdf';
@@ -94,8 +95,9 @@ globalThis.fetch = async (url, options) => {
   if (url.endsWith('/v1/jobs') && options?.method === 'POST') lastJobsBody = JSON.parse(options.body);
   if (url.endsWith('/v1/drive/folders/validate')) lastDriveValidateBody = JSON.parse(options.body);
   else if (url.includes('/v1/drive/folders')) lastDriveListUrl = url;
-  // AI 摘要（#75）代理端点
-  if (url.endsWith('/v1/ai/config') && options?.method === 'POST') lastAiConfigBody = JSON.parse(options.body);
+  // AI provider（#77）代理端点
+  if (url.endsWith('/v1/ai/providers') && options?.method === 'POST') lastAiProviderBody = JSON.parse(options.body);
+  if (url.endsWith('/v1/ai/providers/delete') && options?.method === 'POST') lastAiDeleteBody = JSON.parse(options.body);
   if (url.endsWith('/v1/ai/test') && options?.method === 'POST') lastAiTestBody = JSON.parse(options.body);
   return {
     ok: true,
@@ -104,9 +106,10 @@ globalThis.fetch = async (url, options) => {
       if (url.includes(`/v1/jobs/${ATTEMPT}`)) return { ok: true, job: terminalJob };
       if (url.endsWith('/v1/drive/folders/validate')) return { ok: true, folder: { folderToken: lastDriveValidateBody.folderToken ?? null, name: '论文' } };
       if (url.includes('/v1/drive/folders')) return { ok: true, items: [{ folderToken: 'fld-a', name: '论文', type: 'folder' }], hasMore: false, nextPageToken: null };
-      if (url.endsWith('/v1/ai/config')) {
-        if (options?.method === 'POST') return { ok: true, config: { apiType: lastAiConfigBody.apiType, baseUrl: lastAiConfigBody.baseUrl, model: lastAiConfigBody.model, hasKey: Boolean(lastAiConfigBody.apiKey) } };
-        return { ok: true, config: { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5-mini', hasKey: true } };
+      if (url.endsWith('/v1/ai/providers/delete')) return { ok: true };
+      if (url.endsWith('/v1/ai/providers')) {
+        if (options?.method === 'POST') return { ok: true, provider: { name: lastAiProviderBody.name, apiType: lastAiProviderBody.apiType, baseUrl: lastAiProviderBody.baseUrl, model: lastAiProviderBody.model, hasKey: Boolean(lastAiProviderBody.apiKey) } };
+        return { ok: true, providers: [{ name: '默认', apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5-mini', hasKey: true }] };
       }
       if (url.endsWith('/v1/ai/test')) return { ok: true, latencyMs: 320, reply: 'ok' };
       return { ok: true, job: { attemptId: 'new-attempt' } };
@@ -475,6 +478,14 @@ test('CLIP digestEnabled 指令回落顺序：预设级 > 全局 > 内置默认�
     // 超长截断到 bridge 校验上限 4000
     await send({ type: 'CLIP', destination, digestEnabled: true, digestInstruction: '长'.repeat(5000) });
     assert.equal(lastJobsBody.digest.instruction.length, 4000);
+
+    // provider（#78）：digestProvider 非空随 digest 落 body；空串/缺省不带该键（= 默认 provider）
+    await send({ type: 'CLIP', destination, digestEnabled: true, digestProvider: 'ds' });
+    assert.equal(lastJobsBody.digest.provider, 'ds');
+    await send({ type: 'CLIP', destination, digestEnabled: true, digestProvider: '  ' });
+    assert.ok(!('provider' in lastJobsBody.digest), '空白 provider 不带键');
+    await send({ type: 'CLIP', destination, digestEnabled: true, digestProvider: 'x'.repeat(65) });
+    assert.equal(lastJobsBody.digest.provider.length, 64, 'provider 名截断到 64（bridge 上限）');
   } finally {
     delete storage.aiDigestInstruction;
   }
@@ -489,21 +500,25 @@ test('CLIP 未开 digestEnabled：不上报 digest，{{digest}} 按未知变量�
   assert.equal(lastJobsBody.digest, null);
 });
 
-test('GET_AI_CONFIG / SAVE_AI_CONFIG / TEST_AI 代理到 bridge 的 ai 端点族', async () => {
-  const loaded = await send({ type: 'GET_AI_CONFIG' });
-  assert.equal(loaded.config.apiType, 'responses');
-  assert.equal(loaded.config.hasKey, true);
-  assert.equal('apiKey' in loaded.config, false, '配置不回传 key');
+test('LIST_AI_PROVIDERS / SAVE_AI_PROVIDER / DELETE_AI_PROVIDER / TEST_AI 代理到 bridge 的 provider 端点族（#77）', async () => {
+  const loaded = await send({ type: 'LIST_AI_PROVIDERS' });
+  assert.deepEqual(loaded.providers.map((p) => p.name), ['默认']);
+  assert.equal(loaded.providers[0].hasKey, true);
+  assert.equal('apiKey' in loaded.providers[0], false, '列表不回传 key');
 
-  const saved = await send({ type: 'SAVE_AI_CONFIG', config: { apiType: 'messages', baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', apiKey: 'sk-ant' } });
-  assert.deepEqual(lastAiConfigBody, { apiType: 'messages', baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', apiKey: 'sk-ant' });
-  assert.equal(saved.config.hasKey, true);
+  const saved = await send({ type: 'SAVE_AI_PROVIDER', provider: { name: 'ds', apiType: 'messages', baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', apiKey: 'sk-ant' } });
+  assert.deepEqual(lastAiProviderBody, { name: 'ds', apiType: 'messages', baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', apiKey: 'sk-ant' });
+  assert.equal(saved.provider.hasKey, true);
 
-  const tested = await send({ type: 'TEST_AI', overrides: { apiType: 'responses', model: 'gpt-5-mini' } });
-  assert.deepEqual(lastAiTestBody, { apiType: 'responses', model: 'gpt-5-mini' }, '可选覆盖原样转发');
+  const deleted = await send({ type: 'DELETE_AI_PROVIDER', name: 'ds' });
+  assert.deepEqual(lastAiDeleteBody, { name: 'ds' });
+  assert.equal(deleted.ok, true);
+
+  const tested = await send({ type: 'TEST_AI', name: 'ds', overrides: { apiType: 'responses', model: 'gpt-5-mini' } });
+  assert.deepEqual(lastAiTestBody, { name: 'ds', apiType: 'responses', model: 'gpt-5-mini' }, 'name 与可选覆盖原样转发');
   assert.equal(tested.ok, true);
   assert.equal(tested.reply, 'ok');
 
   await send({ type: 'TEST_AI' });
-  assert.deepEqual(lastAiTestBody, {}, '省略覆盖发空对象（bridge 逐项回落已存配置）');
+  assert.deepEqual(lastAiTestBody, {}, '省略 name/覆盖发空对象（bridge 用默认 provider 逐项回落）');
 });
