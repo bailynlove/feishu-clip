@@ -133,6 +133,73 @@ test('GET /v1/jobs lists recent jobs with timing fields and without snapshots; c
   }
 });
 
+// 摘要进度（#86）：executor 内存表合入 GET job 视图——仅 clip job 带 digestProgress，
+// 同 attempt 的 pdf job 与非 digest job 不带；条目清理（终态）后字段消失。
+// 这里直接种内存条目单测合并点；条目的真实生命周期（建立/逐 delta 更新/终态清理）见 executor 测试
+test('GET job views merge digestProgress for the clip job only; field disappears after cleanup', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-progress-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const code = 'progress-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const fakeLark = {
+    authStatus: async () => ({ ready: true, identity: 'tester' }),
+    validateDestination: async ({ nodeToken }) => ({ nodeToken, spaceId: 'space-1', title: '验收目录', objType: 'docx' }),
+    run: async () => ({ ok: true, data: { document: { document_id: 'docx-1', url: 'https://example.feishu.cn/wiki/docx-1' } } }),
+    uploadDriveFile: async () => ({ fileToken: 'ft-1', url: 'https://example.feishu.cn/file/ft-1' }),
+    insertDocFileReference: async () => ({}),
+  };
+  const { server, executor } = await createBridge({
+    config: { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, jobFile: path.join(directory, 'jobs.json') },
+    lark: fakeLark,
+    logger: { error() {}, log() {}, warn() {} },
+    downloadPdf: async () => ({ buffer: Buffer.from('%PDF-1.7'), source: 'https://example.com/paper.pdf', sizeBytes: 8 }),
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
+  try {
+    const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+    const auth = { Authorization: `Bearer ${paired.credential}` };
+    const attemptId = 'eeeeeeee-1111-4111-8111-111111111111';
+    // clip job 无 digest（回归：非 digest job 无此字段）+ 同 attempt 的 pdf job（共享 attemptId 的回归面）
+    const submitted = await call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        attemptId, destination: { nodeToken: 'wikcn-parent' }, includeImages: false,
+        snapshot: { title: '进度网页', sourceUrl: 'https://example.com/article', capturedAt: new Date().toISOString(), markdown: '# 正文' },
+        pdfSource: { type: 'url', url: 'https://example.com/paper.pdf' },
+      }),
+    });
+    assert.equal(submitted.status, 202);
+    const clipOf = (body) => body.jobs.find((j) => (j.kind ?? 'clip') === 'clip');
+    const pdfOf = (body) => body.jobs.find((j) => j.kind === 'pdf');
+    let body;
+    // pdf 引用回填与 clip 建档的竞态会产生 succeeded_with_warnings（引用警告），两种都算成功终态
+    const done = (job) => job?.status === 'succeeded' || job?.status === 'succeeded_with_warnings';
+    for (let count = 0; count < 100; count += 1) {
+      body = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+      if (done(clipOf(body)) && done(pdfOf(body))) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(done(clipOf(body)), `clip 应成功，实际 ${clipOf(body)?.status}`);
+    assert.ok(done(pdfOf(body)), `pdf 应成功，实际 ${pdfOf(body)?.status}`);
+    assert.ok(!('digestProgress' in clipOf(body)), '非 digest job 无 digestProgress 字段');
+    executor.digestProgress.set(attemptId, { phase: 'writing', tokens: 40 });
+    body = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+    assert.deepEqual(clipOf(body).digestProgress, { phase: 'writing', tokens: 40 }, 'clip job 视图带相位 + 计数');
+    assert.ok(!('digestProgress' in pdfOf(body)), '同 attempt 的 pdf job 不带（内存表按 attemptId  keyed，kind 过滤防串）');
+    const listed = await (await call('/v1/jobs', { headers: auth })).json();
+    assert.deepEqual(listed.jobs.find((j) => j.attemptId === attemptId && (j.kind ?? 'clip') === 'clip').digestProgress, { phase: 'writing', tokens: 40 }, '列表视图同样合并');
+    assert.ok(!('digestProgress' in listed.jobs.find((j) => j.attemptId === attemptId && j.kind === 'pdf')), '列表里 pdf job 同样不带');
+    executor.digestProgress.delete(attemptId);
+    body = await (await call(`/v1/jobs/${attemptId}`, { headers: auth })).json();
+    assert.ok(!('digestProgress' in clipOf(body)), '条目清理后字段消失');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 // 图片写入模式（#53）：bridge 接受三态 imageMode 落库；非法/缺省回退旧 includeImages 布尔语义
 test('POST /v1/jobs persists imageMode and derives includeImages; invalid values fall back to the legacy boolean', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-mode-'));
@@ -577,7 +644,9 @@ import { createServer as createHttpServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { AiConfigStore } from '../src/bridge/ai-digest.mjs';
 
-// 本地假 AI 服务：chat-completions 契约，按 Bearer key 决定 200/401
+// 本地假 AI 服务：chat-completions 契约，按 Bearer key 决定 200/401。
+// 流式请求（body.stream===true，#86 的 digest 路径）回 SSE delta + [DONE]；
+// 非流式（「测试连接」探针）回整 JSON——同一台假服务同时覆盖两条契约
 async function fakeAiServer(goodKey, reply = 'ok') {
   const aiServer = createHttpServer((request, response) => {
     if (request.headers.authorization !== `Bearer ${goodKey}`) {
@@ -585,8 +654,19 @@ async function fakeAiServer(goodKey, reply = 'ok') {
       response.end(JSON.stringify({ error: { message: 'invalid api key' } }));
       return;
     }
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: reply } }] }));
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      let streamed = false;
+      try { streamed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}').stream === true; } catch { /* 按非流式 */ }
+      if (streamed) {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.end(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: reply } }] })}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: reply } }] }));
+    });
   });
   await new Promise((resolve) => aiServer.listen(0, '127.0.0.1', resolve));
   return { server: aiServer, baseUrl: `http://127.0.0.1:${aiServer.address().port}/v1` };

@@ -65,6 +65,24 @@ test('pdf-tab panel starts hidden with name/size/folder/save slots and the pdf-o
   assert.ok(panel[0].includes('仅上传云盘，不创建剪藏文档'), '面板注明不创建剪藏文档');
 });
 
+// 临时 AI 摘要子卡（#84，变体 B「开关即折叠」）：头部即开关行 + 副标题位；内容区初始
+// 折叠（hidden），provider chips 由 popup.js 按 bridge 列表动态填充，两个提示位初始 hidden
+test('digest fold carries the head switch row and collapsed body slots (#84)', () => {
+  const fold = html.match(/<section id="digest-fold"[\s\S]*?<\/section>/);
+  assert.ok(fold, '本次设置卡内应有 #digest-fold 子卡');
+  assert.ok(fold[0].includes('ai-fold'), '子卡带 ai-fold 虚线边样式类');
+  assert.ok(fold[0].includes('id="digest-on"'), '头部应有开关 checkbox');
+  assert.ok(fold[0].includes('id="digest-sub"'), '头部应有跟随/本次副标题位');
+  assert.ok(!fold[0].includes('chip-temp'), '设计定稿：无「仅本次」徽标');
+  assert.ok(classAttr('digest-body').includes('hidden'), '#digest-body 初始折叠');
+  for (const id of ['digest-seg', 'digest-empty', 'digest-provider-hint', 'digest-instruction']) {
+    assert.ok(fold[0].includes(`id="${id}"`), `内容区应有 #${id}`);
+  }
+  assert.ok(classAttr('digest-empty').includes('hidden'), '#digest-empty 初始 hidden');
+  assert.ok(classAttr('digest-provider-hint').includes('hidden'), '#digest-provider-hint 初始 hidden');
+  assert.ok(fold[0].includes('{{@file}}'), '指令框 placeholder 提示 {{@file}} 可附 PDF');
+});
+
 test('web clip UI is wrapped in #web-panel so pdf-tab mode can hide it wholesale', () => {
   const wrap = html.match(/<div id="web-panel">[\s\S]*?<\/div>\s*<section id="pdf-tab-panel"/);
   assert.ok(wrap, '#web-panel 应包住网页剪藏 UI 并紧邻 #pdf-tab-panel');

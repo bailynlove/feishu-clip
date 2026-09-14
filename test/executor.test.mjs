@@ -1316,6 +1316,73 @@ test('AI 摘要：开关关时行为与现状一致——不调 AI、不动正�
   assert.ok(!store.completed.timeline.some((entry) => entry.name === 'digest'), '开关关没有 digest 阶段');
 });
 
+// ——— 摘要进度内存表（#86）：流式 onProgress 逐次更新 attemptId → { phase, tokens }；
+// 纯内存不落盘，clip 终态后清理 ———
+
+test('AI 摘要进度（#86）：onProgress 更新内存表供 job 视图合并；job 终态后条目清理', async () => {
+  const { store, lark } = digestSetup({
+    markdown: '# T\n\n正文',
+    digest: { enabled: true, instruction: '总结' },
+  });
+  const observed = [];
+  let executor;
+  const generateDigest = async ({ onProgress }) => {
+    assert.equal(typeof onProgress, 'function', 'executor 必须传 onProgress');
+    assert.deepEqual(executor.digestProgressOf('attempt-pipe'), { phase: 'thinking', tokens: 0 }, '调 AI 前已建初始条目（先思考）');
+    onProgress({ phase: 'thinking', tokens: 5 });
+    observed.push(executor.digestProgressOf('attempt-pipe'));
+    onProgress({ phase: 'writing', tokens: 12 });
+    observed.push(executor.digestProgressOf('attempt-pipe'));
+    return '要点';
+  };
+  executor = new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG });
+  executor.kick();
+  await store.settled;
+
+  assert.deepEqual(observed, [
+    { phase: 'thinking', tokens: 5 },
+    { phase: 'writing', tokens: 12 },
+  ], 'delta 逐次更新内存表（读出来的是快照副本）');
+  assert.equal(store.digestRecorded, '要点', '摘要照常落库');
+  // complete 落盘先于 finally 的进度清理，等收尾完成再断言
+  for (let count = 0; count < 100 && executor.digestProgressOf('attempt-pipe') !== null; count += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(executor.digestProgressOf('attempt-pipe'), null, 'clip 终态后进度条目已清理');
+});
+
+test('AI 摘要进度（#86）：开关关 / digestText 缓存命中 / 摘要失败都不留进度条目', async () => {
+  // 开关关：从不建条目
+  const off = digestSetup({ markdown: '# T\n\n正文' });
+  const offExecutor = new ClipExecutor({ store: off.store, lark: off.lark, logger: { warn() {}, error() {} }, generateDigest: async () => 'x', getAiConfig: async () => AI_CONFIG });
+  offExecutor.kick();
+  await off.store.settled;
+  assert.equal(offExecutor.digestProgressOf('attempt-pipe'), null);
+
+  // 缓存命中：不调 AI，不建条目
+  const cached = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction: '总结' }, digestText: '缓存摘要' });
+  const cachedExecutor = new ClipExecutor({ store: cached.store, lark: cached.lark, logger: { warn() {}, error() {} }, generateDigest: async () => 'x', getAiConfig: async () => AI_CONFIG });
+  cachedExecutor.kick();
+  await cached.store.settled;
+  assert.equal(cachedExecutor.digestProgressOf('attempt-pipe'), null);
+
+  // 摘要失败：job 仍成功（降级），终态后条目同样清理
+  const failed = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction: '总结' } });
+  const failedExecutor = new ClipExecutor({
+    store: failed.store, lark: failed.lark, logger: { warn() {}, error() {} },
+    generateDigest: async ({ onProgress }) => { onProgress({ phase: 'writing', tokens: 3 }); throw Object.assign(new Error('boom'), { code: 'AI_REQUEST_FAILED' }); },
+    getAiConfig: async () => AI_CONFIG,
+  });
+  failedExecutor.kick();
+  await failed.store.settled;
+  assert.ok(failed.store.completed, '摘要失败不 fail job');
+  // complete 落盘先于 finally 的进度清理，等收尾完成再断言
+  for (let count = 0; count < 100 && failedExecutor.digestProgressOf('attempt-pipe') !== null; count += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(failedExecutor.digestProgressOf('attempt-pipe'), null, '失败终态同样清理');
+});
+
 // ——— provider 按名解析（#78）：digest.provider 交给 getAiConfig；悬空引用降级不调 AI ———
 
 test('AI 摘要（#78）：预设指定 provider 时按名取配置；未指定传 null（默认语义）', async () => {

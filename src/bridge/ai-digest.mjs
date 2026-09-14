@@ -66,7 +66,7 @@ function trimTrailingSlash(value) {
   return String(value).replace(/\/+$/, '');
 }
 
-// ——— 请求构造器（每型 ~20 行，非流式）：认证方式与请求体形状按类型各自的契约 ———
+// ——— 请求构造器（每型 ~20 行）：认证方式与请求体形状按类型各自的契约；stream 开关流式（#86） ———
 
 // pdf 附件（#79）：{ filename, dataBase64 }，null 表示纯文本摘要（请求体与现状完全一致）。
 // OpenAI 两型走 base64 data URL 的 file 输入块；Anthropic 走 document 块（data 为裸 base64）
@@ -79,8 +79,9 @@ const REQUEST_BUILDERS = {
   // store:false 关闭服务端留存；max_output_tokens 是这型的上限字段。
   // config.headers（高级设置的自定义请求头）最后展开：可追加路由头（如 opencode-go 的
   // x-opencode-session），也可覆盖默认头（特殊网关改认证方案场景）——三型同一约定。
-  // 带附件时 input 升级为 user 消息项：input_file 块（filename + file_data data URL）在文本前
-  responses(config, instruction, content, maxOutputTokens, pdf = null) {
+  // 带附件时 input 升级为 user 消息项：input_file 块（filename + file_data data URL）在文本前。
+  // stream（#86）：流式加 stream:true（SSE 事件：response.output_text.delta 等）
+  responses(config, instruction, content, maxOutputTokens, pdf = null, stream = false) {
     return {
       url: `${trimTrailingSlash(config.baseUrl)}/responses`,
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...config.headers },
@@ -95,12 +96,15 @@ const REQUEST_BUILDERS = {
           : content,
         store: false,
         max_output_tokens: maxOutputTokens,
+        ...(stream ? { stream: true } : {}),
       },
     };
   },
   // OpenAI Chat Completions：max_tokens 已废弃，必须用 max_completion_tokens；
-  // 带附件时 user 消息 content 升级为块数组：file 块（file.file_data data URL）在文本前
-  'chat-completions': (config, instruction, content, maxOutputTokens, pdf = null) => ({
+  // 带附件时 user 消息 content 升级为块数组：file 块（file.file_data data URL）在文本前。
+  // stream（#86）：stream:true + stream_options.include_usage 要求末帧带 usage（OpenAI 惯例；
+  // GLM/DeepSeek 等兼容端点不支持时会省略 usage 帧，消费侧按缺失容忍，回落近似计数）
+  'chat-completions': (config, instruction, content, maxOutputTokens, pdf = null, stream = false) => ({
     url: `${trimTrailingSlash(config.baseUrl)}/chat/completions`,
     headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...config.headers },
     body: {
@@ -115,12 +119,14 @@ const REQUEST_BUILDERS = {
           : { role: 'user', content },
       ],
       max_completion_tokens: maxOutputTokens,
+      ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
     },
   }),
   // Anthropic Messages：max_tokens 必填；system 是顶层字段不在 messages 里；
   // anthropic-version 为必传头，硬编码当前文档示例值。
-  // 带附件时 user content 升级为块数组：document 块（base64 source，data 为裸 base64）在文本前
-  messages(config, instruction, content, maxOutputTokens, pdf = null) {
+  // 带附件时 user content 升级为块数组：document 块（base64 source，data 为裸 base64）在文本前。
+  // stream（#86）：流式加 stream:true（SSE 事件：content_block_delta 的 text_delta/thinking_delta 等）
+  messages(config, instruction, content, maxOutputTokens, pdf = null, stream = false) {
     return {
       url: `${trimTrailingSlash(config.baseUrl)}/v1/messages`,
       headers: { 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json', ...config.headers },
@@ -137,6 +143,7 @@ const REQUEST_BUILDERS = {
             ]
             : content,
         }],
+        ...(stream ? { stream: true } : {}),
       },
     };
   },
@@ -183,6 +190,145 @@ const EXTRACTORS = {
   messages: extractMessagesText,
 };
 
+// ——— 流式消费（#86）：三型统一走 SSE delta，为实时进度供数 ———
+
+// 近似 token 计数：不引入 tokenizer——CJK/假名/谚文/全角按 1 字符 ≈ 1 token，
+// 其余非空白字符按 ~4 字符/token 折算。只用于进度展示，流结束时以 provider usage 校准
+function approxTokens(text) {
+  let wide = 0;
+  let narrow = 0;
+  for (const ch of text) {
+    if (/\s/.test(ch)) continue;
+    if (/[぀-ヿ가-힯一-鿿豈-﫿＀-￯]/.test(ch)) wide += 1;
+    else narrow += 1;
+  }
+  return wide + Math.ceil(narrow / 4);
+}
+
+// SSE 帧读取：事件以空行分隔；data: 多行按 \n 拼接；event: 行给出类型（Anthropic 惯例，
+// OpenAI 不带 event 行——类型在 data.type 里）；':...' 是注释/心跳行，忽略。
+// 增量解码（TextDecoder stream 模式）保证多字节字符被切断在两块之间也不乱码；
+// 响应体沿用 4 MiB 上限。body 不可异步迭代（测试 fake 只给 text()）时整读后按单块解析
+async function readSse(response, onEvent) {
+  const decoder = new TextDecoder();
+  const iterable = response.body?.[Symbol.asyncIterator]
+    ? response.body
+    : (async function* () { yield Buffer.from(await response.text()); })();
+  let pending = '';
+  let bytes = 0;
+  let eventType = '';
+  let dataLines = [];
+  const dispatch = () => {
+    if (!eventType && dataLines.length === 0) return;
+    onEvent({ event: eventType, data: dataLines.join('\n') });
+    eventType = '';
+    dataLines = [];
+  };
+  const takeLine = (raw) => {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (line === '') { dispatch(); return; }
+    if (line.startsWith(':')) return;
+    if (line.startsWith('event:')) { eventType = line.slice('event:'.length).trim(); return; }
+    if (line.startsWith('data:')) dataLines.push(line.slice('data:'.length).replace(/^ /, ''));
+  };
+  for await (const chunk of iterable) {
+    bytes += chunk.byteLength ?? Buffer.byteLength(chunk);
+    if (bytes > AI_MAX_RESPONSE_BYTES) throw aiError('AI_REQUEST_FAILED', 'AI 响应超过大小上限');
+    pending += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+    let index;
+    while ((index = pending.indexOf('\n')) >= 0) {
+      takeLine(pending.slice(0, index));
+      pending = pending.slice(index + 1);
+    }
+  }
+  pending += decoder.decode();
+  if (pending) takeLine(pending);
+  dispatch();
+}
+
+// 流式状态机：每个 delta 调 onProgress({ phase, tokens })（executor 纯内存赋值，禁 I/O）。
+// phase：reasoning delta → 'thinking'，正文 delta → 'writing'；tokens 是当前相位的近似累计。
+// 终止帧带 provider usage 时校准最终计数（responses: response.completed 的 usage.output_tokens；
+// chat-completions: 末帧 usage.completion_tokens；messages: message_delta 的 usage.output_tokens）
+function makeStreamConsumer(apiType, onProgress) {
+  const state = { text: '', tokens: 0, reasoningTokens: 0, phase: 'thinking', usageTokens: null, terminal: null, sawTextBlock: false };
+  const emit = () => onProgress?.({ phase: state.phase, tokens: state.phase === 'thinking' ? state.reasoningTokens : state.tokens });
+  const writeText = (delta) => { state.phase = 'writing'; state.text += delta; state.tokens += approxTokens(delta); emit(); };
+  const writeReasoning = (delta) => { state.phase = 'thinking'; state.reasoningTokens += approxTokens(delta); emit(); };
+  const streamError = (data) => { throw aiError('AI_REQUEST_FAILED', data?.message ?? data?.error?.message ?? 'AI 响应流式错误'); };
+
+  const onEvent = (eventType, data) => {
+    // OpenAI 两型类型在 data.type（通常无 event 行）；Anthropic 类型在 event 行（data.type 同值兜底）
+    const type = eventType || data?.type || '';
+    if (apiType === 'responses') {
+      if (type === 'response.output_text.delta' && typeof data.delta === 'string') writeText(data.delta);
+      // reasoning_summary_text.delta 是官方文档的摘要推理 delta；reasoning_text.delta 是
+      // openai-python SDK 里更新的原始推理 delta（部分模型/代理发这个），都算 thinking
+      else if ((type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') && typeof data.delta === 'string') writeReasoning(data.delta);
+      else if (type === 'response.completed' || type === 'response.incomplete' || type === 'response.failed') {
+        state.terminal = data.response ?? null;
+        if (Number.isFinite(data.response?.usage?.output_tokens)) state.usageTokens = data.response.usage.output_tokens;
+      } else if (type === 'error') streamError(data);
+      return;
+    }
+    if (apiType === 'chat-completions') {
+      const delta = data?.choices?.[0]?.delta;
+      // 空串 delta（首帧 role-only 等）不算正文，不翻转相位
+      if (typeof delta?.content === 'string' && delta.content) writeText(delta.content);
+      // reasoning_content 是 GLM/DeepSeek 惯例的推理 delta 字段
+      if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) writeReasoning(delta.reasoning_content);
+      if (Number.isFinite(data?.usage?.completion_tokens)) state.usageTokens = data.usage.completion_tokens;
+      if (type === 'error') streamError(data);
+      return;
+    }
+    // messages（Anthropic）：text_delta 正文、thinking_delta 推理；
+    // 多个 text 块之间补 '\n' 分隔——与非流式 extractMessagesText 的拼接口径一致
+    if (type === 'content_block_start' && data?.content_block?.type === 'text') {
+      if (state.sawTextBlock) state.text += '\n';
+      state.sawTextBlock = true;
+    } else if (type === 'content_block_delta' && data?.delta?.type === 'text_delta' && typeof data.delta.text === 'string') {
+      writeText(data.delta.text);
+    } else if (type === 'content_block_delta' && data?.delta?.type === 'thinking_delta' && typeof data.delta.thinking === 'string') {
+      writeReasoning(data.delta.thinking);
+    } else if (type === 'message_delta' && Number.isFinite(data?.usage?.output_tokens)) {
+      state.usageTokens = data.usage.output_tokens;
+    } else if (type === 'error') {
+      streamError(data);
+    }
+  };
+
+  // 终止口径与非流式等价：responses 有终止帧时以帧内 response 对象为准（status 是
+  // incomplete/failed 时 extractResponsesText 按既有语义抛 AI_REQUEST_FAILED）；
+  // 无终止帧（代理截断事件流）回落 delta 累计文本；空文本与非流式同一句报错。
+  // 返回前用 provider usage 校准最终计数（usage 缺失时保留近似值）
+  const finalize = () => {
+    const text = state.terminal ? extractResponsesText(state.terminal) : state.text;
+    if (!text) throw aiError('AI_REQUEST_FAILED', 'AI 响应中没有文本输出');
+    if (Number.isFinite(state.usageTokens)) onProgress?.({ phase: 'writing', tokens: state.usageTokens });
+    return text;
+  };
+
+  return { onEvent, finalize };
+}
+
+async function consumeStream(response, apiType, onProgress, signal) {
+  const consumer = makeStreamConsumer(apiType, onProgress);
+  try {
+    await readSse(response, ({ event, data }) => {
+      if (data === '[DONE]') return; // OpenAI 两型的流终止哨兵
+      let payload;
+      try { payload = JSON.parse(data); } catch { throw aiError('AI_REQUEST_FAILED', 'AI 响应流数据不是合法 JSON'); }
+      consumer.onEvent(event, payload);
+    });
+  } catch (error) {
+    if (signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError') {
+      throw aiError('AI_TIMEOUT', 'AI 请求超时');
+    }
+    throw error;
+  }
+  return consumer.finalize();
+}
+
 // 响应体上限 4 MiB：流式读（fetch 的 Response.body 在 Node 里可异步迭代），超限即弃；
 // 无 body（测试 fake 只给 text()）时回退整读后再卡上限
 async function readBodyText(response) {
@@ -227,15 +373,17 @@ function truncateInput(content) {
 // fetchImpl 可注入（测试不走网络）；maxOutputTokens/timeoutMs 显式参数（测试连通性探针与超时测试）
 // 优先，其次 config 里的高级设置，最后内置默认（2048 / AI_TIMEOUT_MS 180s）。
 // pdf（#79）：{{@file}} 附件 { filename, dataBase64 }，由 executor 检出占位符并下载后传入；
-// 占位符剥除与空指令兜底在这里统一做，无论附件是否随请求发出
-export async function generateDigest({ config, instruction, content, pdf = null, fetchImpl = fetch, maxOutputTokens, timeoutMs }) {
+// 占位符剥除与空指令兜底在这里统一做，无论附件是否随请求发出。
+// stream（#86）默认 true：三型统一走 SSE 流式，onProgress({ phase, tokens }) 逐 delta 上报；
+// 「测试连接」传 stream:false 保持非流式（探针要的是最小真实请求，不需要进度）
+export async function generateDigest({ config, instruction, content, pdf = null, fetchImpl = fetch, maxOutputTokens, timeoutMs, stream = true, onProgress = null }) {
   if (!config || !AI_API_TYPES.includes(config.apiType) || !config.model || !config.apiKey) {
     throw aiError('AI_NOT_CONFIGURED', '未配置 AI API');
   }
   const merged = { ...config, baseUrl: config.baseUrl || AI_DEFAULT_BASE_URL[config.apiType] };
   const outputTokens = maxOutputTokens ?? merged.maxOutputTokens ?? AI_MAX_OUTPUT_TOKENS;
   const requestTimeoutMs = timeoutMs ?? merged.timeoutMs ?? AI_TIMEOUT_MS;
-  const request = REQUEST_BUILDERS[merged.apiType](merged, stripFilePlaceholder(instruction), truncateInput(content), outputTokens, pdf);
+  const request = REQUEST_BUILDERS[merged.apiType](merged, stripFilePlaceholder(instruction), truncateInput(content), outputTokens, pdf, stream);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   let response;
@@ -249,17 +397,28 @@ export async function generateDigest({ config, instruction, content, pdf = null,
       redirect: 'error',
     });
   } catch (error) {
+    clearTimeout(timer);
     if (controller.signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError') {
       throw aiError('AI_TIMEOUT', 'AI 请求超时');
     }
     throw aiError('AI_REQUEST_FAILED', error?.message);
   } finally {
-    clearTimeout(timer);
+    // 非流式沿用旧口径（计时只覆盖响应头到达）；流式计时覆盖整个事件流消费，
+    // 在下方消费完成后才停表——慢流（reasoning 模型长思考）也受同一 timeoutMs 约束
+    if (!stream) clearTimeout(timer);
   }
   if (!response.ok) {
+    clearTimeout(timer);
     let detail = '';
     try { detail = extractErrorDetail(await readBodyText(response)); } catch { /* 错误体读不出就用状态码 */ }
     throw aiError(httpErrorCode(response.status), detail || `AI_HTTP_${response.status}`);
+  }
+  if (stream) {
+    try {
+      return (await consumeStream(response, merged.apiType, onProgress, controller.signal)).trim();
+    } finally {
+      clearTimeout(timer);
+    }
   }
   let payload;
   try {

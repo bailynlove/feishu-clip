@@ -25,6 +25,7 @@ import {
   clipFilename,
   setMenuOpen,
   isJobForPage,
+  reduceDigestSince,
 } from '../src/extension/popup-state.js';
 import { sanitizeClipTitle } from '../src/extension/templates.js';
 
@@ -100,6 +101,62 @@ test('digest 阶段进行中 → 进度文案「AI 摘要生成中…」；其�
   assert.equal(describeJobView({ status: 'running' }).message, '正在创建飞书文档并处理图片…', '未开摘要的剪藏行为不变');
   const queued = { status: 'queued', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
   assert.equal(describeJobView(queued).message, '已提交，等待本地 Bridge 处理…', '排队中优先显示排队文案');
+});
+
+// ——— #85：digest 阶段等待秒数（起算/复位归约 + 文案）———
+
+const digestingClip = { kind: 'clip', status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+
+test('#85 reduceDigestSince：进入 digest 起算、保持不重置、离开复位', () => {
+  const t0 = 1_000_000;
+  let since = reduceDigestSince([digestingClip], null, t0);
+  assert.equal(since, t0, '首次判别进入 digest 阶段记起算时间');
+  since = reduceDigestSince([digestingClip], since, t0 + 5_000);
+  assert.equal(since, t0, '阶段内轮询不重置起点');
+  const creating = { ...digestingClip, createInFlight: true };
+  assert.equal(reduceDigestSince([creating], since, t0 + 9_000), null, '离开 digest 阶段即复位');
+  assert.equal(reduceDigestSince([{ ...digestingClip, status: 'succeeded', document: { url: 'u' } }], since, t0 + 9_000), null, '终态复位');
+  assert.equal(reduceDigestSince([{ kind: 'pdf', status: 'running' }], null, t0), null, 'pdf-only 尝试不起算');
+  assert.equal(reduceDigestSince([], null, t0), null, '空数组不起算');
+  assert.equal(reduceDigestSince(null, null, t0), null, '异常输入不误伤');
+});
+
+test('#85 digest 阶段文案带「已等待 N 秒」；无秒数维持原文案（回归）', () => {
+  assert.equal(describeJobView(digestingClip, { digestWaitSeconds: 0 }).message, 'AI 摘要生成中 · 已等待 0 秒');
+  assert.equal(describeJobView(digestingClip, { digestWaitSeconds: 42 }).message, 'AI 摘要生成中 · 已等待 42 秒');
+  assert.equal(describeJobView(digestingClip).message, 'AI 摘要生成中…', '缺省（旧调用方）不带计时');
+  const creating = { ...digestingClip, createInFlight: true };
+  assert.equal(describeJobView(creating, { digestWaitSeconds: 42 }).message, '正在创建飞书文档并处理图片…', '非 digest 阶段不吃秒数');
+  const queued = { ...digestingClip, status: 'queued' };
+  assert.equal(describeJobView(queued, { digestWaitSeconds: 42 }).message, '已提交，等待本地 Bridge 处理…', '排队文案不吃秒数');
+});
+
+test('#85 双 job 轮播文案带同一计时', () => {
+  const pdf = { kind: 'pdf', status: 'running' };
+  assert.equal(describeAttemptView([digestingClip, pdf], { digestWaitSeconds: 7 }).message, 'AI 摘要生成中 · 已等待 7 秒 · PDF 上传中…');
+  assert.equal(describeAttemptView([digestingClip, pdf]).message, 'AI 摘要生成中… · PDF 上传中…', '无秒数维持原轮播文案（回归）');
+});
+
+// ——— #87：digestProgress 实时进度（相位优先，缺失退回等待秒数）———
+
+test('#87 digestProgress 相位文案：thinking / writing 切换，计数随视图刷新', () => {
+  const thinking = { ...digestingClip, digestProgress: { phase: 'thinking', tokens: 0 } };
+  assert.equal(describeJobView(thinking, { digestWaitSeconds: 42 }).message, 'AI 摘要思考中…', 'thinking 相位优先于等待秒数');
+  const writing = { ...digestingClip, digestProgress: { phase: 'writing', tokens: 500 } };
+  assert.equal(describeJobView(writing, { digestWaitSeconds: 42 }).message, 'AI 摘要生成中 · 已生成 500 tokens');
+  const writingMore = { ...digestingClip, digestProgress: { phase: 'writing', tokens: 1500 } };
+  assert.equal(describeJobView(writingMore).message, 'AI 摘要生成中 · 已生成 1500 tokens', '计数取视图最新值');
+  assert.equal(describeJobView(digestingClip, { digestWaitSeconds: 42 }).message, 'AI 摘要生成中 · 已等待 42 秒', 'digestProgress 缺失（旧 bridge）退回等待秒数');
+  assert.equal(describeJobView(digestingClip).message, 'AI 摘要生成中…', '两者皆无维持原文案（回归）');
+});
+
+test('#87 双 job 轮播文案同样支持相位/计数', () => {
+  const pdf = { kind: 'pdf', status: 'running' };
+  const thinking = { ...digestingClip, digestProgress: { phase: 'thinking', tokens: 0 } };
+  assert.equal(describeAttemptView([thinking, pdf]).message, 'AI 摘要思考中… · PDF 上传中…');
+  const writing = { ...digestingClip, digestProgress: { phase: 'writing', tokens: 800 } };
+  assert.equal(describeAttemptView([writing, pdf], { digestWaitSeconds: 9 }).message, 'AI 摘要生成中 · 已生成 800 tokens · PDF 上传中…');
+  assert.equal(describeAttemptView([digestingClip, pdf], { digestWaitSeconds: 9 }).message, 'AI 摘要生成中 · 已等待 9 秒 · PDF 上传中…', '缺失时轮播也退回等待秒数');
 });
 
 // ——— #36：预设选择与可编辑标题 ———
@@ -607,6 +664,97 @@ test('clipDigest carries the preset toggle, raw preset instruction and provider 
 
   const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   assert.deepEqual(clipDigest(plain), { digestEnabled: false, digestInstruction: '', digestProvider: '' }, '预设未开开关');
+});
+
+// ——— #84：本次设置 · 临时 AI 摘要（变体 B「开关即折叠」）———
+// digest 覆盖态 = { on, provider, instruction, overridden }：初值由当前预设 digest 配置派生
+// （overridden=false），用户改任一字段即 overridden=true，切换预设重置为跟随。
+
+import {
+  setDigestOn,
+  setDigestProvider,
+  editDigestInstruction,
+  digestSubLabel,
+} from '../src/extension/popup-state.js';
+
+const digestOnPresets = [
+  { ...presets[0], digest: { enabled: true, instruction: '预设指令', provider: 'deepseek' } },
+  { ...presets[1], digest: { enabled: false } },
+];
+
+test('会话 digest 初值跟随当前预设配置（开关与 provider），指令留空、未覆盖', () => {
+  const state = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p1' }, tab, now);
+  assert.deepEqual(state.digest, { on: true, provider: 'deepseek', instruction: '', overridden: false });
+  assert.equal(digestSubLabel(state), '跟随预设：开 · deepseek');
+
+  const off = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p2' }, tab, now);
+  assert.deepEqual(off.digest, { on: false, provider: '', instruction: '', overridden: false });
+  assert.equal(digestSubLabel(off), '跟随预设：关');
+
+  const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(plain.digest.on, false, '存量预设无 digest 字段 → 初值关');
+  assert.equal(digestSubLabel(plain), '跟随预设：关');
+});
+
+test('预设开了摘要但未选 provider 时副标题显示「默认」', () => {
+  const withDefault = [{ ...presets[0], digest: { enabled: true, instruction: '' } }];
+  const state = initPopupPresets({ presets: withDefault, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(state.digest.provider, '');
+  assert.equal(digestSubLabel(state), '跟随预设：开 · 默认');
+});
+
+test('用户改任一字段即「本次」覆盖：副标题两态切换', () => {
+  let state = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p2' }, tab, now);
+  state = setDigestOn(state, true);
+  assert.equal(state.digest.overridden, true);
+  assert.equal(digestSubLabel(state), '本次：开 · 默认', '开但未选 provider 显示默认');
+  state = setDigestProvider(state, 'kimi');
+  assert.equal(digestSubLabel(state), '本次：开 · kimi');
+  state = setDigestOn(state, false);
+  assert.equal(digestSubLabel(state), '本次：关');
+  state = editDigestInstruction(state, '一句话总结');
+  assert.equal(state.digest.instruction, '一句话总结');
+  assert.equal(state.digest.overridden, true);
+  assert.equal(currentPreset(state).digest.enabled, false, '会话覆盖绝不回写预设');
+});
+
+test('切换预设后 digest 恢复跟随新预设，覆盖被清除', () => {
+  let state = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p1' }, tab, now);
+  state = editDigestInstruction(setDigestProvider(setDigestOn(state, false), 'kimi'), '临时');
+  assert.equal(state.digest.overridden, true);
+  state = selectPreset(state, 'p2');
+  assert.deepEqual(state.digest, { on: false, provider: '', instruction: '', overridden: false }, '从新预设重新起算');
+  state = selectPreset(state, 'p1');
+  assert.deepEqual(state.digest, { on: true, provider: 'deepseek', instruction: '', overridden: false });
+  assert.equal(digestSubLabel(state), '跟随预设：开 · deepseek');
+});
+
+test('clipDigest 取覆盖后的有效值；临时指令留空回落预设指令，再回落空串（= 全局/内置）', () => {
+  let state = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p1' }, tab, now);
+  // 未覆盖：与 #75/#78 旧行为一致
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'deepseek' });
+  // 用户本次改 provider 与指令
+  state = editDigestInstruction(setDigestProvider(state, 'kimi'), '临时指令');
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '临时指令', digestProvider: 'kimi' });
+  // 临时指令清空（含纯空白）→ 回落预设级指令，弹窗自己不带 instruction
+  state = editDigestInstruction(state, '   ');
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'kimi' });
+  // 本次关掉：预设开着也不生成
+  state = setDigestOn(state, false);
+  assert.equal(clipDigest(state).digestEnabled, false);
+  // 预设没开、本次打开：预设无指令可回落 → 空串（background 继续回落全局 > 内置默认）
+  let off = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p2' }, tab, now);
+  off = setDigestOn(off, true);
+  assert.deepEqual(clipDigest(off), { digestEnabled: true, digestInstruction: '', digestProvider: '' });
+});
+
+test('composeClip 的 {{digest}} 字面量跟随会话开关而非预设开关（预览 === 保存内容）', () => {
+  let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
+  state = editCustomBody(setDigestOn(state, true), '{{digest}} {{content}}');
+  assert.equal(composeClip(state, clipSnapshot).body, '{{digest}} # 正文\n\n内容', '本次打开 → 字面量存活');
+  let on = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p1' }, tab, now);
+  on = editCustomBody(setDigestOn(on, false), '{{digest}} {{content}}');
+  assert.equal(composeClip(on, clipSnapshot).body, ' # 正文\n\n内容', '本次关掉 → 置空');
 });
 
 test('clipFilename sanitizes filesystem-unsafe characters and falls back to clip', () => {

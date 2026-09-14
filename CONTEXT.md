@@ -45,7 +45,7 @@ _Avoid_: 模板方案、配置档案
 _Avoid_: 格式串、占位文本
 
 **AI 摘要（AI Digest）**:
-由 Bridge 调用用户配置的 AI API 对剪藏正文生成的摘要文本；经 `{{digest}}` 占位符或默认布局进入剪藏文档；生成失败按部分成功降级，不阻断剪藏。
+由 Bridge 调用用户配置的 AI API 对剪藏正文生成的摘要文本；经 `{{digest}}` 占位符或默认布局进入剪藏文档；生成失败按部分成功降级，不阻断剪藏。三型 API 统一走流式（SSE delta），流式过程产出摘要进度（digestProgress：thinking/writing 相位 + 近似 token 计数，usage 帧校准），仅存 executor 内存、随 job 视图输出、终态即清；popup 状态条据此显示「思考中…/已生成 N tokens」，旧 bridge 无此字段时退回「已等待 N 秒」。popup「本次设置」里的临时摘要设置（开关即折叠子卡）只覆盖本次提交，不回写预设。
 _Avoid_: 网页导读、内容总结报告
 
 **AI provider 预设（AI Provider Preset）**:

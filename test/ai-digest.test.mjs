@@ -26,15 +26,48 @@ function jsonResponse(payload, { status = 200 } = {}) {
   };
 }
 
+// 假 SSE 流（#86）：events 每项 { event?, data }（data 对象自动 JSON 化；字符串原样输出，
+// 用于 '[DONE]' 哨兵）。chunkSize 把负载切成定长块——取 1 时每字节一块，
+// 多字节字符必被切断，顺带压测增量解码
+function sseResponse(events, { status = 200, chunkSize = null } = {}) {
+  const text = events.map((event) => {
+    if (typeof event === 'string') return `data: ${event}\n\n`;
+    const lines = [];
+    if (event.event) lines.push(`event: ${event.event}`);
+    lines.push(`data: ${typeof event.data === 'string' ? event.data : JSON.stringify(event.data)}`);
+    return `${lines.join('\n')}\n\n`;
+  }).join('');
+  const buffer = Buffer.from(text);
+  const chunks = [];
+  for (let at = 0; at < buffer.length; at += chunkSize ?? buffer.length) chunks.push(buffer.subarray(at, at + (chunkSize ?? buffer.length)));
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    body: (async function* () { for (const chunk of chunks) yield chunk; })(),
+    text: async () => text,
+  };
+}
+
+// 三型的最小成功流：responses 走 response.completed 终止帧（帧内 response 对象是终态文本口径）；
+// chat-completions 走 content delta + [DONE]；messages 走 content_block_delta 的 text_delta
+const SSE_OK = {
+  responses: (text = '摘要') => [{ data: { type: 'response.completed', response: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }] } } }],
+  'chat-completions': (text = '摘要') => [{ data: { choices: [{ delta: { content: text } }] } }, '[DONE]'],
+  messages: (text = '摘要') => [
+    { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } } },
+    { event: 'message_stop', data: { type: 'message_stop' } },
+  ],
+};
+
 const CONFIG = {
   responses: { apiType: 'responses', baseUrl: 'https://api.example.com/v1', model: 'gpt-5', apiKey: 'sk-test' },
   'chat-completions': { apiType: 'chat-completions', baseUrl: 'https://api.example.com/v1', model: 'gpt-5', apiKey: 'sk-test' },
   messages: { apiType: 'messages', baseUrl: 'https://api.anthropic.com', model: 'claude-x', apiKey: 'sk-ant' },
 };
 
-test('responses 请求构造：URL 拼 /responses，Bearer 认证，instructions 顶层 + store:false', async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: '摘要' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+test('responses 请求构造：URL 拼 /responses，Bearer 认证，instructions 顶层 + store:false，默认走流式', async () => {
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses()));
   const digest = await generateDigest({ config: CONFIG.responses, instruction: '总结它', content: '正文', fetchImpl: fetch });
   assert.equal(digest, '摘要');
   assert.equal(calls.length, 1);
@@ -42,12 +75,11 @@ test('responses 请求构造：URL 拼 /responses，Bearer 认证，instructions
   assert.equal(calls[0].options.method, 'POST');
   assert.equal(calls[0].options.redirect, 'error');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer sk-test');
-  assert.deepEqual(calls[0].body, { model: 'gpt-5', instructions: '总结它', input: '正文', store: false, max_output_tokens: 2048 });
+  assert.deepEqual(calls[0].body, { model: 'gpt-5', instructions: '总结它', input: '正文', store: false, max_output_tokens: 2048, stream: true });
 });
 
-test('chat-completions 请求构造：URL 拼 /chat/completions，system+user 消息，max_completion_tokens', async () => {
-  const ok = { choices: [{ message: { role: 'assistant', content: '摘要' } }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+test('chat-completions 请求构造：URL 拼 /chat/completions，system+user 消息，max_completion_tokens，流式带 include_usage', async () => {
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK['chat-completions']()));
   const digest = await generateDigest({ config: CONFIG['chat-completions'], instruction: '总结它', content: '正文', fetchImpl: fetch });
   assert.equal(digest, '摘要');
   assert.equal(calls[0].url, 'https://api.example.com/v1/chat/completions');
@@ -56,31 +88,50 @@ test('chat-completions 请求构造：URL 拼 /chat/completions，system+user �
     model: 'gpt-5',
     messages: [{ role: 'system', content: '总结它' }, { role: 'user', content: '正文' }],
     max_completion_tokens: 2048,
+    stream: true,
+    stream_options: { include_usage: true },
   });
   assert.ok(!('max_tokens' in calls[0].body), 'max_tokens 已废弃，勿用');
 });
 
-test('messages 请求构造：base 不带 /v1 拼 /v1/messages，x-api-key + anthropic-version，max_tokens 必填', async () => {
-  const ok = { content: [{ type: 'text', text: '摘要' }], stop_reason: 'end_turn' };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+test('messages 请求构造：base 不带 /v1 拼 /v1/messages，x-api-key + anthropic-version，max_tokens 必填，默认走流式', async () => {
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.messages()));
   const digest = await generateDigest({ config: CONFIG.messages, instruction: '总结它', content: '正文', fetchImpl: fetch });
   assert.equal(digest, '摘要');
   assert.equal(calls[0].url, 'https://api.anthropic.com/v1/messages', 'base 不含 /v1，版本段在路径里');
   assert.equal(calls[0].options.headers['x-api-key'], 'sk-ant');
   assert.equal(calls[0].options.headers['anthropic-version'], '2023-06-01');
-  assert.deepEqual(calls[0].body, { model: 'claude-x', max_tokens: 2048, system: '总结它', messages: [{ role: 'user', content: '正文' }] });
+  assert.deepEqual(calls[0].body, { model: 'claude-x', max_tokens: 2048, system: '总结它', messages: [{ role: 'user', content: '正文' }], stream: true });
+});
+
+test('stream:false 保持非流式（「测试连接」契约）：请求体无 stream 字段，按整 JSON 解析', async () => {
+  const { calls, fetch } = fakeFetch(async () => jsonResponse({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }] }));
+  const digest = await generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: fetch, stream: false });
+  assert.equal(digest, 'ok');
+  assert.ok(!('stream' in calls[0].body), 'responses 非流式不带 stream');
+  // 非流式的响应级失败（incomplete）语义原样保留
+  const incomplete = fakeFetch(async () => jsonResponse({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] }));
+  await assert.rejects(
+    () => generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: incomplete.fetch, stream: false }),
+    (error) => error.code === 'AI_REQUEST_FAILED' && /max_output_tokens/.test(error.message),
+  );
+  const chat = fakeFetch(async () => jsonResponse({ choices: [{ message: { content: 'ok' } }] }));
+  await generateDigest({ config: CONFIG['chat-completions'], instruction: 'i', content: 'c', fetchImpl: chat.fetch, stream: false });
+  assert.ok(!('stream' in chat.calls[0].body) && !('stream_options' in chat.calls[0].body), 'chat-completions 非流式不带 stream/stream_options');
+  const ant = fakeFetch(async () => jsonResponse({ content: [{ type: 'text', text: 'ok' }] }));
+  await generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: ant.fetch, stream: false });
+  assert.ok(!('stream' in ant.calls[0].body), 'messages 非流式不带 stream');
 });
 
 test('baseUrl 省略/尾部斜杠：回落各类型默认值，拼接前先剥尾斜杠', async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: 'x' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses('x')));
   await generateDigest({ config: { apiType: 'responses', model: 'm', apiKey: 'k' }, instruction: 'i', content: 'c', fetchImpl: fetch });
   assert.equal(calls[0].url, `${AI_DEFAULT_BASE_URL.responses}/responses`);
   await generateDigest({ config: { ...CONFIG.responses, baseUrl: 'https://api.example.com/v1/' }, instruction: 'i', content: 'c', fetchImpl: fetch });
   assert.equal(calls[1].url, 'https://api.example.com/v1/responses');
 });
 
-test('responses 提取：推理模型 output 带 reasoning item 时跳过它找 message/output_text', async () => {
+test('responses 流式终帧提取：response.completed 帧内 response 对象为准（跳过 reasoning item 找 message/output_text）', async () => {
   const payload = {
     status: 'completed',
     output: [
@@ -88,15 +139,19 @@ test('responses 提取：推理模型 output 带 reasoning item 时跳过它找 
       { type: 'message', content: [{ type: 'refusal', refusal: '' }, { type: 'output_text', text: '真正摘要' }] },
     ],
   };
-  const { fetch } = fakeFetch(async () => jsonResponse(payload));
+  // delta 累计文本与终帧文本不一致时，以终帧为准（与非流式口径等价）
+  const { fetch } = fakeFetch(async () => sseResponse([
+    { data: { type: 'response.output_text.delta', delta: '片段' } },
+    { data: { type: 'response.completed', response: payload } },
+  ]));
   const digest = await generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: fetch });
   assert.equal(digest, '真正摘要');
 });
 
-test('responses 提取：HTTP 200 但 status=="incomplete"/"failed" 按失败处理', async () => {
-  for (const status of ['incomplete', 'failed']) {
+test('responses 流式：终止帧 status=="incomplete"/"failed" 按失败处理（与非流式同一语义）', async () => {
+  for (const [eventType, status] of [['response.incomplete', 'incomplete'], ['response.failed', 'failed']]) {
     const payload = { status, incomplete_details: { reason: 'max_output_tokens' }, output: [] };
-    const { fetch } = fakeFetch(async () => jsonResponse(payload));
+    const { fetch } = fakeFetch(async () => sseResponse([{ data: { type: eventType, response: payload } }]));
     await assert.rejects(
       () => generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: fetch }),
       (error) => error.code === 'AI_REQUEST_FAILED' && /max_output_tokens/.test(error.message),
@@ -104,34 +159,121 @@ test('responses 提取：HTTP 200 但 status=="incomplete"/"failed" 按失败处
   }
 });
 
-test('messages 提取：拼接全部 text 块；无 text 块按失败处理', async () => {
-  const multi = { content: [{ type: 'text', text: '第一段' }, { type: 'thinking', thinking: '...' }, { type: 'text', text: '第二段' }] };
-  const { fetch } = fakeFetch(async () => jsonResponse(multi));
-  assert.equal(await generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: fetch }), '第一段\n第二段');
+test('responses 流式进度：reasoning delta → thinking，正文 delta → writing，终帧 usage 校准计数', async () => {
+  const events = [
+    { data: { type: 'response.reasoning_summary_text.delta', delta: '想想' } },
+    { data: { type: 'response.reasoning_text.delta', delta: 'think' } },
+    { data: { type: 'response.output_text.delta', delta: '要点一' } },
+    { data: { type: 'response.output_text.delta', delta: '要点二' } },
+    { data: { type: 'response.completed', response: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '要点一要点二' }] }], usage: { output_tokens: 42 } } } },
+  ];
+  const { fetch } = fakeFetch(async () => sseResponse(events));
+  const progress = [];
+  const digest = await generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: fetch, onProgress: (update) => progress.push(update) });
+  assert.equal(digest, '要点一要点二');
+  assert.deepEqual(progress[0], { phase: 'thinking', tokens: 2 }, 'reasoning delta 计 thinking（CJK 1 字 ≈ 1 token）');
+  assert.deepEqual(progress[1], { phase: 'thinking', tokens: 4 }, 'reasoning_text.delta 同样计 thinking（latin ~4 字符/token）');
+  assert.equal(progress[2].phase, 'writing', '正文 delta 翻 writing');
+  assert.equal(progress[3].tokens, 6, '正文近似累计：6 个 CJK 字');
+  assert.deepEqual(progress.at(-1), { phase: 'writing', tokens: 42 }, '终帧 usage.output_tokens 校准最终计数');
+});
 
-  const empty = { content: [{ type: 'tool_use', id: 't1' }] };
-  const none = fakeFetch(async () => jsonResponse(empty));
+test('responses 流式：无终止帧（代理截断事件流）回落 delta 累计文本', async () => {
+  const { fetch } = fakeFetch(async () => sseResponse([
+    { data: { type: 'response.output_text.delta', delta: '前' } },
+    { data: { type: 'response.output_text.delta', delta: '后' } },
+  ]));
+  assert.equal(await generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: fetch }), '前后');
+});
+
+test('messages 流式提取：text_delta 跨块按 \\n 拼接（与非流式同口径）；无文本按失败处理', async () => {
+  const events = [
+    { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '第一段' } } },
+    { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+    { event: 'content_block_start', data: { type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: '' } } },
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 1, delta: { type: 'thinking_delta', thinking: '思考' } } },
+    { event: 'content_block_stop', data: { type: 'content_block_stop', index: 1 } },
+    { event: 'content_block_start', data: { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } } },
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: '第二段' } } },
+    { event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 9 } } },
+    { event: 'message_stop', data: { type: 'message_stop' } },
+  ];
+  const { fetch } = fakeFetch(async () => sseResponse(events));
+  const progress = [];
+  const digest = await generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: fetch, onProgress: (update) => progress.push(update) });
+  assert.equal(digest, '第一段\n第二段');
+  assert.deepEqual(progress[0], { phase: 'writing', tokens: 3 });
+  assert.deepEqual(progress[1], { phase: 'thinking', tokens: 2 }, 'thinking_delta 计 thinking');
+  assert.deepEqual(progress.at(-1), { phase: 'writing', tokens: 9 }, 'message_delta 的 usage.output_tokens 校准');
+
+  const none = fakeFetch(async () => sseResponse([
+    { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } } },
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '……' } } },
+  ]));
   await assert.rejects(
     () => generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: none.fetch }),
     (error) => error.code === 'AI_REQUEST_FAILED',
   );
 });
 
-test('chat-completions 提取：choices[0].message.content；缺 choices 按失败处理', async () => {
-  const ok = { choices: [{ message: { content: '要点' } }] };
-  const { fetch } = fakeFetch(async () => jsonResponse(ok));
-  assert.equal(await generateDigest({ config: CONFIG['chat-completions'], instruction: 'i', content: 'c', fetchImpl: fetch }), '要点');
+test('messages 流式：error 事件按失败处理，透传对方错误消息', async () => {
+  const { fetch } = fakeFetch(async () => sseResponse([
+    { event: 'error', data: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } } },
+  ]));
+  await assert.rejects(
+    () => generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: fetch }),
+    (error) => error.code === 'AI_REQUEST_FAILED' && /Overloaded/.test(error.message),
+  );
+});
 
-  const malformed = fakeFetch(async () => jsonResponse({ choices: [] }));
+test('chat-completions 流式：content/reasoning_content 区分相位，usage 末帧校准，[DONE] 哨兵收尾', async () => {
+  const events = [
+    { data: { choices: [{ delta: { role: 'assistant', content: '' } }] } },
+    { data: { choices: [{ delta: { reasoning_content: '想想' } }] } },
+    { data: { choices: [{ delta: { content: '要' } }] } },
+    { data: { choices: [{ delta: { content: '点' } }] } },
+    { data: { choices: [], usage: { completion_tokens: 17 } } },
+    '[DONE]',
+  ];
+  const { fetch } = fakeFetch(async () => sseResponse(events));
+  const progress = [];
+  const digest = await generateDigest({ config: CONFIG['chat-completions'], instruction: 'i', content: 'c', fetchImpl: fetch, onProgress: (update) => progress.push(update) });
+  assert.equal(digest, '要点');
+  assert.deepEqual(progress[0], { phase: 'thinking', tokens: 2 }, 'reasoning_content（GLM/DeepSeek 惯例）计 thinking；空 content 首帧不翻相位');
+  assert.deepEqual(progress[1], { phase: 'writing', tokens: 1 });
+  assert.deepEqual(progress.at(-1), { phase: 'writing', tokens: 17 }, '末帧 usage.completion_tokens 校准');
+
+  // 整流无正文 delta → 与非流式缺 choices 同一句失败
+  const malformed = fakeFetch(async () => sseResponse(['[DONE]']));
   await assert.rejects(
     () => generateDigest({ config: CONFIG['chat-completions'], instruction: 'i', content: 'c', fetchImpl: malformed.fetch }),
-    (error) => error.code === 'AI_REQUEST_FAILED',
+    (error) => error.code === 'AI_REQUEST_FAILED' && error.message === 'AI 响应中没有文本输出',
+  );
+});
+
+test('SSE 增量解析：每字节一块（多字节字符必被切断）也能正确拼回事件与文本', async () => {
+  const { fetch } = fakeFetch(async () => sseResponse(SSE_OK.messages('逐字流摘要'), { chunkSize: 1 }));
+  assert.equal(await generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: fetch }), '逐字流摘要');
+});
+
+test('流式消费超时：事件流中途挂起，AbortController 到期映射为 AI_TIMEOUT', async () => {
+  const hangingStream = async (_url, options) => ({
+    ok: true,
+    status: 200,
+    body: (async function* () {
+      yield Buffer.from('data: {"type":"response.output_text.delta","delta":"x"}\n\n');
+      await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    })(),
+  });
+  await assert.rejects(
+    () => generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: hangingStream, timeoutMs: 20 }),
+    (error) => error.code === 'AI_TIMEOUT',
   );
 });
 
 test(`输入截断：正文超过 ${AI_MAX_INPUT_CHARS} 字符截断并附截断说明`, async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: 'x' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses('x')));
   await generateDigest({ config: CONFIG.responses, instruction: 'i', content: '字'.repeat(AI_MAX_INPUT_CHARS + 500), fetchImpl: fetch });
   const input = calls[0].body.input;
   assert.ok(input.startsWith('字'.repeat(100)), '保留正文前缀');
@@ -355,8 +497,7 @@ test('sanitizeProvider：随名单套脱敏（hasKey 不回显 key）', () => {
 // 见 #75 后续诊断）：config.headers 与 config.maxOutputTokens 两个选填项 ———
 
 test('自定义请求头：config.headers 合并进请求（默认头保留、可被覆盖），三型都生效', async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: '摘要' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses()));
   const config = { ...CONFIG.responses, headers: { 'x-opencode-session': 'sess-1' } };
   await generateDigest({ config, instruction: 'i', content: 'c', fetchImpl: fetch });
   assert.equal(calls[0].options.headers['x-opencode-session'], 'sess-1');
@@ -367,8 +508,7 @@ test('自定义请求头：config.headers 合并进请求（默认头保留、�
   assert.equal(calls[1].options.headers.Authorization, 'Bearer other');
 
   // Anthropic 型同样合并（x-api-key / anthropic-version 保留）
-  const ant = { content: [{ type: 'text', text: '摘要' }] };
-  const antFake = fakeFetch(async () => jsonResponse(ant));
+  const antFake = fakeFetch(async () => sseResponse(SSE_OK.messages()));
   await generateDigest({ config: { ...CONFIG.messages, headers: { 'x-opencode-session': 'sess-2' } }, instruction: 'i', content: 'c', fetchImpl: antFake.fetch });
   assert.equal(antFake.calls[0].options.headers['x-opencode-session'], 'sess-2');
   assert.equal(antFake.calls[0].options.headers['x-api-key'], 'sk-ant');
@@ -376,8 +516,7 @@ test('自定义请求头：config.headers 合并进请求（默认头保留、�
 });
 
 test('maxOutputTokens：配置值优先于内置默认 2048；显式参数（测试探针）优先于配置值', async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: '摘要' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses()));
   const config = { ...CONFIG.responses, maxOutputTokens: 4096 };
   await generateDigest({ config, instruction: 'i', content: 'c', fetchImpl: fetch });
   assert.equal(calls[0].body.max_output_tokens, 4096, 'config.maxOutputTokens 优先于内置默认');
@@ -461,8 +600,7 @@ test('{{@file}} 占位符检出与剥除：空格写法归一；剥空回落内�
 });
 
 test('{{@file}} + PDF：responses 走 input_file 块（base64 data URL），instructions 占位符已剥除', async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: '摘要' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses()));
   const pdf = { filename: 'paper.pdf', dataBase64: PDF_B64 };
   await generateDigest({ config: CONFIG.responses, instruction: '结合附件总结 {{@file}}', content: '正文', pdf, fetchImpl: fetch });
   assert.deepEqual(calls[0].body, {
@@ -477,12 +615,12 @@ test('{{@file}} + PDF：responses 走 input_file 块（base64 data URL），inst
     }],
     store: false,
     max_output_tokens: 2048,
+    stream: true,
   });
 });
 
 test('{{@file}} + PDF：chat-completions 走 file content part（file.file_data base64 data URL）', async () => {
-  const ok = { choices: [{ message: { role: 'assistant', content: '摘要' } }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK['chat-completions']()));
   const pdf = { filename: 'paper.pdf', dataBase64: PDF_B64 };
   await generateDigest({ config: CONFIG['chat-completions'], instruction: '结合附件总结 {{@file}}', content: '正文', pdf, fetchImpl: fetch });
   assert.deepEqual(calls[0].body, {
@@ -498,12 +636,13 @@ test('{{@file}} + PDF：chat-completions 走 file content part（file.file_data 
       },
     ],
     max_completion_tokens: 2048,
+    stream: true,
+    stream_options: { include_usage: true },
   });
 });
 
 test('{{@file}} + PDF：messages 走 document 块（base64 source，data 不带 data: 前缀）', async () => {
-  const ok = { content: [{ type: 'text', text: '摘要' }], stop_reason: 'end_turn' };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.messages()));
   const pdf = { filename: 'paper.pdf', dataBase64: PDF_B64 };
   await generateDigest({ config: CONFIG.messages, instruction: '结合附件总结 {{@file}}', content: '正文', pdf, fetchImpl: fetch });
   assert.deepEqual(calls[0].body, {
@@ -517,15 +656,15 @@ test('{{@file}} + PDF：messages 走 document 块（base64 source，data 不带 
         { type: 'text', text: '正文' },
       ],
     }],
+    stream: true,
   });
 });
 
 test('{{@file}} 无 PDF 附件（降级路径）：占位符照样剥除，请求体与纯文本现状一致', async () => {
-  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: 'x' }] }] };
-  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK.responses('x')));
   await generateDigest({ config: CONFIG.responses, instruction: '结合附件总结 {{@file}}', content: '正文', fetchImpl: fetch });
   assert.deepEqual(calls[0].body, {
-    model: 'gpt-5', instructions: '结合附件总结', input: '正文', store: false, max_output_tokens: 2048,
+    model: 'gpt-5', instructions: '结合附件总结', input: '正文', store: false, max_output_tokens: 2048, stream: true,
   }, '无附件时 input 仍是纯字符串（与现状一致）');
 
   // 指令只有占位符：剥空回落内置默认

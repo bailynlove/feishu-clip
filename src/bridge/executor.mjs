@@ -239,6 +239,10 @@ export class ClipExecutor {
     // 摘要附件字节共享（#94）：attemptId → deferred { promise, resolve, reject }。
     // 内存表不落盘；clip 终态清理（#execute finally）
     this.pdfShares = new Map();
+    // 摘要进度（#86）：attemptId → { phase: 'thinking' | 'writing', tokens }。流式 delta 逐次
+    // 更新（纯内存赋值，无锁）；不落盘——job-store 是整文件重写，禁高频写。GET job 视图时由
+    // server 经 digestProgressOf 合并输出；clip 终态清理（#execute finally）
+    this.digestProgress = new Map();
     // 摘要等共享字节的预算（#94），可注入（测试用即时超时）
     this.pdfShareWaitMs = pdfShareWaitMs;
     // 双通道（#91）：clip/pdf 各一条消费通道，互不占线
@@ -321,6 +325,12 @@ export class ClipExecutor {
       this.pdfShares.set(attemptId, entry);
     }
     return entry;
+  }
+
+  // 摘要进度读取（#86）：server 组 job 视图时合并；无进行中摘要（非 digest job / 已终态）返回 null
+  digestProgressOf(attemptId) {
+    const entry = this.digestProgress.get(attemptId);
+    return entry ? { phase: entry.phase, tokens: entry.tokens } : null;
   }
 
   // 摘要侧等共享：返回 { buffer } / null（自己下载）/ 抛 401 形状错误（凭据回退进 #80）。
@@ -721,10 +731,15 @@ export class ClipExecutor {
           }
           // 长下载/等 staging 之后、调 AI 之前先确认租约仍在（#89）
           this.#assertLease(lease);
+          // 摘要进度（#86）：流式 delta 经 onProgress 逐次更新内存条目（纯赋值）；
+          // 初始相位 thinking——模型先思考后写正文，非 reasoning 模型首个正文 delta 即翻 writing
+          const progress = { phase: 'thinking', tokens: 0 };
+          this.digestProgress.set(job.attemptId, progress);
           try {
             digestText = await this.generateDigest({
               config, instruction: job.digest.instruction, content: job.snapshot.markdown,
               ...(pdf ? { pdf } : {}),
+              onProgress: (update) => { progress.phase = update.phase; progress.tokens = update.tokens; },
             });
             // AI 返回后、写缓存前再确认一次：摘要动辄几分钟，租约可能在此期间被收走
             this.#assertLease(lease);
@@ -1127,6 +1142,8 @@ export class ClipExecutor {
       lease.stop();
       // 字节共享表收尾（#94）：clip 终态后条目不再有人消费，防泄漏
       this.pdfShares.delete(job.attemptId);
+      // 摘要进度表收尾（#86）：终态后视图不再带 digestProgress
+      this.digestProgress.delete(job.attemptId);
       await rm(scratch, { recursive: true, force: true });
     }
   }

@@ -227,6 +227,18 @@
 .popup .switch::after{content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .15s}
 .popup .img-row input:checked+.switch{background:linear-gradient(rgba(255,255,255,.5),rgba(255,255,255,.05) 60%),var(--brand);box-shadow:inset 0 1px 3px rgba(255,255,255,.75),inset 0 -2px 3px rgba(8,80,60,.14)}
 .popup .img-row input:checked+.switch::after{left:21px}
+/* ✨ AI 摘要临时设置（#84，popup-ai-digest 变体 B「开关即折叠」）：本次设置卡内末尾的
+   虚线子卡；头部即开关行（开 = 本次生成 + 展开内容区，关 = 折叠成一行）。
+   开关视觉复用 .img-row/.switch，内容区复用 .fold-body ——— */
+.popup .ai-fold{border-style:dashed}
+.popup .ai-fold-head{padding:10px 14px;background:#f6fefb}
+.popup .ai-fold-head strong{font-size:13.5px}
+.popup .ai-fold-head small{font-size:11px;color:#9aa3b2;margin-top:1px}
+.popup .ai-seg{display:flex;gap:6px}
+.popup .ai-seg-opt{flex:1;border:1.5px solid var(--brand-line);background:#fff;border-radius:10px;padding:7px;font-size:12px;font-weight:600;color:#182030;cursor:pointer;font-family:inherit}
+.popup .ai-seg-opt.on{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);box-shadow:inset 0 1px 2px rgba(255,255,255,.7)}
+.popup .ai-empty{margin:0;font-size:12px;color:#9aa3b2}
+.popup .ai-instruction{min-height:48px}
 .popup .status{display:flex;align-items:center;gap:8px;border-radius:10px;font-size:13px;padding:11px 14px;background:linear-gradient(rgba(255,255,255,.55),rgba(255,255,255,.05) 60%),var(--brand-2);color:var(--brand-ink);box-shadow:inset 0 2px 3px rgba(255,255,255,.7),0 6px 18px rgba(95,212,236,.5)}
 .popup .status-text{flex:1}
 .popup .status-close{border:0;background:rgba(255,255,255,.55);color:var(--brand-ink);border-radius:999px;width:20px;height:20px;font-size:13px;line-height:1;cursor:pointer;flex-shrink:0;padding:0;display:grid;place-content:center}

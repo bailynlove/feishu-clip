@@ -1,7 +1,8 @@
 import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireDrivePicker } from './picker-view.js';
 import { createPopupPicker } from './popup-picker.js';
 import { createDrivePicker } from './drive-picker.js';
-import { describeAttemptView, initPopupPresets, initPdfTabState, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName, clipDigest } from './popup-state.js';
+import { describeAttemptView, initPopupPresets, initPdfTabState, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName, clipDigest, setDigestOn, setDigestProvider, editDigestInstruction, digestSubLabel, reduceDigestSince } from './popup-state.js';
+import { aiDigestProviderOptions } from './options-state.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -14,6 +15,28 @@ let defaultPresetId = null; // SAVE_PRESETS 整体写回时须带上（#40 不�
 // 预览懒提取（#37）：首次展开预览才跑 extractor，缓存快照供实时重渲
 let previewSnapshot = null;
 let previewLoading = false;
+// 摘要等待计时（#85）：popup 侧首次判别 digest 阶段记本地时间，每秒刷新「已等待 N 秒」，
+// 离开阶段即停并复位；仅 popup 开着时有意义，关闭即弃
+let digestSince = null;
+let digestTick = null;
+let lastJobs = null;
+
+function digestWaitSeconds() {
+  return digestSince === null ? null : Math.max(0, Math.floor((Date.now() - digestSince) / 1000));
+}
+
+function syncDigestTick() {
+  if (digestSince !== null && digestTick === null) {
+    digestTick = setInterval(() => {
+      if (!lastJobs || presetState?.pageKind === 'pdf-tab') return;
+      const view = describeAttemptView(lastJobs, { recovered: recoveredAttempt, digestWaitSeconds: digestWaitSeconds() });
+      if (view?.kind === 'progress') show(view.message);
+    }, 1000);
+  } else if (digestSince === null && digestTick !== null) {
+    clearInterval(digestTick);
+    digestTick = null;
+  }
+}
 
 const $ = (selector) => document.querySelector(selector);
 function message(payload) { return chrome.runtime.sendMessage(payload).then((response) => { if (!response?.ok) throw Object.assign(new Error(response?.error?.message || '操作失败'), response?.error); return response.result; }); }
@@ -54,6 +77,7 @@ function syncPresetView() {
   $('#save').textContent = primaryLabel(currentPreset(presetState).action, presetState);
   $('#images').checked = presetState.imageMode !== 'off';
   $('#custom-body').value = presetState.customBody;
+  $('#digest-instruction').value = presetState.digest?.instruction ?? '';
   $('#preview-title').textContent = presetState.title;
   // ▾ 菜单的「默认 ✓」标记跟随当前预设 action（仅标识，不影响一次性执行）
   document.querySelectorAll('.action-menu-row').forEach((row) => {
@@ -62,8 +86,53 @@ function syncPresetView() {
   syncDestinationView();
   renderPresetChips();
   syncPdfView();
+  syncDigestView();
   syncModifiedButtons();
   refreshPreview();
+}
+
+// ——— 临时 AI 摘要（#84，变体 B「开关即折叠」）：子卡头部即开关行，开 = 本次生成 + 展开
+// 内容区。provider chips 来自 bridge 列表（设置页同款 LIST_AI_PROVIDERS → GET /v1/ai/providers）：
+// null = 拉取失败，降级为仅「默认」可选 + 提示（对齐设置页 f-digest-provider-hint 做法）；
+// 拉到了但为空 = 未配置 provider，内容区换成指引文案。指令框值由 syncPresetView 回填，
+// 这里只同步开关/副标题/chips，避免输入中重置光标 ———
+let aiProviders = null;
+
+function syncDigestView() {
+  const digest = presetState.digest;
+  $('#digest-on').checked = digest.on;
+  $('#digest-sub').textContent = digestSubLabel(presetState);
+  $('#digest-body').classList.toggle('hidden', !digest.on);
+  const noProvider = Array.isArray(aiProviders) && aiProviders.length === 0;
+  $('#digest-empty').classList.toggle('hidden', !noProvider);
+  $('#digest-seg').classList.toggle('hidden', noProvider);
+  // 拉取失败才有降级提示；「未配置」与「拉到了」两种情形都不需要
+  $('#digest-provider-hint').classList.toggle('hidden', aiProviders !== null || noProvider);
+  if (noProvider) return;
+  const seg = $('#digest-seg');
+  seg.replaceChildren();
+  for (const option of aiDigestProviderOptions(aiProviders)) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `ai-seg-opt${option.value === digest.provider ? ' on' : ''}`;
+    chip.textContent = option.label;
+    chip.addEventListener('click', () => {
+      presetState = setDigestProvider(presetState, option.value);
+      syncDigestView();
+    });
+    seg.appendChild(chip);
+  }
+}
+
+// 弹窗打开时异步拉 bridge provider 列表，不阻塞首屏；失败按 null 降级
+async function loadAiProviders() {
+  try {
+    const { providers } = await message({ type: 'LIST_AI_PROVIDERS' });
+    aiProviders = providers ?? [];
+  } catch {
+    aiProviders = null;
+  }
+  if (presetState?.pageKind !== 'pdf-tab') syncDigestView();
 }
 
 // ——— PDF 存云盘（#65，#59 变体 A）：识别到主 PDF 才出现相关 UI ———
@@ -342,6 +411,8 @@ async function inspect() {
   } else {
     presetState = initPopupPresets(settings, tab);
     syncPresetView();
+    // AI provider chips（#84）：异步拉 bridge 列表填充，失败降级仅「默认」+ 提示
+    loadAiProviders();
   }
   try {
     let status = await message({ type: 'STATUS' });
@@ -386,8 +457,11 @@ async function poll() {
   try {
     const { jobs } = await message({ type: 'GET_JOB', attemptId, pageUrl: currentTabUrl });
     // 空数组 = 该 attempt 属于别的页面（跨页恢复）：静默丢弃，不展示任何状态
-    if (!jobs || jobs.length === 0) { attemptId = null; recoveredAttempt = false; return; }
-    const view = describeAttemptView(jobs, { recovered: recoveredAttempt });
+    if (!jobs || jobs.length === 0) { attemptId = null; recoveredAttempt = false; digestSince = null; lastJobs = null; syncDigestTick(); return; }
+    lastJobs = jobs;
+    digestSince = reduceDigestSince(jobs, digestSince, Date.now());
+    syncDigestTick();
+    const view = describeAttemptView(jobs, { recovered: recoveredAttempt, digestWaitSeconds: digestWaitSeconds() });
     if (!view) return;
     // 凭据回传触发（#68）：两种页面形态共用 poll，awaiting_bytes 即开始/继续喂字节
     if (view.pdfAwaitingBytes) triggerPdfFeed(jobs);
@@ -435,6 +509,16 @@ $('#custom-body').addEventListener('input', (event) => {
   presetState = editCustomBody(presetState, event.target.value);
   refreshPreview('body');
   syncModifiedButtons();
+});
+// 临时 AI 摘要（#84）：开关与指令都是仅本次覆盖，不回写预设；指令输入只刷新副标题
+// 的「跟随预设/本次」两态，不动 chips 与输入框本身
+$('#digest-on').addEventListener('change', (event) => {
+  presetState = setDigestOn(presetState, event.target.checked);
+  syncDigestView();
+});
+$('#digest-instruction').addEventListener('input', (event) => {
+  presetState = editDigestInstruction(presetState, event.target.value);
+  $('#digest-sub').textContent = digestSubLabel(presetState);
 });
 $('#change').addEventListener('click', () => {
   if ($('#picker-panel').classList.contains('hidden')) openPicker();

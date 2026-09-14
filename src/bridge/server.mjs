@@ -122,6 +122,14 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
   // 分块暂存（#68）：staging 目录在 job 文件旁，executor 与分块端点共用同一实例
   const staging = new PdfChunkStaging({ dir: path.join(path.dirname(config.jobFile), 'staging') });
   const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? (name) => (name ? aiStore.readProvider(name) : aiStore.readDefault()) : async () => null });
+  // 摘要进度（#86）：executor 内存表合入 GET job 视图。只挂 clip job（进度由 clip 通道产生）；
+  // 无进行中摘要（非 digest job / 已终态）不带 digestProgress 字段
+  const jobViewWithProgress = (job) => {
+    const view = jobView(job);
+    if (!view || (job.kind ?? JOB_KIND.CLIP) !== JOB_KIND.CLIP) return view;
+    const digestProgress = executor.digestProgressOf(job.attemptId);
+    return digestProgress ? { ...view, digestProgress } : view;
+  };
   // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
   // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出。
   // sweep 是轻量本地操作，默认 60s 一次（#90，原 10min 间隔下死任务最长 10 分钟才被恢复，
@@ -251,8 +259,9 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         try {
           const startedAt = Date.now();
           // 不传显式 maxOutputTokens：走 merged.maxOutputTokens ?? 内置默认（2048）。
-          // 硬编码小预算会让 reasoning 模型在推理阶段耗尽 output tokens（incomplete/max_output_tokens）
-          const reply = await generateDigest({ config: merged, instruction: 'You are a connectivity probe.', content: 'Reply with: ok' });
+          // 硬编码小预算会让 reasoning 模型在推理阶段耗尽 output tokens（incomplete/max_output_tokens）。
+          // stream:false（#86）：测试连接保持非流式——探针要的是最小真实请求，不需要进度
+          const reply = await generateDigest({ config: merged, instruction: 'You are a connectivity probe.', content: 'Reply with: ok', stream: false });
           return send(response, 200, { ok: true, latencyMs: Date.now() - startedAt, reply: reply.slice(0, 100) }, origin);
         } catch (error) {
           return send(response, 200, { ok: false, code: error.code || 'AI_REQUEST_FAILED', message: aiErrorMessage(error) }, origin);
@@ -325,7 +334,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         const limit = query.get('limit') === null ? 20 : parsedLimit;
         // 任务列表给排查耗时用：新的在前，剥掉 snapshot 全文，只留标题与耗时字段
         const jobs = (await store.list()).reverse().slice(0, limit).map((job) => ({
-          ...jobView(job),
+          ...jobViewWithProgress(job),
           title: typeof job.snapshot?.title === 'string' ? job.snapshot.title : (job.title ?? null),
           timeline: job.timeline ?? [],
           totalMs: job.totalMs ?? null,
@@ -476,7 +485,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         // get(attemptId) 语义升为「一次尝试」（#60）：返回该 attempt 的全部 job，弹窗侧做聚合呈现
         const jobs = await store.get(match[1]);
         return jobs.length
-          ? send(response, 200, { ok: true, jobs: jobs.map(jobView) }, origin)
+          ? send(response, 200, { ok: true, jobs: jobs.map(jobViewWithProgress) }, origin)
           : send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
       }
 

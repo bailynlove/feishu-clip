@@ -40,7 +40,25 @@ function clipInDigest(job) {
     && !job.document;
 }
 
-export function describeJobView(job, { recovered = false } = {}) {
+// 摘要等待计时（#85）：digest 阶段状态条带「已等待 N 秒」。起算/复位归约——
+// popup 侧首次判别进入 digest 阶段记本地时间，离开即复位；仅 popup 开着时有意义，不持久化。
+// 输入 GET_JOB 的 jobs 数组；返回新的起算时间（ms），不在 digest 阶段为 null。
+export function reduceDigestSince(jobs, digestSince, now) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const clip = list.find((job) => (job.kind ?? 'clip') === 'clip') ?? null;
+  return clip && clipInDigest(clip) ? (digestSince ?? now) : null;
+}
+
+// digest 阶段进度文案：job 视图带 digestProgress（#86 流式）时优先相位/计数——
+// thinking（仅 reasoning delta）→「思考中」；writing →「已生成 N tokens」；
+// 字段缺失（旧 bridge）退回 #85 的等待秒数，秒数也没有则维持原样
+function digestPhaseText(waitSeconds, digestProgress = null) {
+  if (digestProgress?.phase === 'thinking') return 'AI 摘要思考中…';
+  if (digestProgress?.phase === 'writing') return `AI 摘要生成中 · 已生成 ${digestProgress.tokens ?? 0} tokens`;
+  return waitSeconds == null ? 'AI 摘要生成中…' : `AI 摘要生成中 · 已等待 ${waitSeconds} 秒`;
+}
+
+export function describeJobView(job, { recovered = false, digestWaitSeconds = null } = {}) {
   if (job.status === 'succeeded' || job.status === 'succeeded_with_warnings') {
     const warning = warningsText(job.warnings);
     if (warning) {
@@ -53,7 +71,7 @@ export function describeJobView(job, { recovered = false } = {}) {
   }
   return {
     kind: 'progress',
-    message: job.status === 'queued' ? '已提交，等待本地 Bridge 处理…' : clipInDigest(job) ? 'AI 摘要生成中…' : '正在创建飞书文档并处理图片…',
+    message: job.status === 'queued' ? '已提交，等待本地 Bridge 处理…' : clipInDigest(job) ? digestPhaseText(digestWaitSeconds, job.digestProgress) : '正在创建飞书文档并处理图片…',
     swapPrimary: false,
     documentUrl: null,
   };
@@ -74,25 +92,25 @@ function pdfPhase(pdf) {
   return 'PDF 上传中…';
 }
 
-function clipPhase(clip) {
+function clipPhase(clip, digestWaitSeconds = null) {
   if (!clip) return null;
   if (clipSucceeded(clip)) return '文档 ✓';
   if (TERMINAL_STATUSES.has(clip.status)) return '文档失败';
-  if (clip.status !== 'queued' && clipInDigest(clip)) return 'AI 摘要生成中…';
+  if (clip.status !== 'queued' && clipInDigest(clip)) return digestPhaseText(digestWaitSeconds, clip.digestProgress);
   return '文档保存中…';
 }
 
 // 返回 { kind, message, swapPrimary, documentUrl, pdfUrl, pdfRetry, pdfAwaitingBytes }；jobs 为空返回 null。
 // pdfAwaitingBytes（#68）：pdf job 在 awaiting_bytes 时为 true，弹窗据此触发凭据回传。
 // 单 clip job（未开 PDF 的剪藏）与旧 describeJobView 行为完全一致
-export function describeAttemptView(jobs, { recovered = false } = {}) {
+export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds = null } = {}) {
   const list = Array.isArray(jobs) ? jobs : [];
   const clip = list.find((job) => (job.kind ?? 'clip') === 'clip') ?? null;
   const pdf = list.find((job) => job.kind === 'pdf') ?? null;
   if (!clip && !pdf) return null;
   const pdfAwaitingBytes = pdf?.status === 'awaiting_bytes';
   if (!pdf) {
-    const view = describeJobView(clip, { recovered });
+    const view = describeJobView(clip, { recovered, digestWaitSeconds });
     return { ...view, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes: false };
   }
 
@@ -132,7 +150,7 @@ export function describeAttemptView(jobs, { recovered = false } = {}) {
     return { kind: 'progress', message: 'PDF 上传中…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
   }
   // 运行中：单条进度 + 阶段文案轮替
-  return { kind: 'progress', message: `${clipPhase(clip)} · ${pdfPhase(pdf)}`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
+  return { kind: 'progress', message: `${clipPhase(clip, digestWaitSeconds)} · ${pdfPhase(pdf)}`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
 }
 
 // ——— PDF 存云盘会话开关（#65）：识别结果与会话开关都是仅本次状态，不回写预设 ———
@@ -220,6 +238,41 @@ export function initPdfTabState({ presets, defaultPresetId } = {}, pdfTab) {
   };
 }
 
+// ——— 临时 AI 摘要（#84，变体 B「开关即折叠」）：会话覆盖态 { on, provider, instruction,
+// overridden }。初值由当前预设 digest 配置派生且 overridden=false；用户改任一字段即
+// overridden=true；切换预设重置为跟随（applyPresetParams 统一派生）。指令初值恒为空串——
+// 留空语义 = 用预设/全局指令，与提交时的回落口径一致 ———
+
+// 预设 digest → 会话初值；provider 空串 = 默认 provider（chips 上显示「默认」）
+function sessionDigestFromPreset(preset) {
+  const digest = resolveDigest(preset);
+  return { on: digest?.enabled === true, provider: digest?.provider ?? '', instruction: '', overridden: false };
+}
+
+// pdf-tab 形态（#67）不带 digest 字段，防御性从预设派生
+function sessionDigest(state) {
+  return state.digest ?? sessionDigestFromPreset(currentPreset(state));
+}
+
+export function setDigestOn(state, on) {
+  return { ...state, digest: { ...sessionDigest(state), on: Boolean(on), overridden: true } };
+}
+
+export function setDigestProvider(state, provider) {
+  return { ...state, digest: { ...sessionDigest(state), provider: String(provider ?? ''), overridden: true } };
+}
+
+export function editDigestInstruction(state, value) {
+  return { ...state, digest: { ...sessionDigest(state), instruction: String(value ?? ''), overridden: true } };
+}
+
+// 子卡副标题：未覆盖「跟随预设：开 · deepseek / 关」；覆盖后「本次：…」
+export function digestSubLabel(state) {
+  const digest = sessionDigest(state);
+  const summary = digest.on ? `开 · ${digest.provider || '默认'}` : '关';
+  return digest.overridden ? `本次：${summary}` : `跟随预设：${summary}`;
+}
+
 // ——— 预设选择与可编辑标题（#36）：纯函数，state 只携带数据，DOM 同步由 popup.js 负责 ———
 
 // 标题模板上下文只需 tab 信息 + 当前时间；content 在标题模板里无意义，不为此跑 extractor
@@ -254,6 +307,8 @@ function applyPresetParams(state) {
     // 自定义正文框预填所选预设的 bodyTemplate：切预设即应用新预设模板，
     // 清除上一次的一次性修改（与目标/图片的切预设语义一致）
     customBody: preset.bodyTemplate ?? '',
+    // 临时 AI 摘要（#84）：切预设即恢复跟随新预设的 digest 配置，清除「本次」覆盖
+    digest: sessionDigestFromPreset(preset),
   };
 }
 
@@ -461,16 +516,19 @@ export function previewBody(state, snapshot) {
 // （意为「此处将生成摘要」），保持 预览 === 保存内容 的不变量；最终替换发生在 bridge 侧
 export function composeClip(state, snapshot) {
   const title = sanitizeClipTitle(finalTitle(state)) ?? (typeof snapshot?.title === 'string' ? snapshot.title : '');
-  const digestEnabled = resolveDigest(currentPreset(state))?.enabled === true;
+  // {{digest}} 存活与否跟随会话开关（#84）：用户本次打开/关掉的覆盖与提交载荷同口径
+  const digestEnabled = sessionDigest(state).on;
   return { title, body: renderBody(state.customBody, buildContext({ ...snapshot, title }, { digestEnabled })) };
 }
 
-// 弹窗 CLIP 消息携带的 AI 摘要字段（#75）：预设开关 + 预设级指令原值（空串 = 用全局）；
-// provider（#78）：预设选用的 provider 名原值（空串 = 默认 provider）。
-// 全局指令与内置默认的回落在 background 解析，弹窗不读全局设置
+// 弹窗 CLIP 消息携带的 AI 摘要字段（#75）：开关 + 指令原值（空串 = 回落全局）+ provider 名
+// （空串 = 默认 provider）。#84 起取会话覆盖后的有效值：临时指令留空（含纯空白）则回落
+// 预设级指令，预设也没有则空串——全局指令与内置默认的回落在 background 解析，弹窗不读全局设置
 export function clipDigest(state) {
-  const digest = resolveDigest(currentPreset(state));
-  return { digestEnabled: digest?.enabled === true, digestInstruction: digest?.instruction ?? '', digestProvider: digest?.provider ?? '' };
+  const digest = sessionDigest(state);
+  const presetInstruction = resolveDigest(currentPreset(state))?.instruction ?? '';
+  const instruction = digest.instruction.trim() !== '' ? digest.instruction : presetInstruction;
+  return { digestEnabled: digest.on, digestInstruction: instruction, digestProvider: digest.provider };
 }
 
 // 导出文件名：渲染标题做文件系统安全清洗，空则回退 clip
