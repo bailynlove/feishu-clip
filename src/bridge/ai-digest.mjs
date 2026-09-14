@@ -96,6 +96,10 @@ const REQUEST_BUILDERS = {
           : content,
         store: false,
         max_output_tokens: maxOutputTokens,
+        // reasoning 三态（#96）：开 → effort medium；关 → effort low（OpenAI 文档另有
+        // none/minimal 但仅部分模型系列支持，无法运行时验证，关用保守的 low）；
+        // 默认（未配置）不发 reasoning 参数，跟随服务端默认
+        ...(config.reasoning ? { reasoning: { effort: config.reasoning === 'on' ? 'medium' : 'low' } } : {}),
         ...(stream ? { stream: true } : {}),
       },
     };
@@ -119,6 +123,10 @@ const REQUEST_BUILDERS = {
           : { role: 'user', content },
       ],
       max_completion_tokens: maxOutputTokens,
+      // reasoning 三态（#96）：GLM/DeepSeek 惯例 thinking.type。chat-completions 无法静态区分
+      // GLM 与 OpenAI 兼容端点（后者用 reasoning_effort）——本项目用户实际在用 GLM，取 GLM 惯例；
+      // 接 OpenAI 兼容端点的用户请保持默认（不发参数），不走 reasoning_effort
+      ...(config.reasoning ? { thinking: { type: config.reasoning === 'on' ? 'enabled' : 'disabled' } } : {}),
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
     },
   }),
@@ -143,6 +151,10 @@ const REQUEST_BUILDERS = {
             ]
             : content,
         }],
+        // reasoning 三态（#96）：开 → 扩展思考 enabled + budget（Anthropic 要求 budget_tokens
+        // 严格小于 max_tokens，故按当前 maxOutputTokens 收敛，上限 8192；maxOutputTokens ≤1024
+        // 时 provider 会拒绝，交给既有错误通道呈现）；关/默认 → 省略 thinking 字段
+        ...(config.reasoning === 'on' ? { thinking: { type: 'enabled', budget_tokens: Math.min(8192, maxOutputTokens - 1) } } : {}),
         ...(stream ? { stream: true } : {}),
       },
     };
@@ -247,11 +259,13 @@ async function readSse(response, onEvent) {
 }
 
 // 流式状态机：每个 delta 调 onProgress({ phase, tokens })（executor 纯内存赋值，禁 I/O）。
-// phase：reasoning delta → 'thinking'，正文 delta → 'writing'；tokens 是当前相位的近似累计。
-// 终止帧带 provider usage 时校准最终计数（responses: response.completed 的 usage.output_tokens；
-// chat-completions: 末帧 usage.completion_tokens；messages: message_delta 的 usage.output_tokens）
+// phase：reasoning delta → 'thinking'，正文 delta → 'writing'；tokens 是当前相位的近似累计
+// （thinking 相位也计数，#97）。终止帧带 provider usage 时校准最终计数（responses:
+// response.completed 的 usage.output_tokens；chat-completions: 末帧 usage.completion_tokens；
+// messages: message_delta 的 usage.output_tokens）；usage 带 reasoning/thinking 字段时
+// 另发一帧思考校准（先于正文校准），缺省保留近似值不发帧
 function makeStreamConsumer(apiType, onProgress) {
-  const state = { text: '', tokens: 0, reasoningTokens: 0, phase: 'thinking', usageTokens: null, terminal: null, sawTextBlock: false };
+  const state = { text: '', tokens: 0, reasoningTokens: 0, phase: 'thinking', usageTokens: null, usageReasoningTokens: null, terminal: null, sawTextBlock: false };
   const emit = () => onProgress?.({ phase: state.phase, tokens: state.phase === 'thinking' ? state.reasoningTokens : state.tokens });
   const writeText = (delta) => { state.phase = 'writing'; state.text += delta; state.tokens += approxTokens(delta); emit(); };
   const writeReasoning = (delta) => { state.phase = 'thinking'; state.reasoningTokens += approxTokens(delta); emit(); };
@@ -268,6 +282,9 @@ function makeStreamConsumer(apiType, onProgress) {
       else if (type === 'response.completed' || type === 'response.incomplete' || type === 'response.failed') {
         state.terminal = data.response ?? null;
         if (Number.isFinite(data.response?.usage?.output_tokens)) state.usageTokens = data.response.usage.output_tokens;
+        // reasoning_tokens 细分（#97）：OpenAI 放在 output_tokens_details 里
+        const reasoningTokens = data.response?.usage?.output_tokens_details?.reasoning_tokens;
+        if (Number.isFinite(reasoningTokens)) state.usageReasoningTokens = reasoningTokens;
       } else if (type === 'error') streamError(data);
       return;
     }
@@ -278,6 +295,9 @@ function makeStreamConsumer(apiType, onProgress) {
       // reasoning_content 是 GLM/DeepSeek 惯例的推理 delta 字段
       if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) writeReasoning(delta.reasoning_content);
       if (Number.isFinite(data?.usage?.completion_tokens)) state.usageTokens = data.usage.completion_tokens;
+      // reasoning_tokens 细分（#97）：GLM/OpenAI 兼容端点放在 completion_tokens_details 里
+      const reasoningTokens = data?.usage?.completion_tokens_details?.reasoning_tokens;
+      if (Number.isFinite(reasoningTokens)) state.usageReasoningTokens = reasoningTokens;
       if (type === 'error') streamError(data);
       return;
     }
@@ -290,8 +310,10 @@ function makeStreamConsumer(apiType, onProgress) {
       writeText(data.delta.text);
     } else if (type === 'content_block_delta' && data?.delta?.type === 'thinking_delta' && typeof data.delta.thinking === 'string') {
       writeReasoning(data.delta.thinking);
-    } else if (type === 'message_delta' && Number.isFinite(data?.usage?.output_tokens)) {
-      state.usageTokens = data.usage.output_tokens;
+    } else if (type === 'message_delta') {
+      if (Number.isFinite(data?.usage?.output_tokens)) state.usageTokens = data.usage.output_tokens;
+      // 思考计数细分（#97）：标准 Anthropic usage 无 thinking 字段；部分网关附 thinking_tokens，容忍读取
+      if (Number.isFinite(data?.usage?.thinking_tokens)) state.usageReasoningTokens = data.usage.thinking_tokens;
     } else if (type === 'error') {
       streamError(data);
     }
@@ -300,10 +322,12 @@ function makeStreamConsumer(apiType, onProgress) {
   // 终止口径与非流式等价：responses 有终止帧时以帧内 response 对象为准（status 是
   // incomplete/failed 时 extractResponsesText 按既有语义抛 AI_REQUEST_FAILED）；
   // 无终止帧（代理截断事件流）回落 delta 累计文本；空文本与非流式同一句报错。
-  // 返回前用 provider usage 校准最终计数（usage 缺失时保留近似值）
+  // 返回前用 provider usage 校准最终计数：思考计数优先取 reasoning/thinking 细分字段（#97），
+  // 正文照旧取 output/completion tokens；字段缺失保留近似值（不发校准帧）
   const finalize = () => {
     const text = state.terminal ? extractResponsesText(state.terminal) : state.text;
     if (!text) throw aiError('AI_REQUEST_FAILED', 'AI 响应中没有文本输出');
+    if (Number.isFinite(state.usageReasoningTokens)) onProgress?.({ phase: 'thinking', tokens: state.usageReasoningTokens });
     if (Number.isFinite(state.usageTokens)) onProgress?.({ phase: 'writing', tokens: state.usageTokens });
     return text;
   };
@@ -441,6 +465,20 @@ export function applyDigest(markdown, digestText) {
   return body;
 }
 
+// applyDigestLink（#98）：subdoc 模式下 {{digest}} 原位渲染为子文档 markdown 链接；
+// 无占位符原样返回——默认布局不再注入 # Digest / # RAW content 两节，导航靠父文档顶部子页面列表块。
+// link 为 null（子文档不可用）时占位符置空
+export function applyDigestLink(markdown, link) {
+  const body = String(markdown ?? '');
+  if (!/\{\{\s*digest\s*\}\}/.test(body)) return body;
+  let text = '';
+  if (link && link.url) {
+    const title = String(link.title ?? 'Digest').replace(/[[\]]/g, '\\$&').replace(/\s*\n\s*/g, ' ');
+    text = `[${title}](${link.url})`;
+  }
+  return body.replace(/\{\{\s*digest\s*\}\}/g, text);
+}
+
 // ——— 配置校验（server 把 TypeError 按 code 翻译成 400，与 normalizePdfSource 同一约定） ———
 
 const bad = (code, message) => Object.assign(new TypeError(message), { code });
@@ -512,6 +550,16 @@ function normalizeTimeoutMs(value) {
   return value;
 }
 
+// reasoning 三态（#96）：'on' / 'off'，省略/null/空串 = 默认（不发参数，跟随服务端默认）。
+// 非法值报错不静默丢弃（与 headers 等高级项同一约定）
+function normalizeReasoning(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value !== 'on' && value !== 'off') {
+    throw bad('AI_REASONING_INVALID', 'reasoning 必须是 on / off（留空 = 跟随服务端默认）');
+  }
+  return value;
+}
+
 export function normalizeAiConfigInput(body, { requireKey = false } = {}) {
   if (!body || typeof body !== 'object') throw bad('AI_CONFIG_INVALID', 'AI 配置必须是对象');
   if (!AI_API_TYPES.includes(body.apiType)) throw bad('AI_TYPE_INVALID', 'apiType 必须是 responses / chat-completions / messages');
@@ -528,9 +576,11 @@ export function normalizeAiConfigInput(body, { requireKey = false } = {}) {
   const headers = normalizeHeaders(body.headers);
   const maxOutputTokens = normalizeMaxOutputTokens(body.maxOutputTokens);
   const timeoutMs = normalizeTimeoutMs(body.timeoutMs);
+  const reasoning = normalizeReasoning(body.reasoning);
   if (headers) config.headers = headers;
   if (maxOutputTokens) config.maxOutputTokens = maxOutputTokens;
   if (timeoutMs) config.timeoutMs = timeoutMs;
+  if (reasoning) config.reasoning = reasoning;
   return config;
 }
 
@@ -552,19 +602,22 @@ export function mergeAiTestConfig(overrides = {}, saved = null) {
   const headers = normalizeHeaders(overrides.headers) ?? saved?.headers;
   const maxOutputTokens = normalizeMaxOutputTokens(overrides.maxOutputTokens) ?? saved?.maxOutputTokens;
   const timeoutMs = normalizeTimeoutMs(overrides.timeoutMs) ?? saved?.timeoutMs;
+  const reasoning = normalizeReasoning(overrides.reasoning) ?? saved?.reasoning;
   if (headers) merged.headers = headers;
   if (maxOutputTokens) merged.maxOutputTokens = maxOutputTokens;
   if (timeoutMs) merged.timeoutMs = timeoutMs;
+  if (reasoning) merged.reasoning = reasoning;
   return merged;
 }
 
 // 端点出参脱敏：绝不回显 key，只回 hasKey（按实存 key 推导，不写死）；
-// headers/maxOutputTokens/timeoutMs 非机密，随配置回显供设置页回填
+// headers/maxOutputTokens/timeoutMs/reasoning 非机密，随配置回显供设置页回填
 export function sanitizeAiConfig(config) {
   const safe = { apiType: config.apiType, baseUrl: config.baseUrl, model: config.model, hasKey: Boolean(config.apiKey) };
   if (config.headers) safe.headers = config.headers;
   if (config.maxOutputTokens) safe.maxOutputTokens = config.maxOutputTokens;
   if (config.timeoutMs) safe.timeoutMs = config.timeoutMs;
+  if (config.reasoning) safe.reasoning = config.reasoning;
   return safe;
 }
 

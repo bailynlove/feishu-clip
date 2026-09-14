@@ -167,6 +167,8 @@ export class PersistentJobStore {
   #createJobId;
   #leaseMs;
   #jobTtlMs;
+  // awaiting_bytes 独立短 TTL：回传断在扩展侧（CORS/网络）时 job 不该挂到 job TTL（24h）才死
+  #awaitingBytesTtlMs;
   #tail = Promise.resolve();
 
   constructor({
@@ -175,6 +177,7 @@ export class PersistentJobStore {
     createJobId = () => randomUUID(),
     leaseMs = 60_000,
     jobTtlMs = 24 * 60 * 60 * 1_000,
+    awaitingBytesTtlMs = null,
   }) {
     if (!filePath) throw new TypeError('filePath is required');
     this.#filePath = filePath;
@@ -182,6 +185,7 @@ export class PersistentJobStore {
     this.#createJobId = createJobId;
     this.#leaseMs = leaseMs;
     this.#jobTtlMs = jobTtlMs;
+    this.#awaitingBytesTtlMs = awaitingBytesTtlMs;
   }
 
   async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null, digest = null }) {
@@ -283,6 +287,9 @@ export class PersistentJobStore {
         // 结果缓存——落库后重跑（reconcile 重排/任何原因重入 #execute）都不再调 AI
         digest: digest ? structuredClone(digest) : null,
         digestText: null,
+        // 摘要子文档（#98）：subdoc 模式下建档后创建的 Digest 子文档 { documentId, nodeToken, url }；
+        // 落库后重跑直接复用，不再重复建子文档
+        digestDoc: null,
         // {{@file}} 附件（#79）：本次剪藏检出的 PDF，digest 阶段据此下载字节随摘要请求发出
         pdfSource: normalizedPdfSource ? structuredClone(normalizedPdfSource) : null,
         // PDF 云盘引用回填的幂等标记（#88）：pdf job 上传成功后把 PDF 插到本文档开头，
@@ -423,13 +430,33 @@ export class PersistentJobStore {
   }
 
   // AI 摘要结果缓存（#75）：worker 守卫仿 recordDocument，但不要求 createInFlight——
-  // digest 阶段在建档（beginCreate）之前运行
+  // inline 模式下 digest 阶段在建档（beginCreate）之前运行
   async recordDigest(attemptId, workerId, digestText) {
     if (typeof digestText !== 'string') throw new TypeError('digestText is required');
     return this.#mutate(async (data) => {
       const job = this.#findJob(data, attemptId);
       this.#assertActiveWorker(job, workerId);
       job.digestText = digestText;
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
+  // 摘要子文档落库（#98）：subdoc 模式建档后创建 Digest 子文档，落库供重跑复用；
+  // worker 守卫仿 recordDigest，不要求 createInFlight（subdoc 的 digest 阶段在建档之后运行）
+  async recordDigestDoc(attemptId, workerId, digestDoc) {
+    if (
+      !digestDoc || typeof digestDoc !== 'object' ||
+      typeof digestDoc.documentId !== 'string' || !digestDoc.documentId ||
+      typeof digestDoc.nodeToken !== 'string' || !digestDoc.nodeToken ||
+      typeof digestDoc.url !== 'string' || !digestDoc.url
+    ) {
+      throw new TypeError('digestDoc 需要 documentId/nodeToken/url 三个非空字符串字段');
+    }
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId);
+      this.#assertActiveWorker(job, workerId);
+      job.digestDoc = structuredClone(digestDoc);
       job.updatedAt = this.#now();
       return { result: structuredClone(job), changed: true };
     });
@@ -599,10 +626,13 @@ export class PersistentJobStore {
         }
 
         const stale = timestamp - job.updatedAt >= this.#jobTtlMs;
-        // awaiting_bytes 超龄（#68）：字节始终没喂齐，走 job TTL → expired；
-        // staging 残留由调用方（sweep）按返回的 expired 列表清理
-        if (job.status === JOB_STATUS.AWAITING_BYTES && stale) {
+        // awaiting_bytes 独立短 TTL（未配置时回落 job TTL）：字节始终没喂齐 → expired，
+        // 写明原因让 popup 呈现失败而非永远「凭据回传中…」；staging 残留由调用方（sweep）清理
+        const bytesStale = timestamp - job.updatedAt >= (this.#awaitingBytesTtlMs ?? this.#jobTtlMs);
+        if (job.status === JOB_STATUS.AWAITING_BYTES && bytesStale) {
           job.status = JOB_STATUS.EXPIRED;
+          // 中文文案是面向 popup 状态条的用户可读展示（相邻存量英文错误是日志向，分工不同）
+          job.error = '等待浏览器凭据回传超时，请重开弹窗重试';
           job.updatedAt = timestamp;
           expired.push(job.attemptId);
         } else if (job.status === JOB_STATUS.QUEUED && stale) {
@@ -686,6 +716,8 @@ export class PersistentJobStore {
           job.pdfSource ??= null;
           // 引用回填（#88）：存量 clip job 没有 pdfRefInserted，读取时补 false
           job.pdfRefInserted ??= false;
+          // 摘要子文档（#98）：存量 clip job 没有 digestDoc，读取时补 null
+          job.digestDoc ??= null;
         }
       }
       return data;

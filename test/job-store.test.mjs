@@ -704,6 +704,36 @@ test('awaiting_bytes 可取消；超龄走 job TTL → expired', async () => {
   }, { now: () => now, jobTtlMs: 10_000 });
 });
 
+// awaiting_bytes 独立短 TTL：回传链路断在扩展侧（如 CORS 拦截）时 job 不该挂到 job TTL（24h）才死，
+// 短 TTL 到点 expired 并写明原因，popup 据此呈现失败而非永远「凭据回传中…」
+test('awaiting_bytes 独立 TTL：到点 expired 且带凭据回传超时原因；未显式配置时回落 job TTL', async () => {
+  let now = 1_000;
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-feed-stuck', sourceUrl: 'https://example.test/c', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    now += 4_999;
+    const early = await store.recoverExpired();
+    assert.deepEqual(early.expired, [], '未到 awaitingBytesTtlMs 不收');
+    now += 2;
+    const recovered = await store.recoverExpired();
+    assert.deepEqual(recovered.expired, ['attempt-feed-stuck'], 'awaiting_bytes 走独立短 TTL');
+    const job = await store.get('attempt-feed-stuck', 'pdf');
+    assert.equal(job.status, 'expired');
+    assert.match(job.error, /凭据回传超时/, 'expired 需带用户可读的超时原因');
+  }, { now: () => now, jobTtlMs: 60_000, awaitingBytesTtlMs: 5_000 });
+
+  // 回归：未配 awaitingBytesTtlMs 时行为与现状一致（回落 jobTtlMs）
+  now = 1_000;
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-legacy', sourceUrl: 'https://example.test/d', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    now += 5_001;
+    const early = await store.recoverExpired();
+    assert.deepEqual(early.expired, [], '缺省不按短 TTL 收');
+    now += 5_000;
+    const recovered = await store.recoverExpired();
+    assert.deepEqual(recovered.expired, ['attempt-legacy'], '回落 jobTtlMs');
+  }, { now: () => now, jobTtlMs: 10_000 });
+});
+
 // ——— AI 摘要（#75）：digest 请求随提交落库；digestText 经 recordDigest 缓存 ———
 
 test('clip job 的 digest 字段随提交落库，存量 job 读取补 null', async () => {
@@ -730,6 +760,45 @@ test('clip job 的 digest 字段随提交落库，存量 job 读取补 null', as
     const legacy = await store.get('attempt-1', 'clip');
     assert.equal(legacy.digest, null);
     assert.equal(legacy.digestText, null);
+  });
+});
+
+// ——— 摘要子文档（#98）：digestDoc 随 subdoc 建档落库，重跑复用同一子文档 ———
+
+test('clip job 新增 digestDoc 字段：提交落 null，存量 job 读取补 null', async () => {
+  await withStore(async ({ store, filePath }) => {
+    const submitted = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article' });
+    assert.equal(submitted.job.digestDoc, null, '提交时 digestDoc 落 null');
+
+    const data = JSON.parse(await readFile(filePath, 'utf8'));
+    for (const job of data.jobs) delete job.digestDoc;
+    await writeFile(filePath, JSON.stringify(data));
+    assert.equal((await store.get('attempt-1', 'clip')).digestDoc, null, '存量 job 读取补 null');
+  });
+});
+
+test('recordDigestDoc 落库摘要子文档（documentId/nodeToken/url）：worker 守卫仿 recordDigest', async () => {
+  await withStore(async ({ store, filePath }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', digest: { enabled: true, instruction: '总结', mode: 'subdoc' } });
+    const digestDoc = { documentId: 'doc-digest', nodeToken: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest' };
+
+    // 非 running / 非活跃 worker 不得写
+    await assert.rejects(() => store.recordDigestDoc('attempt-1', 'worker-a', digestDoc), /active worker/);
+    await store.claim('attempt-1', 'worker-a');
+    await assert.rejects(() => store.recordDigestDoc('attempt-1', 'worker-b', digestDoc), /active worker/);
+    // 子文档在建档阶段建成即落库：无 beginCreate 也能写（与 recordDigest 同一约定）
+    const recorded = await store.recordDigestDoc('attempt-1', 'worker-a', digestDoc);
+    assert.deepEqual(recorded.digestDoc, digestDoc);
+    assert.equal(recorded.status, 'running', 'recordDigestDoc 不动状态机');
+
+    // 三个字段缺一拒绝
+    await assert.rejects(() => store.recordDigestDoc('attempt-1', 'worker-a', { documentId: 'd', url: 'u' }), /nodeToken/);
+
+    // 持久化往返 + 重启后可读（重跑据此复用同一子文档，同名子文档不堆积）
+    const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+    assert.deepEqual(persisted.jobs[0].digestDoc, digestDoc);
+    const reloaded = new PersistentJobStore({ filePath });
+    assert.deepEqual((await reloaded.get('attempt-1', 'clip')).digestDoc, digestDoc);
   });
 });
 

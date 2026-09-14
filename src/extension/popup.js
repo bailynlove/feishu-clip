@@ -382,6 +382,9 @@ async function savePdfTab() {
     });
     attemptId = result.pdfJob?.attemptId ?? attemptId;
     recoveredAttempt = false;
+    // 新 attempt 复位回传触发器与粘滞错误（同 CLIP 主流程）
+    pdfFeedStarted = false;
+    pdfFeedError = null;
     poll();
   } catch (error) {
     show(error.message, 'error');
@@ -440,8 +443,11 @@ async function inspect() {
 
 // 凭据回传（#68）：pdf job 进 awaiting_bytes 即经 SW 持凭据抓取并分块回传。
 // 每个弹窗会话只触发一次（SW 侧另有 in-flight 去重）；失败后 job 留在 awaiting_bytes，
-// 重开弹窗可重试——bridge 位图保证不重传已确认块
+// 重开弹窗可重试——bridge 位图保证不重传已确认块。
+// pdfFeedError：回传失败须粘滞呈现——poll 每轮覆盖状态条，瞬时 toast 会被立即刷掉
+//（MDPI 事故：CORS 拒绝后用户只见「凭据回传中…」假象），故随进度态持续展示直到 job 离开 awaiting_bytes
 let pdfFeedStarted = false;
+let pdfFeedError = null;
 function triggerPdfFeed(jobs) {
   if (pdfFeedStarted) return;
   const pdfJob = jobs.find((job) => job.kind === 'pdf');
@@ -449,7 +455,7 @@ function triggerPdfFeed(jobs) {
   if (!pdfJob || !pdfUrl) return;
   pdfFeedStarted = true;
   message({ type: 'FEED_PDF_BYTES', attemptId, pdfUrl, name: pdfJob.pdfSource?.name ?? presetState?.pdf?.name ?? null })
-    .catch((error) => show(`PDF 凭据回传失败：${error.message}。重开弹窗可重试。`, 'error'));
+    .catch((error) => { pdfFeedError = error.message; show(`PDF 凭据回传失败：${error.message}。重开弹窗可重试。`, 'error'); });
 }
 
 async function poll() {
@@ -465,6 +471,7 @@ async function poll() {
     if (!view) return;
     // 凭据回传触发（#68）：两种页面形态共用 poll，awaiting_bytes 即开始/继续喂字节
     if (view.pdfAwaitingBytes) triggerPdfFeed(jobs);
+    else pdfFeedError = null; // job 离开 awaiting_bytes（已喂齐/超时/失败）即清除粘滞错误
     // PDF 标签页形态（#67）：view 落到单面板主按钮/状态条，不触碰网页形态的 CTA 区
     if (presetState.pageKind === 'pdf-tab') {
       applyPdfTabView(view);
@@ -486,7 +493,8 @@ async function poll() {
       if (view.pdfRetry) $('#retry-pdf').classList.remove('hidden');
       recoveredAttempt = false;
     } else {
-      show(view.message);
+      // 回传失败粘滞呈现（pdfFeedError）：错误优先于轮替进度文案，轮询不停以便恢复后自愈
+      show(view.pdfAwaitingBytes && pdfFeedError ? `PDF 凭据回传失败：${pdfFeedError}。重开弹窗可重试。（${view.message}）` : view.message);
       pollTimer = setTimeout(poll, 900);
     }
   } catch (error) { show(error.message, 'error'); }
@@ -645,6 +653,9 @@ async function clipToFeishu() {
     });
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
+    // 新 attempt 可能带新 pdf job：回传触发器与粘滞错误随 attempt 复位
+    pdfFeedStarted = false;
+    pdfFeedError = null;
     $('#open').classList.add('hidden'); $('#open-pdf').classList.add('hidden'); $('#retry-pdf').classList.add('hidden');
     setSaveVisible(true);
     poll();

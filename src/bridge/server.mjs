@@ -115,7 +115,7 @@ function larkQueryError(error, resource = '知识库') {
 
 export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console, downloadPdf, aiConfigStore }) {
   const pairing = new PairingStore(config.pairingFile);
-  const store = new PersistentJobStore({ filePath: config.jobFile, jobTtlMs: config.jobTtlMs });
+  const store = new PersistentJobStore({ filePath: config.jobFile, jobTtlMs: config.jobTtlMs, awaitingBytesTtlMs: config.awaitingBytesTtlMs ?? 10 * 60 * 1_000 });
   // AI 摘要配置（#75）：ai.json store 可注入（测试可替）；bridge.json 缺 aiConfigFile 时
   // 端点按未配置处理（GET 返回 config:null，POST/test 400 AI_NOT_CONFIGURED）
   const aiStore = aiConfigStore ?? (config.aiConfigFile ? new AiConfigStore(config.aiConfigFile) : null);
@@ -123,7 +123,9 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
   const staging = new PdfChunkStaging({ dir: path.join(path.dirname(config.jobFile), 'staging') });
   const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? (name) => (name ? aiStore.readProvider(name) : aiStore.readDefault()) : async () => null });
   // 摘要进度（#86）：executor 内存表合入 GET job 视图。只挂 clip job（进度由 clip 通道产生）；
-  // 无进行中摘要（非 digest job / 已终态）不带 digestProgress 字段
+  // 无进行中摘要（非 digest job / 已终态）不带 digestProgress 字段。
+  // subdoc 模式（#98）阶段开始先落 {phase:'waiting',tokens:0} 条目（等共享 PDF 字节等的占位相位），
+  // 调 AI 前翻 thinking；该条目同时是 popup 判别「subdoc 摘要进行中」的信号
   const jobViewWithProgress = (job) => {
     const view = jobView(job);
     if (!view || (job.kind ?? JOB_KIND.CLIP) !== JOB_KIND.CLIP) return view;
@@ -397,6 +399,14 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
             }
             digest.provider = provider.trim();
           }
+          // mode（#98）：inline 内联 / subdoc 子文档，缺省 subdoc，其他值拒绝
+          if (body.digest.mode !== undefined && body.digest.mode !== 'inline' && body.digest.mode !== 'subdoc') {
+            return send(response, 400, { ok: false, code: 'DIGEST_INVALID', message: 'digest.mode 只接受 inline / subdoc' }, origin);
+          }
+          digest.mode = body.digest.mode ?? 'subdoc';
+          // 子文档标题（#98）：extension 已渲染模板；去空白、截 180 字符，空白/缺省回落 Digest
+          const docTitle = typeof body.digest.docTitle === 'string' ? body.digest.docTitle.trim().slice(0, 180) : '';
+          digest.docTitle = docTitle || 'Digest';
         }
         const submitted = await store.submit({
           attemptId: body.attemptId,

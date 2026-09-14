@@ -723,16 +723,21 @@ test('AI provider 端点（#77）：列表/增改/改名/删除保护/key 不回
     const savedBody = await saved.json();
     assert.deepEqual(savedBody.provider, { name: '默认', apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-model', hasKey: true });
     assert.ok(!JSON.stringify(savedBody).includes('sk-good'), '保存响应不回显 key');
-    await post({ name: 'ds', apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-ds', apiKey: 'sk-good' });
+    // reasoning 三态（#96）：随 provider 落 ai.json、列表回显；非法值 400
+    await post({ name: 'ds', apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-ds', apiKey: 'sk-good', reasoning: 'off' });
+    assert.equal(JSON.parse(await readFile(aiFile, 'utf8')).providers.ds.reasoning, 'off', 'reasoning 落 ai.json');
+    assert.equal((await (await post({ name: 'ds', apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-ds', reasoning: 'maybe' })).json()).code, 'AI_REASONING_INVALID');
 
     const listed = await (await call('/v1/ai/providers', { headers: auth })).json();
     assert.deepEqual(listed.providers.map((p) => p.name), ['默认', 'ds'], '列表默认在前');
+    assert.equal(listed.providers.find((p) => p.name === 'ds').reasoning, 'off', '列表回显 reasoning（设置页回填用）');
     assert.ok(!JSON.stringify(listed).includes('sk-good'), 'GET 不回显 key');
 
     // 后续保存省略 apiKey = 保留该 provider 已存 key
     const kept = await post({ name: 'ds', apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-ds-2' });
     assert.equal(kept.status, 200, '已有 key 时省略 apiKey 不再必填');
     assert.equal(JSON.parse(await readFile(aiFile, 'utf8')).providers.ds.apiKey, 'sk-good', '已存 key 保留');
+    assert.ok(!('reasoning' in JSON.parse(await readFile(aiFile, 'utf8')).providers.ds), '省略 reasoning = 清空（表单是事实源，与 headers 等高级项同语义）');
 
     // 改名：ds → deepseek，key 搬走；「默认」不可改名/删除；改名目标已存在/来源不存在 → 400
     const renamed = await post({ name: 'deepseek', renameFrom: 'ds', apiType: 'chat-completions', baseUrl: ai.baseUrl, model: 'fake-ds-2' });
@@ -817,6 +822,9 @@ test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction�
       { enabled: true, instruction: 'i', provider: 42 },
       { enabled: true, instruction: 'i', provider: '   ' },
       { enabled: true, instruction: 'i', provider: 'x'.repeat(65) },
+      // mode（#98）：只接受 inline / subdoc
+      { enabled: true, instruction: 'i', mode: 'weird' },
+      { enabled: true, instruction: 'i', mode: 42 },
     ].entries()) {
       const rejected = await submit(`8888888${index}-1111-4111-8111-111111111111`, digest);
       assert.equal(rejected.status, 400, `digest=${JSON.stringify(digest).slice(0, 60)} 应被拒绝`);
@@ -830,6 +838,10 @@ test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction�
     assert.equal((await readClipJob('80808080-1111-4111-8111-111111111111')).digest.instruction, longInstruction, '长指令原样落库');
     const valid = await submit('81818181-1111-4111-8111-111111111111', { enabled: true, instruction: '总结成三点' });
     assert.equal(valid.status, 202);
+    // inline 模式原样落库（#98：可还原）；docTitle 自定义值透传
+    const inline = await submit('82828282-1111-4111-8111-111111111112', { enabled: true, instruction: 'i', mode: 'inline', docTitle: '  我的摘要  ' });
+    assert.equal(inline.status, 202);
+    assert.deepEqual((await inline.json()).job.digest, { enabled: true, instruction: 'i', mode: 'inline', docTitle: '我的摘要' }, 'inline + 自定义 docTitle 落库（docTitle 去空白）');
     const off = await submit('82828282-1111-4111-8111-111111111111', { enabled: false });
     assert.equal(off.status, 202);
     // provider 指定但未配置任何 AI（本用例未挂 aiConfigStore）→ 悬空引用降级：warning 指明 provider 名
@@ -843,7 +855,7 @@ test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction�
       if (digestJob && !['queued', 'running'].includes(digestJob.status)) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.deepEqual(digestJob.digest, { enabled: true, instruction: '总结成三点' }, 'digest 随 job 落库');
+    assert.deepEqual(digestJob.digest, { enabled: true, instruction: '总结成三点', mode: 'subdoc', docTitle: 'Digest' }, 'digest 随 job 落库；mode 缺省 subdoc、docTitle 缺省 Digest（#98）');
     assert.equal(digestJob.status, 'succeeded_with_warnings', '未配置 AI 降级为部分成功');
     assert.ok(digestJob.warnings.some((warning) => warning.includes('AI 摘要生成失败：未配置 AI API')));
     assert.ok(digestJob.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'digest'), 'timeline 含 digest 阶段');
@@ -921,9 +933,9 @@ test('两套模板分选不同 provider（#78 验收）：摘要分别来自所�
         digest,
       }),
     });
-    const defaultJob = await submit('84848484-1111-4111-8111-111111111111', '主摘要页', { enabled: true, instruction: 'i' });
+    const defaultJob = await submit('84848484-1111-4111-8111-111111111111', '主摘要页', { enabled: true, instruction: 'i', mode: 'inline' });
     assert.equal(defaultJob.status, 202);
-    const dsJob = await submit('85858585-1111-4111-8111-111111111111', 'DS 摘要页', { enabled: true, instruction: 'i', provider: 'ds' });
+    const dsJob = await submit('85858585-1111-4111-8111-111111111111', 'DS 摘要页', { enabled: true, instruction: 'i', provider: 'ds', mode: 'inline' });
     assert.equal(dsJob.status, 202);
 
     const waitClip = async (id) => {

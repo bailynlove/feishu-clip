@@ -1,5 +1,5 @@
-import { ensurePresets, resolveDigestInstruction } from './presets.js';
-import { buildContext, renderBody, sanitizeClipTitle } from './templates.js';
+import { DEFAULT_DIGEST_DOC_TITLE, ensurePresets, resolveDigestInstruction } from './presets.js';
+import { buildContext, renderBody, renderTemplate, sanitizeClipTitle } from './templates.js';
 import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
 
@@ -118,7 +118,13 @@ function toBase64(bytes) {
 }
 
 async function openPdfStream(pdfUrl) {
-  const response = await fetch(pdfUrl, { credentials: 'include' });
+  let response;
+  try {
+    response = await fetch(pdfUrl, { credentials: 'include' });
+  } catch (error) {
+    // 跨域被 CORS 拦截/断网等都在此落地（manifest 已带全站 host 权限，CORS 不应再发生）
+    throw Object.assign(new Error(`源站请求失败：${error.message}`), { code: 'PDF_SOURCE_FETCH_FAILED' });
+  }
   if (response.status === 401 || response.status === 403) {
     throw Object.assign(new Error('源站仍要求登录，请先在源站登录后重试'), { code: 'PDF_SOURCE_AUTH' });
   }
@@ -280,6 +286,12 @@ async function handle(message) {
         // 上限 64 字符与 bridge 校验口径一致，超长截断
         const provider = typeof message.digestProvider === 'string' ? message.digestProvider.trim().slice(0, 64) : '';
         if (provider) digest.provider = provider;
+        // mode（#98）：inline 内联 / subdoc 子文档，非法值归一 subdoc（与 resolveDigest 同口径）
+        digest.mode = message.digestMode === 'inline' ? 'inline' : 'subdoc';
+        // 子文档标题（#98）：用标题覆盖后的快照上下文渲染模板，空白回落默认标题；
+        // inline 模式也照常计算透传（bridge 只在 subdoc 用），保持载荷口径单一
+        const template = typeof message.digestDocTitleTemplate === 'string' ? message.digestDocTitleTemplate : '';
+        digest.docTitle = renderTemplate(template, buildContext(snapshot)).trim() || DEFAULT_DIGEST_DOC_TITLE;
       }
       // 正文合成（#37，#40 起有效模板 = 弹窗自定义正文框内容）：与弹窗预览同调 renderBody；
       // ctx 在标题覆盖之后构建，正文模板看到的即最终标题

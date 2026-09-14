@@ -89,23 +89,24 @@ test('成功且无警告时现状文案不变（回归）', () => {
   assert.equal(describeJobView(succeededJob).message, '已保存到飞书。');
 });
 
-// digest 阶段在建档（beginCreate）之前运行：step 仍是 create_document 且 createInFlight 未置位，
-// job 视图已带这些字段（step/createInFlight/digest/digestText），弹窗据此区分「AI 摘要生成中…」
-test('digest 阶段进行中 → 进度文案「AI 摘要生成中…」；其余阶段文案不变', () => {
-  const digesting = { status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+// digest 阶段判定（#75 inline / #98 subdoc）：inline 在建档（beginCreate）之前运行——step 仍是
+// create_document 且 createInFlight 未置位、document 未建档、digestText 未落库；
+// subdoc（缺省）在建档后运行——document 已建档、digestProgress 条目存活即摘要进行中
+test('digest 阶段进行中 → 进度文案「AI 摘要生成中…」；其余阶段文案不变（inline 回归）', () => {
+  const digesting = { status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true, mode: 'inline' }, digestText: null };
   assert.equal(describeJobView(digesting).message, 'AI 摘要生成中…');
   const creating = { ...digesting, createInFlight: true };
   assert.equal(describeJobView(creating).message, '正在创建飞书文档并处理图片…', '建档进行中不误判成摘要阶段');
   const cached = { ...digesting, digestText: '摘要正文' };
   assert.equal(describeJobView(cached).message, '正在创建飞书文档并处理图片…', 'digestText 已缓存（重跑）即摘要阶段已结束');
   assert.equal(describeJobView({ status: 'running' }).message, '正在创建飞书文档并处理图片…', '未开摘要的剪藏行为不变');
-  const queued = { status: 'queued', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+  const queued = { status: 'queued', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true, mode: 'inline' }, digestText: null };
   assert.equal(describeJobView(queued).message, '已提交，等待本地 Bridge 处理…', '排队中优先显示排队文案');
 });
 
 // ——— #85：digest 阶段等待秒数（起算/复位归约 + 文案）———
 
-const digestingClip = { kind: 'clip', status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+const digestingClip = { kind: 'clip', status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true, mode: 'inline' }, digestText: null };
 
 test('#85 reduceDigestSince：进入 digest 起算、保持不重置、离开复位', () => {
   const t0 = 1_000_000;
@@ -157,6 +158,50 @@ test('#87 双 job 轮播文案同样支持相位/计数', () => {
   const writing = { ...digestingClip, digestProgress: { phase: 'writing', tokens: 800 } };
   assert.equal(describeAttemptView([writing, pdf], { digestWaitSeconds: 9 }).message, 'AI 摘要生成中 · 已生成 800 tokens · PDF 上传中…');
   assert.equal(describeAttemptView([digestingClip, pdf], { digestWaitSeconds: 9 }).message, 'AI 摘要生成中 · 已等待 9 秒 · PDF 上传中…', '缺失时轮播也退回等待秒数');
+});
+
+// ——— #97：thinking 相位带 token 计数（reasoning delta 也计数）———
+
+test('#97 thinking 相位文案带计数：tokens>0 显示「约 N tokens」，为 0 退回原文案', () => {
+  const counting = { ...digestingClip, digestProgress: { phase: 'thinking', tokens: 128 } };
+  assert.equal(describeJobView(counting).message, 'AI 摘要思考中 · 约 128 tokens');
+  assert.equal(describeJobView(counting, { digestWaitSeconds: 42 }).message, 'AI 摘要思考中 · 约 128 tokens', '计数优先于等待秒数（单行太挤，优先计数）');
+  const zero = { ...digestingClip, digestProgress: { phase: 'thinking', tokens: 0 } };
+  assert.equal(describeJobView(zero).message, 'AI 摘要思考中…', '代理不吐 reasoning delta（计数 0）退回原文案（回归）');
+  const pdf = { kind: 'pdf', status: 'running' };
+  assert.equal(describeAttemptView([counting, pdf]).message, 'AI 摘要思考中 · 约 128 tokens · PDF 上传中…', '双 job 轮播同样带计数');
+});
+
+// ——— #98：subdoc 子文档模式——摘要挪到建档之后运行，clipInDigest 改看「文档已建档 +
+// digestProgress 条目存活」（executor 在 digest 阶段开始建 waiting 条目、阶段结束即删）———
+
+test('#98 subdoc：文档已建档 + digestProgress 存活 = 摘要进行中；waiting 相位落回等待秒数', () => {
+  const subdocClip = { kind: 'clip', status: 'running', step: 'write_body', createInFlight: false, document: { documentId: 'd', url: 'u' }, digest: { enabled: true, mode: 'subdoc' }, digestText: null };
+  assert.equal(describeJobView({ ...subdocClip, document: null }).message, '正在创建飞书文档并处理图片…', 'subdoc 建档阶段（文档未建档）显示创建文案');
+  assert.equal(describeJobView(subdocClip).message, '正在创建飞书文档并处理图片…', '摘要阶段未开始（无 digestProgress）仍是创建文案');
+  const waiting = { ...subdocClip, digestProgress: { phase: 'waiting', tokens: 0 } };
+  assert.equal(describeJobView(waiting, { digestWaitSeconds: 7 }).message, 'AI 摘要生成中 · 已等待 7 秒', 'waiting 相位（等共享 PDF 字节等）落回等待秒数');
+  assert.equal(describeJobView(waiting).message, 'AI 摘要生成中…', '无秒数维持原文案');
+  const thinking = { ...subdocClip, digestProgress: { phase: 'thinking', tokens: 12 } };
+  assert.equal(describeJobView(thinking).message, 'AI 摘要思考中 · 约 12 tokens');
+  const writing = { ...subdocClip, digestProgress: { phase: 'writing', tokens: 300 } };
+  assert.equal(describeJobView(writing).message, 'AI 摘要生成中 · 已生成 300 tokens');
+  const done = { ...subdocClip, digestText: '缓存摘要', digestProgress: { phase: 'writing', tokens: 300 } };
+  assert.equal(describeJobView(done).message, '正在创建飞书文档并处理图片…', 'digestText 落库即摘要结束');
+  const pdf = { kind: 'pdf', status: 'running' };
+  assert.equal(describeAttemptView([writing, pdf]).message, 'AI 摘要生成中 · 已生成 300 tokens · PDF 上传中…', '双 job 轮播同样生效');
+});
+
+test('#98 reduceDigestSince：subdoc 模式按 digestProgress 条目起算/复位', () => {
+  const t0 = 1_000_000;
+  const subdocClip = { kind: 'clip', status: 'running', step: 'write_body', createInFlight: false, document: { documentId: 'd', url: 'u' }, digest: { enabled: true, mode: 'subdoc' }, digestText: null };
+  assert.equal(reduceDigestSince([subdocClip], null, t0), null, '无进度条目不起算（仍在建档）');
+  const digesting = { ...subdocClip, digestProgress: { phase: 'waiting', tokens: 0 } };
+  const since = reduceDigestSince([digesting], null, t0);
+  assert.equal(since, t0, '进入摘要阶段记起算时间');
+  assert.equal(reduceDigestSince([digesting], since, t0 + 5_000), t0, '阶段内不重置起点');
+  const { digestProgress: _dropped, ...settled } = digesting;
+  assert.equal(reduceDigestSince([settled], since, t0 + 9_000), null, '条目删除（阶段结束）即复位');
 });
 
 // ——— #36：预设选择与可编辑标题 ———
@@ -658,12 +703,12 @@ test('clipDigest carries the preset toggle, raw preset instruction and provider 
     { ...presets[1], digest: { enabled: true, instruction: '' } },
   ];
   let state = initPopupPresets({ presets: digestPresets, defaultPresetId: 'p1' }, tab, now);
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'ds' });
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'ds', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' });
   state = selectPreset(state, 'p2');
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '', digestProvider: '' }, '空串原样透传（= 用全局/默认），弹窗不读全局设置');
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '', digestProvider: '', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' }, '空串原样透传（= 用全局/默认），弹窗不读全局设置');
 
   const plain = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
-  assert.deepEqual(clipDigest(plain), { digestEnabled: false, digestInstruction: '', digestProvider: '' }, '预设未开开关');
+  assert.deepEqual(clipDigest(plain), { digestEnabled: false, digestInstruction: '', digestProvider: '', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' }, '预设未开开关');
 });
 
 // ——— #84：本次设置 · 临时 AI 摘要（变体 B「开关即折叠」）———
@@ -732,20 +777,42 @@ test('切换预设后 digest 恢复跟随新预设，覆盖被清除', () => {
 test('clipDigest 取覆盖后的有效值；临时指令留空回落预设指令，再回落空串（= 全局/内置）', () => {
   let state = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p1' }, tab, now);
   // 未覆盖：与 #75/#78 旧行为一致
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'deepseek' });
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'deepseek', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' });
   // 用户本次改 provider 与指令
   state = editDigestInstruction(setDigestProvider(state, 'kimi'), '临时指令');
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '临时指令', digestProvider: 'kimi' });
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '临时指令', digestProvider: 'kimi', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' });
   // 临时指令清空（含纯空白）→ 回落预设级指令，弹窗自己不带 instruction
   state = editDigestInstruction(state, '   ');
-  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'kimi' });
+  assert.deepEqual(clipDigest(state), { digestEnabled: true, digestInstruction: '预设指令', digestProvider: 'kimi', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' });
   // 本次关掉：预设开着也不生成
   state = setDigestOn(state, false);
   assert.equal(clipDigest(state).digestEnabled, false);
   // 预设没开、本次打开：预设无指令可回落 → 空串（background 继续回落全局 > 内置默认）
   let off = initPopupPresets({ presets: digestOnPresets, defaultPresetId: 'p2' }, tab, now);
   off = setDigestOn(off, true);
-  assert.deepEqual(clipDigest(off), { digestEnabled: true, digestInstruction: '', digestProvider: '' });
+  assert.deepEqual(clipDigest(off), { digestEnabled: true, digestInstruction: '', digestProvider: '', digestMode: 'subdoc', digestDocTitleTemplate: 'Digest' });
+});
+
+// mode/docTitleTemplate（#98）：弹窗临时摘要不暴露 mode——clipDigest 始终跟随预设，
+// 会话覆盖（开关/provider/指令）不影响这两个字段
+test('clipDigest 的 mode/docTitleTemplate 跟随预设，不受会话覆盖影响（#98）', () => {
+  const modePresets = [
+    { ...presets[0], digest: { enabled: true, instruction: '预设指令', mode: 'inline', docTitleTemplate: '摘要 · {{date}}' } },
+    { ...presets[1], digest: { enabled: true, instruction: '', mode: 'subdoc', docTitleTemplate: 'AI 笔记' } },
+  ];
+  let state = initPopupPresets({ presets: modePresets, defaultPresetId: 'p1' }, tab, now);
+  assert.equal(clipDigest(state).digestMode, 'inline', '预设选 inline 原样透传');
+  assert.equal(clipDigest(state).digestDocTitleTemplate, '摘要 · {{date}}');
+  state = editDigestInstruction(setDigestProvider(setDigestOn(state, true), 'kimi'), '临时指令');
+  assert.equal(clipDigest(state).digestMode, 'inline', '会话覆盖不改 mode');
+  assert.equal(clipDigest(state).digestDocTitleTemplate, '摘要 · {{date}}');
+  state = selectPreset(state, 'p2');
+  assert.equal(clipDigest(state).digestMode, 'subdoc');
+  assert.equal(clipDigest(state).digestDocTitleTemplate, 'AI 笔记');
+  // 存量预设 digest 无 mode 字段 → 读侧迁移为 subdoc
+  const legacy = initPopupPresets({ presets: [{ ...presets[0], digest: { enabled: true, instruction: 'x' } }], defaultPresetId: 'p1' }, tab, now);
+  assert.equal(clipDigest(legacy).digestMode, 'subdoc', '存量预设缺省读作 subdoc');
+  assert.equal(clipDigest(legacy).digestDocTitleTemplate, 'Digest', '缺省模板 = Digest');
 });
 
 test('composeClip 的 {{digest}} 字面量跟随会话开关而非预设开关（预览 === 保存内容）', () => {
@@ -851,7 +918,7 @@ test('describeAttemptView：运行中 → 单条进度 + 阶段文案', () => {
 });
 
 test('describeAttemptView：clip 在 digest 阶段 → 阶段文案轮替出「AI 摘要生成中…」', () => {
-  const clipDigesting = { kind: 'clip', status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+  const clipDigesting = { kind: 'clip', status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true, mode: 'inline' }, digestText: null };
   const view = describeAttemptView([clipDigesting, { kind: 'pdf', status: 'running' }]);
   assert.equal(view.kind, 'progress');
   assert.equal(view.message, 'AI 摘要生成中… · PDF 上传中…');
@@ -865,6 +932,18 @@ test('describeAttemptView：文档与 PDF 均成功但 clip 有警告 → warnin
   assert.equal(view.documentUrl, clipWarn.document.url);
   assert.equal(view.pdfUrl, pdfOk.document.url);
   assert.equal(view.swapPrimary, true);
+});
+
+test('describeAttemptView：文档已成（带警告）但 PDF 仍在途 → 进度文案带出警告，不再静默', () => {
+  // 真实事故：摘要因等不到 PDF 字节降级为纯文本，clip 警告在「PDF 凭据回传中…」期间完全不可见
+  const clipWarn = { kind: 'clip', status: 'succeeded_with_warnings', warnings: ['等待 PDF 字节回传超时，已按纯文本生成摘要'], document: { url: 'https://example.feishu.cn/wiki/d4' } };
+  const view = describeAttemptView([clipWarn, { kind: 'pdf', status: 'awaiting_bytes' }]);
+  assert.equal(view.kind, 'progress', 'PDF 未完成仍是进度态');
+  assert.match(view.message, /纯文本生成摘要/, '警告文本须随进度态呈现');
+  assert.match(view.message, /PDF 凭据回传中/, 'PDF 阶段文案保留');
+  // 无警告时维持原文案（回归）
+  const clean = describeAttemptView([clipOk, { kind: 'pdf', status: 'awaiting_bytes' }]);
+  assert.equal(clean.message, '文档 ✓ · PDF 凭据回传中…');
 });
 
 test('describeAttemptView：pdf-only 尝试防御性处理；空数组返回 null', () => {

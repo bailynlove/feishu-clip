@@ -45,6 +45,14 @@
     <p class="ps-desc">推理模型（gpt-5 系 / o 系等）推理过程也占用输出额度，出现 max_output_tokens 类报错时调大。</p>
     <label class="ps-field"><span class="ps-label">超时（秒，选填）</span><input id="ai-timeout" class="ps-input mono" inputmode="numeric" autocomplete="off" placeholder="180"></label>
     <p class="ps-desc">单次摘要请求的最长等待时间（5–1800 秒）。慢速推理模型思考耗时较长，出现超时警告时调大。</p>
+    <div class="ps-field"><span class="ps-label">推理（reasoning，选填）</span>
+      <select id="ai-reasoning" class="ps-input">
+        <option value="">默认（跟随服务端）</option>
+        <option value="on">开</option>
+        <option value="off">关</option>
+      </select>
+    </div>
+    <p class="ps-desc">控制推理模型的思考开关：默认不额外传参；「开」让模型先思考再作答（更慢更稳），「关」尽量跳过思考。具体参数随 API 类型映射（Responses 的 reasoning.effort / GLM 惯例的 thinking / Anthropic 的 thinking budget）。</p>
   </details>
   <label class="ps-field"><span class="ps-label">全局摘要指令</span><textarea id="ai-instruction" class="ps-input mono" rows="4"></textarea></label>
   <div class="ps-vars" data-field="ai-instruction" data-vars="@file"></div>
@@ -130,6 +138,14 @@
         <span class="ps-switch"></span>
       </button>
       <label class="ps-field hidden" id="f-digest-provider-row"><span class="ps-label">AI provider</span><select id="f-digest-provider" class="ps-input"></select><span class="ps-desc hidden" id="f-digest-provider-hint">未读取到 provider 列表，仅可选「默认」</span></label>
+      <div class="ps-field hidden" id="f-digest-mode-row"><span class="ps-label">摘要呈现方式</span>
+        <div class="ps-seg" id="f-digest-mode">
+          <button class="ps-seg-opt" data-value="subdoc" type="button">子文档</button>
+          <button class="ps-seg-opt" data-value="inline" type="button">内联</button>
+        </div>
+        <span class="ps-desc">子文档：摘要在建档后写入「Digest」子文档，正文 {{digest}} 渲染为子文档链接；内联：建档前生成，摘要直接写进正文。</span>
+      </div>
+      <label class="ps-field hidden" id="f-digest-doctitle-row"><span class="ps-label">摘要子文档标题</span><input id="f-digest-doctitle" class="ps-input mono" autocomplete="off" placeholder="Digest"><span class="ps-desc">支持 {{title}} 等模板变量；留空用默认标题 Digest。</span></label>
       <div class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea><div class="ps-vars" data-field="f-digest-instruction" data-vars="@file"></div><span class="ps-desc">{{@file}}：检出 PDF 时随请求一并发给 AI；无 PDF 时降级为纯文本摘要。</span><span class="ps-desc hidden" id="f-digest-file-hint">该预设未开「PDF 存云盘」，{{@file}} 没有 PDF 可附，摘要将降级为纯文本。</span></div>
     </div>
 

@@ -226,8 +226,8 @@ export function jobDisplayTitle(job) {
   }
 }
 
-// stage 的 name 是机器标识，展示用中文名（digest 阶段见 #75）
-const STAGE_LABELS = { create_document: '创建文档', images: '图片处理', pdf_download: '下载 PDF', digest: 'AI 摘要' };
+// stage 的 name 是机器标识，展示用中文名（digest 阶段见 #75；digest_doc 子文档阶段见 #98）
+const STAGE_LABELS = { create_document: '创建文档', images: '图片处理', pdf_download: '下载 PDF', digest: 'AI 摘要', digest_doc: '摘要子文档' };
 
 // 展开明细行：页面提取（扩展侧 clientTiming）+ bridge timeline 按原顺序平铺。
 // 每行 { label, value, indent, failed }；indent 用于缩进层级（stage 0 / image 1 / cli 2）。
@@ -324,8 +324,9 @@ export function aiTimeoutMsFromText(text) {
 // 表单草稿 → 保存/测试请求体：baseUrl 留空用类型默认值；apiKey 留空不放进 body
 // （bridge 语义：省略/空串 = 保留已存 key）；apiType 非法值归一为 responses。
 // 高级设置三项留空同样不进 body（bridge 回落已存/内置默认）；格式非法抛错由调用方展示。
+// reasoning（#96 三态）：下拉 value 即 'on'/'off'/''，只有开/关进 body，'' = 默认（不发参数）。
 // name/renameFrom（#77 多 provider）：name 为保存目标名；改名时 renameFrom 带原名
-export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText, timeoutText, name, renameFrom } = {}) {
+export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText, timeoutText, reasoning, name, renameFrom } = {}) {
   const type = AI_DEFAULT_BASE_URLS[apiType] ? apiType : 'responses';
   const payload = {
     apiType: type,
@@ -340,6 +341,7 @@ export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, 
   if (maxOutputTokens !== undefined) payload.maxOutputTokens = maxOutputTokens;
   const timeoutMs = aiTimeoutMsFromText(timeoutText);
   if (timeoutMs !== undefined) payload.timeoutMs = timeoutMs;
+  if (reasoning === 'on' || reasoning === 'off') payload.reasoning = reasoning;
   const providerName = String(name ?? '').trim();
   if (providerName) payload.name = providerName;
   if (renameFrom) payload.renameFrom = String(renameFrom).trim();

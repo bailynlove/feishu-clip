@@ -405,6 +405,15 @@ test('aiConfigPayload carries provider name and renameFrom when given', () => {
   assert.ok(!('name' in plain) && !('renameFrom' in plain), '省略时两键不进 body');
 });
 
+// reasoning 三态（#96）：下拉的 value 即 'on'/'off'/''（默认）；只有开/关才进 body，默认 = 不发参数
+test('aiConfigPayload carries reasoning 三态（#96）：on/off 进 body，默认/非法值不进', () => {
+  assert.equal(aiConfigPayload({ apiType: 'responses', model: 'm', reasoning: 'on' }).reasoning, 'on');
+  assert.equal(aiConfigPayload({ apiType: 'chat-completions', model: 'm', reasoning: 'off' }).reasoning, 'off');
+  for (const value of ['', undefined, 'default']) {
+    assert.ok(!('reasoning' in aiConfigPayload({ apiType: 'responses', model: 'm', reasoning: value })), `reasoning=${String(value)} 不进 body（默认 = 不发参数）`);
+  }
+});
+
 test('aiProviderByName / resolveAiProviderSelection：命中、被删回落「默认」、再回落第一个、空列表 null', () => {
   const providers = [
     { name: '默认', apiType: 'responses', hasKey: true },

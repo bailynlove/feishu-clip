@@ -11,7 +11,7 @@ import {
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
   COLLAPSIBLE_SECTIONS, DEFAULT_AI_PROVIDER_NAME, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, resolveAiProviderSelection, setSectionCollapsed,
 } from './options-state.js';
-import { createDriveFolder, resolveDigest, resolveImageMode, resolvePdfDrive, DEFAULT_DIGEST_INSTRUCTION } from './presets.js';
+import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -255,13 +255,21 @@ function syncEditor() {
   $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
   if (!pdfEnabled) closeDrivePicker();
   // AI 摘要（#75）：读取时迁移——缺字段/非法 digest 一律显示为关；开启时才显示预设级指令框
-  // 与 provider 选用行（#78；选项随 bridge 列表重建，悬空引用补「已删除」幽灵项）
+  // 与 provider 选用行（#78；选项随 bridge 列表重建，悬空引用补「已删除」幽灵项）。
+  // 呈现方式分段（#98）：开启才显示；子文档标题模板行仅 subdoc 显示
   const digest = resolveDigest(preset);
   const digestEnabled = digest?.enabled === true;
   $('#f-digest').classList.toggle('on', digestEnabled);
   $('#f-digest').setAttribute('aria-pressed', String(digestEnabled));
   $('#f-digest-instruction-row').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-provider-row').classList.toggle('hidden', !digestEnabled);
+  $('#f-digest-mode-row').classList.toggle('hidden', !digestEnabled);
+  const digestMode = digest?.mode ?? 'subdoc';
+  for (const option of document.querySelectorAll('#f-digest-mode .ps-seg-opt')) {
+    option.classList.toggle('on', option.dataset.value === digestMode);
+  }
+  $('#f-digest-doctitle-row').classList.toggle('hidden', !digestEnabled || digestMode !== 'subdoc');
+  $('#f-digest-doctitle').value = digest?.docTitleTemplate ?? '';
   $('#f-digest-instruction').value = digest?.instruction ?? '';
   syncDigestFileHint();
   renderDigestProviderOptions();
@@ -460,16 +468,38 @@ $('#f-pdf-drive').addEventListener('click', () => {
   syncEditor();
 });
 
-// AI 摘要预设开关（#75）：开启写 { enabled:true, instruction:'', provider 保留 }（空串 = 用全局指令），
-// 关闭归一为 null；预设级指令留空即用全局，均随预设整体经 SAVE_PRESETS 写回
+// AI 摘要预设开关（#75）：开启写完整 digest 结构（instruction 空串 = 用全局指令；mode/
+// docTitleTemplate 缺省 subdoc/Digest，#98），关闭归一为 null；随预设整体经 SAVE_PRESETS 写回
 $('#f-digest').addEventListener('click', () => {
   const current = resolveDigest(editingPreset());
   const enabled = !(current?.enabled === true);
   applyMutation(updatePreset(state, editingId, {
-    digest: enabled ? { enabled: true, instruction: current?.instruction ?? '', provider: current?.provider ?? '' } : null,
+    digest: enabled
+      ? {
+          enabled: true,
+          instruction: current?.instruction ?? '',
+          provider: current?.provider ?? '',
+          mode: current?.mode ?? 'subdoc',
+          docTitleTemplate: current?.docTitleTemplate ?? DEFAULT_DIGEST_DOC_TITLE,
+        }
+      : null,
   }));
   syncEditor();
 });
+// digest 单字段更新（#98）：从当前预设解析值展开覆盖单字段，保住 mode/docTitleTemplate 等兄弟字段
+function patchDigest(patch) {
+  const current = resolveDigest(editingPreset());
+  applyMutation(updatePreset(state, editingId, {
+    digest: {
+      enabled: true,
+      instruction: current?.instruction ?? '',
+      provider: current?.provider ?? '',
+      mode: current?.mode ?? 'subdoc',
+      docTitleTemplate: current?.docTitleTemplate ?? DEFAULT_DIGEST_DOC_TITLE,
+      ...patch,
+    },
+  }), { quiet: true });
+}
 // {{@file}} 行内提示（#81）：指令含 {{@file}} 但预设未开「PDF 存云盘」时显示；只提示不阻止保存
 function syncDigestFileHint() {
   const pdfEnabled = resolvePdfDrive(editingPreset())?.enabled === true;
@@ -477,17 +507,25 @@ function syncDigestFileHint() {
 }
 
 $('#f-digest-instruction').addEventListener('input', () => {
-  applyMutation(updatePreset(state, editingId, {
-    digest: { enabled: true, instruction: $('#f-digest-instruction').value, provider: resolveDigest(editingPreset())?.provider ?? '' },
-  }), { quiet: true });
+  patchDigest({ instruction: $('#f-digest-instruction').value });
   syncDigestFileHint();
 });
 
 // provider 选用（#78）：下拉值即 provider 名（'' = 默认 provider），随预设整体写回
 $('#f-digest-provider').addEventListener('change', () => {
-  applyMutation(updatePreset(state, editingId, {
-    digest: { enabled: true, instruction: resolveDigest(editingPreset())?.instruction ?? '', provider: $('#f-digest-provider').value },
-  }), { quiet: true });
+  patchDigest({ provider: $('#f-digest-provider').value });
+});
+
+// 呈现方式分段（#98）：切换后同步编辑器（子文档标题行仅 subdoc 显示）
+for (const option of document.querySelectorAll('#f-digest-mode .ps-seg-opt')) {
+  option.addEventListener('click', () => {
+    patchDigest({ mode: option.dataset.value });
+    syncEditor();
+  });
+}
+// 子文档标题模板（#98）：留空回落默认标题 Digest（回落在 resolveDigest/background 各层同口径）
+$('#f-digest-doctitle').addEventListener('input', () => {
+  patchDigest({ docTitleTemplate: $('#f-digest-doctitle').value });
 });
 
 // provider 下拉选项重建（bridge 列表变化后调用）：保留当前选中；预设引用了已删除的
@@ -605,6 +643,7 @@ function aiFormDraft() {
     headersText: $('#ai-headers').value,
     maxOutputTokensText: $('#ai-max-output-tokens').value,
     timeoutText: $('#ai-timeout').value,
+    reasoning: $('#ai-reasoning').value,
   };
 }
 
@@ -671,6 +710,7 @@ function fillAiForm() {
   $('#ai-headers').value = aiHeadersToText(provider?.headers);
   $('#ai-max-output-tokens').value = provider?.maxOutputTokens ? String(provider.maxOutputTokens) : '';
   $('#ai-timeout').value = provider?.timeoutMs ? String(Math.round(provider.timeoutMs / 1000)) : '';
+  $('#ai-reasoning').value = provider?.reasoning ?? '';
   $('#ai-delete').classList.toggle('hidden', !provider || provider.name === DEFAULT_AI_PROVIDER_NAME);
   syncAiBaseUrlPlaceholder();
   syncAiKeyPlaceholder();

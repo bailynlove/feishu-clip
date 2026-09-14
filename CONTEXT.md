@@ -45,11 +45,11 @@ _Avoid_: 模板方案、配置档案
 _Avoid_: 格式串、占位文本
 
 **AI 摘要（AI Digest）**:
-由 Bridge 调用用户配置的 AI API 对剪藏正文生成的摘要文本；经 `{{digest}}` 占位符或默认布局进入剪藏文档；生成失败按部分成功降级，不阻断剪藏。三型 API 统一走流式（SSE delta），流式过程产出摘要进度（digestProgress：thinking/writing 相位 + 近似 token 计数，usage 帧校准），仅存 executor 内存、随 job 视图输出、终态即清；popup 状态条据此显示「思考中…/已生成 N tokens」，旧 bridge 无此字段时退回「已等待 N 秒」。popup「本次设置」里的临时摘要设置（开关即折叠子卡）只覆盖本次提交，不回写预设。
+由 Bridge 调用用户配置的 AI API 对剪藏正文生成的摘要文本；生成失败按部分成功降级，不阻断剪藏。呈现方式由预设级 `digest.mode` 决定（#98，缺省读作 subdoc，存量预设读侧迁移）：inline 在建档前生成、经 `{{digest}}` 占位符或默认布局写进正文；subdoc 把摘要挪到建档之后——父文档秒建空文档不等 AI，再建「Digest」子文档（标题取 `digest.docTitle`，模板在扩展侧渲染）落库复用，正文 `{{digest}}` 渲染为子文档链接、父文档顶部插子页面列表块导航，AI 完成后清空子文档重写（失败则留与 job 警告同文案的失败原因）；拿不到 wiki 节点/建子文档失败时退化 inline 并记警告。三型 API 统一走流式（SSE delta），流式过程产出摘要进度（digestProgress：thinking/writing 相位 + 近似 token 计数，思考相位也随 reasoning delta 计数，usage 帧校准），仅存 executor 内存、随 job 视图输出、终态即清（subdoc 在 digest 阶段结束即删，阶段开始先落 waiting 相位占位）；popup 状态条据此显示「思考中 · 约 N tokens（计数为 0 退回「思考中…」）/已生成 N tokens」，旧 bridge 无此字段时退回「已等待 N 秒」。popup「本次设置」里的临时摘要设置（开关即折叠子卡）只覆盖本次提交，不回写预设。
 _Avoid_: 网页导读、内容总结报告
 
 **AI provider 预设（AI Provider Preset）**:
-Bridge 端 `ai.json` 里一套命名的 AI API 配置（apiType / baseUrl / model / apiKey + 高级设置 headers / maxOutputTokens / timeoutMs，超时默认 180 秒，reasoning 模型思考也耗时）；「默认」由旧单配置迁移而来，可编辑不可删除/改名；模板预设按名选用（`digest.provider`），空 = 默认 provider，悬空引用按摘要失败降级。
+Bridge 端 `ai.json` 里一套命名的 AI API 配置（apiType / baseUrl / model / apiKey + 高级设置 headers / maxOutputTokens / timeoutMs / reasoning 三态（默认不发参数 / 开 / 关，按 apiType 映射为 reasoning.effort、thinking.type、thinking budget），超时默认 180 秒，reasoning 模型思考也耗时）；「默认」由旧单配置迁移而来，可编辑不可删除/改名；模板预设按名选用（`digest.provider`），空 = 默认 provider，悬空引用按摘要失败降级。
 _Avoid_: 模型配置、API 档案
 
 **PDF 附件占位符（{{@file}}）**:

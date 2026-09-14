@@ -4,13 +4,18 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { FAILURE_STAGE, IMAGE_MODES, JOB_KIND, JOB_KIND_STRATEGY, JOB_STATUS } from './job-store.mjs';
 import { downloadPublicImage, downloadPublicPdf, IMAGE_LIMITS, PDF_LIMITS, parseImageDimensions, validateImageBytes } from './image-policy.mjs';
-import { applyDigest, AI_FILE_MAX_BYTES, generateDigest as requestDigest, hasFilePlaceholder } from './ai-digest.mjs';
+import { applyDigest, applyDigestLink, AI_FILE_MAX_BYTES, generateDigest as requestDigest, hasFilePlaceholder } from './ai-digest.mjs';
 
 // 尝试标记：写在元信息引用块里（prepareMarkdown），reconcile 靠它在 wiki 里反查认领文档
 const ATTEMPT_MARKER_PREFIX = '剪藏尝试：';
 
 function safeTitle(value) {
   return String(value || '网页剪藏').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 180) || '网页剪藏';
+}
+
+// 摘要子文档标题（#98）：server 已校验（去空白/≤180/回落 Digest），这里再防御一轮（去换行）
+function safeDigestTitle(value) {
+  return String(value || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 180) || 'Digest';
 }
 
 function safeHttpUrl(value) {
@@ -635,6 +640,104 @@ export class ClipExecutor {
     return null;
   }
 
+  // AI 摘要阶段（#75 inline / #98 subdoc 共用）：取配置 →（指令含 {{@file}} 时备 PDF 附件）→
+  // 流式生成 → recordDigest 落库缓存。失败绝不 fail job——返回 { digestText, failureText, warnings }，
+  // failureText 与警告同文案（subdoc 用它写子文档留痕）；digestText 已落库 → 整段短路不调 AI（#72-8）。
+  // subdoc 模式阶段开始即落 {phase:'waiting'} 进度条目（等配置/等共享 PDF 字节期间的占位相位，
+  // 同时是 popup 判别「subdoc 摘要进行中」的信号），阶段结束即删；inline 维持终态统一清理
+  async #runDigestStage(job, workerId, lease, timeline, { subdoc = false } = {}) {
+    const warnings = [];
+    let digestText = job.digestText ?? null;
+    let failureText = null;
+    if (!job.digest?.enabled || digestText !== null) return { digestText, failureText, warnings };
+    if (subdoc) this.digestProgress.set(job.attemptId, { phase: 'waiting', tokens: 0 });
+    try {
+      const digestAt = Date.now();
+      // provider（#78）：digest.provider 非空 = 按名取该 provider；为空调 getAiConfig(null) 走
+      // 默认 provider。按名取不到（被删/bridge 未配置）→ 不调 AI，warning 指明 provider 名
+      const providerName = typeof job.digest.provider === 'string' && job.digest.provider ? job.digest.provider : null;
+      const config = await this.getAiConfig(providerName);
+      if (providerName && !config) {
+        timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: `provider「${providerName}」不存在` });
+        failureText = `AI provider「${providerName}」不存在（可能已被删除），本次未生成摘要`;
+        warnings.push(failureText);
+      } else {
+        // {{@file}}（#79）：指令检出占位符时把本次剪藏的 url 型 PDF 作为附件随请求发出——
+        // executor 在调 AI 前自行下载字节（复用 image-policy 的 SSRF/逐跳校验 + 100 MiB 硬上限，
+        // 与 pdf job 同一下载函数）。无可用 PDF / 下载失败 / 超 32 MB 附件上限都静默去文件、
+        // 按纯文本摘要执行并记一条警告（不算失败）；占位符剥除在 generateDigest 内完成
+        let pdf;
+        // 直接下载与 staging 回退两条路径共用同一份附件构造
+        const toPdfAttachment = (buffer) => ({
+          filename: pdfFileName({ title: job.snapshot?.title, url: job.pdfSource.url, fallback: job.pdfSource.name }),
+          dataBase64: buffer.toString('base64'),
+        });
+        if (hasFilePlaceholder(job.digest.instruction)) {
+          if (job.pdfSource?.type === 'url') {
+            try {
+              // 字节共享（#94）：pdf 通道已下载/在下载同一 URL 时优先复用，免第二次下载；
+              // 共享被拒（pdf 失败）或超时回退自己下载（#92 重试 + 节点轮转）；
+              // 凭据语义拒绝抛 401 形状错误，直接进下方 #80 staging 分支
+              const shareAt = Date.now();
+              const shared = await this.#awaitSharedPdf(job);
+              if (shared) timeline.push({ kind: 'stage', name: 'pdf_share', ms: Date.now() - shareAt, detail: '复用 pdf 任务已下载字节' });
+              const fetched = shared ?? await withTransientRetry((attempt) => this.downloadPdf(job.pdfSource.url, { attempt }), {
+                sleep: this.sleep,
+                onRetry: (error, attempt) => timeline.push({ kind: 'retry', name: 'pdf_download', detail: `${error?.code || error?.message}，第 ${attempt} 次重试（摘要附件）` }),
+              });
+              if (fetched.buffer.length > AI_FILE_MAX_BYTES) {
+                warnings.push('PDF 超过 AI 附件上限（32 MB），已按纯文本生成摘要');
+              } else {
+                pdf = toPdfAttachment(fetched.buffer);
+              }
+            } catch (error) {
+              // 凭据回退（#80）：401/403 时转 staging 等待路径，复用扩展喂给 pdf job 的
+              // 同一份字节；其余下载失败维持 #79 降级语义
+              if (needsCredentialFallback(error) && this.staging) {
+                const staged = await this.#awaitStagedPdf(job, workerId);
+                if (staged.buffer) {
+                  pdf = toPdfAttachment(staged.buffer);
+                } else {
+                  warnings.push(staged.warning);
+                }
+              } else {
+                warnings.push(`PDF 下载失败（${pdfErrorMessage(error)}），已按纯文本生成摘要`);
+              }
+            }
+          } else {
+            warnings.push('摘要指令含 {{@file}} 但本次剪藏没有可用 PDF，已按纯文本生成摘要');
+          }
+        }
+        // 长下载/等 staging 之后、调 AI 之前先确认租约仍在（#89）
+        this.#assertLease(lease);
+        // 摘要进度（#86）：流式 delta 经 onProgress 逐次更新内存条目（纯赋值）；
+        // 初始相位 thinking——模型先思考后写正文，非 reasoning 模型首个正文 delta 即翻 writing
+        const progress = { phase: 'thinking', tokens: 0 };
+        this.digestProgress.set(job.attemptId, progress);
+        try {
+          digestText = await this.generateDigest({
+            config, instruction: job.digest.instruction, content: job.snapshot.markdown,
+            ...(pdf ? { pdf } : {}),
+            onProgress: (update) => { progress.phase = update.phase; progress.tokens = update.tokens; },
+          });
+          // AI 返回后、写缓存前再确认一次：摘要动辄几分钟，租约可能在此期间被收走
+          this.#assertLease(lease);
+          await this.store.recordDigest(job.attemptId, workerId, digestText);
+          // 正向可见性：成功也记录附件情况，任务日志可直接看到「这次有没有带 PDF」（此前只能靠输出猜）
+          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: pdf ? `已附 PDF（${pdf.filename}，${(pdf.dataBase64.length * 0.75 / 1048576).toFixed(1)} MB）` : '纯文本摘要' });
+        } catch (error) {
+          if (error.code === 'LEASE_LOST') throw error;
+          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: String(error?.message || error).slice(0, 300) });
+          failureText = `AI 摘要生成失败：${aiErrorMessage(error)}`;
+          warnings.push(failureText);
+        }
+      }
+    } finally {
+      if (subdoc) this.digestProgress.delete(job.attemptId);
+    }
+    return { digestText, failureText, warnings };
+  }
+
   async #execute(job) {
     const workerId = randomUUID();
     await this.store.claim(job.attemptId, workerId);
@@ -667,122 +770,180 @@ export class ClipExecutor {
     try {
       // 任务级图片写入模式：合法三态直用；存量任务只有 includeImages 布尔，false → off，其余 → preview
       const imageMode = IMAGE_MODES.includes(job.imageMode) ? job.imageMode : (job.includeImages === false ? 'off' : 'preview');
-      // AI 摘要阶段（#75）：建档（prepareMarkdown/create_document）之前对正文生成摘要。
-      // 开关关 → 整段跳过；digestText 已落库 → 直接复用缓存不调 AI（#72-8，重跑安全）；
-      // 失败绝不 fail job——记 timeline + 警告（与图片警告同一通道并入 complete 的 warnings，
-      // 部分成功降级 #72-7），占位符置空/默认布局省略由 applyDigest 保证。
-      // provider（#78）：digest.provider 非空 = 按名取该 provider；为空调 getAiConfig(null) 走
-      // 默认 provider。按名取不到（被删/bridge 未配置）→ 不调 AI，warning 指明 provider 名
-      const digestWarnings = [];
-      let digestText = job.digestText ?? null;
-      if (job.digest?.enabled && digestText === null) {
-        const digestAt = Date.now();
-        const providerName = typeof job.digest.provider === 'string' && job.digest.provider ? job.digest.provider : null;
-        const config = await this.getAiConfig(providerName);
-        if (providerName && !config) {
-          timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: `provider「${providerName}」不存在` });
-          digestWarnings.push(`AI provider「${providerName}」不存在（可能已被删除），本次未生成摘要`);
-        } else {
-          // {{@file}}（#79）：指令检出占位符时把本次剪藏的 url 型 PDF 作为附件随请求发出——
-          // executor 在调 AI 前自行下载字节（复用 image-policy 的 SSRF/逐跳校验 + 100 MiB 硬上限，
-          // 与 pdf job 同一下载函数）。无可用 PDF / 下载失败 / 超 32 MB 附件上限都静默去文件、
-          // 按纯文本摘要执行并记一条警告（不算失败）；占位符剥除在 generateDigest 内完成
-          let pdf;
-          // 直接下载与 staging 回退两条路径共用同一份附件构造
-          const toPdfAttachment = (buffer) => ({
-            filename: pdfFileName({ title: job.snapshot?.title, url: job.pdfSource.url, fallback: job.pdfSource.name }),
-            dataBase64: buffer.toString('base64'),
-          });
-          if (hasFilePlaceholder(job.digest.instruction)) {
-            if (job.pdfSource?.type === 'url') {
-              try {
-                // 字节共享（#94）：pdf 通道已下载/在下载同一 URL 时优先复用，免第二次下载；
-                // 共享被拒（pdf 失败）或超时回退自己下载（#92 重试 + 节点轮转）；
-                // 凭据语义拒绝抛 401 形状错误，直接进下方 #80 staging 分支
-                const shareAt = Date.now();
-                const shared = await this.#awaitSharedPdf(job);
-                if (shared) timeline.push({ kind: 'stage', name: 'pdf_share', ms: Date.now() - shareAt, detail: '复用 pdf 任务已下载字节' });
-                const fetched = shared ?? await withTransientRetry((attempt) => this.downloadPdf(job.pdfSource.url, { attempt }), {
-                  sleep: this.sleep,
-                  onRetry: (error, attempt) => timeline.push({ kind: 'retry', name: 'pdf_download', detail: `${error?.code || error?.message}，第 ${attempt} 次重试（摘要附件）` }),
-                });
-                if (fetched.buffer.length > AI_FILE_MAX_BYTES) {
-                  digestWarnings.push('PDF 超过 AI 附件上限（32 MB），已按纯文本生成摘要');
-                } else {
-                  pdf = toPdfAttachment(fetched.buffer);
-                }
-              } catch (error) {
-                // 凭据回退（#80）：401/403 时转 staging 等待路径，复用扩展喂给 pdf job 的
-                // 同一份字节；其余下载失败维持 #79 降级语义
-                if (needsCredentialFallback(error) && this.staging) {
-                  const staged = await this.#awaitStagedPdf(job, workerId);
-                  if (staged.buffer) {
-                    pdf = toPdfAttachment(staged.buffer);
-                  } else {
-                    digestWarnings.push(staged.warning);
-                  }
-                } else {
-                  digestWarnings.push(`PDF 下载失败（${pdfErrorMessage(error)}），已按纯文本生成摘要`);
-                }
-              }
-            } else {
-              digestWarnings.push('摘要指令含 {{@file}} 但本次剪藏没有可用 PDF，已按纯文本生成摘要');
-            }
-          }
-          // 长下载/等 staging 之后、调 AI 之前先确认租约仍在（#89）
-          this.#assertLease(lease);
-          // 摘要进度（#86）：流式 delta 经 onProgress 逐次更新内存条目（纯赋值）；
-          // 初始相位 thinking——模型先思考后写正文，非 reasoning 模型首个正文 delta 即翻 writing
-          const progress = { phase: 'thinking', tokens: 0 };
-          this.digestProgress.set(job.attemptId, progress);
-          try {
-            digestText = await this.generateDigest({
-              config, instruction: job.digest.instruction, content: job.snapshot.markdown,
-              ...(pdf ? { pdf } : {}),
-              onProgress: (update) => { progress.phase = update.phase; progress.tokens = update.tokens; },
-            });
-            // AI 返回后、写缓存前再确认一次：摘要动辄几分钟，租约可能在此期间被收走
-            this.#assertLease(lease);
-            await this.store.recordDigest(job.attemptId, workerId, digestText);
-            // 正向可见性：成功也记录附件情况，任务日志可直接看到「这次有没有带 PDF」（此前只能靠输出猜）
-            timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: pdf ? `已附 PDF（${pdf.filename}，${(pdf.dataBase64.length * 0.75 / 1048576).toFixed(1)} MB）` : '纯文本摘要' });
-          } catch (error) {
-            if (error.code === 'LEASE_LOST') throw error;
-            timeline.push({ kind: 'stage', name: 'digest', ms: Date.now() - digestAt, detail: String(error?.message || error).slice(0, 300) });
-            digestWarnings.push(`AI 摘要生成失败：${aiErrorMessage(error)}`);
+      // 文档块操作辅助（频控退避 + 原生块 API 调用）提升到建档分支之前——
+      // subdoc 流程（#98）在建档分支内就要用（get_node 反查 wiki 节点、父文档顶部插子页面列表块）；
+      // 图片/iframe 阶段复用同一组
+      const apiRaw = (method, apiPath, extra = []) =>
+        run(['api', method, apiPath, ...extra, '--format', 'json'], { timeoutMs: 15_000 });
+      // 频控（429/99991400）带抖动的指数退避，最多重试 2 次；其他错误直接抛
+      const withBackoff = async (fn) => {
+        for (let attempt = 0; ; attempt += 1) {
+          try { return await fn(); } catch (error) {
+            const text = `${error?.code || ''} ${error?.message || ''}`;
+            if (attempt >= 2 || !/429|99991400/.test(text)) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.random() * 300));
           }
         }
+      };
+      const api = (method, apiPath, extra = []) => withBackoff(() => apiRaw(method, apiPath, extra));
+      // AI 摘要（#75 inline / #98 subdoc）：inline 在建档前生成摘要注入正文；subdoc（缺省）
+      // 建档后把摘要写入 Digest 子文档，正文 {{digest}} 渲染为子文档链接（applyDigestLink），
+      // 默认布局不再注入 # Digest / # RAW content 两节，导航靠父文档顶部子页面列表块。
+      // digestText/digestDoc 落库缓存——重跑（reconcile 重排/任何原因重入 #execute）幂等
+      const digestEnabled = job.digest?.enabled === true;
+      const subdoc = digestEnabled && job.digest.mode !== 'inline';
+      // 退化标记：subdoc 拿不到 wiki 节点/空间或子文档创建失败时翻 false，改走 inline 语义
+      let effectiveSubdoc = subdoc;
+      const digestWarnings = [];
+      let digestText = job.digestText ?? null;
+      let digestDoc = job.digestDoc ?? null;
+      let parentWikiToken = null;
+      const digestTitle = subdoc ? safeDigestTitle(job.digest.docTitle) : null;
+      const contentPath = path.join(scratch, 'content.md');
+      const digestPath = path.join(scratch, 'digest.md');
+      if (digestEnabled && !subdoc) {
+        const stage = await this.#runDigestStage(job, workerId, lease, timeline);
+        digestText = stage.digestText;
+        digestWarnings.push(...stage.warnings);
       }
-      const prepared = prepareMarkdown(
-        { ...job.snapshot, markdown: applyDigest(job.snapshot.markdown, job.digest?.enabled ? digestText : null) },
+      // subdoc 建档序列（#98）：父文档建好后——建 Digest 子文档 → recordDigestDoc 落库 →
+      // 占位行「AI 摘要生成中…」。拿不到 wiki 节点/空间或建子文档失败 → 退化 inline（正文
+      // 尚未写入，补跑内联摘要阶段）；落库/占位失败仅警告继续（内存 digestDoc 够用）
+      const setupDigestDoc = async (wikiToken, spaceId) => {
+        if (!wikiToken || !spaceId) {
+          effectiveSubdoc = false;
+          digestWarnings.push('无法取得剪藏文档的 wiki 节点信息，AI 摘要回退为内联摘要');
+          return;
+        }
+        parentWikiToken = wikiToken;
+        try {
+          const node = await run([
+            'wiki', '+node-create', '--as', 'user', '--space-id', spaceId,
+            '--parent-node-token', wikiToken, '--obj-type', 'docx',
+            '--title', digestTitle, '--format', 'json',
+          ], { cwd: scratch });
+          const created = parseCreatedNode(node);
+          const nodeToken = node.data?.node?.node_token;
+          if (!nodeToken) throw new Error('LARK_CREATE_MISSING_NODE_TOKEN');
+          digestDoc = { documentId: created.documentId, nodeToken, url: created.url };
+        } catch (error) {
+          if (error.code === 'LEASE_LOST') throw error;
+          effectiveSubdoc = false;
+          digestWarnings.push(`摘要子文档创建失败（${String(error?.message || error).slice(0, 120)}），AI 摘要回退为内联摘要`);
+          return;
+        }
+        try {
+          await this.store.recordDigestDoc(job.attemptId, workerId, digestDoc);
+        } catch (error) {
+          if (error.code === 'LEASE_LOST') throw error;
+          digestWarnings.push(`摘要子文档句柄落库失败（${String(error?.message || error).slice(0, 120)}），重跑将按标题找回或重建`);
+        }
+        // 占位行：AI 完成前打开子文档不是空白；失败仅警告（摘要阶段会清空重写）
+        try {
+          await writeFile(digestPath, 'AI 摘要生成中…', 'utf8');
+          await run([
+            'docs', '+update', '--as', 'user', '--doc', digestDoc.documentId,
+            '--command', 'append', '--doc-format', 'markdown',
+            '--content', '@digest.md', '--format', 'json',
+          ], { cwd: scratch, timeoutMs: 120_000 });
+        } catch (error) {
+          if (error.code === 'LEASE_LOST') throw error;
+          digestWarnings.push(`摘要子文档占位写入失败（${String(error?.message || error).slice(0, 120)}）`);
+        }
+      };
+      // 正文合成：inline 注入摘要文本（applyDigest 含默认布局）；subdoc 把 {{digest}} 渲染为
+      // 子文档链接（无占位符原样返回），digestDoc 不可用（退化）时按 inline 语义重算
+      const composePrepared = () => prepareMarkdown(
+        {
+          ...job.snapshot,
+          markdown: effectiveSubdoc
+            ? applyDigestLink(job.snapshot.markdown, digestDoc ? { title: digestTitle, url: digestDoc.url } : null)
+            : applyDigest(job.snapshot.markdown, digestEnabled ? digestText : null),
+        },
         job.attemptId, { imageMode },
       );
+      let prepared;
       if (!document) {
         const createStageAt = Date.now();
         await this.store.beginCreate(job.attemptId, workerId);
-        const contentPath = path.join(scratch, 'content.md');
         try {
-          await writeFile(contentPath, prepared.markdown, 'utf8');
-          if (job.destination.kind === 'space') {
-            // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
-            const node = await run([
-              'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
-              '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
-            ], { cwd: scratch });
-            document = parseCreatedNode(node);
-            // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
+          if (subdoc) {
+            // subdoc（#98）：父文档秒建空文档不等 AI——space 目标建空节点、node 目标建空文档；
+            // 正文等子文档链接/退化判定后 append
+            if (job.destination.kind === 'space') {
+              const node = await run([
+                'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
+                '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
+              ], { cwd: scratch });
+              document = parseCreatedNode(node);
+              // space 目标创建应答即带父文档 wiki 节点 token，直接作子文档挂载点
+              await setupDigestDoc(node.data?.node?.node_token ?? null, job.destination.spaceId ?? null);
+            } else {
+              const created = await run([
+                'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
+                '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown', '--format', 'json',
+              ], { cwd: scratch, timeoutMs: 120_000 });
+              document = parseDocument(created);
+              // node 目标：get_node 反查 wiki 节点（子文档挂载点 + 子页面列表 wiki_token + spaceId）
+              let nodeInfo = null;
+              try {
+                nodeInfo = await api('POST', '/open-apis/wiki/v2/spaces/get_node', [
+                  '--params', JSON.stringify({ obj_token: document.documentId, obj_type: 'docx' }),
+                ]);
+              } catch { nodeInfo = null; }
+              await setupDigestDoc(nodeInfo?.data?.node?.node_token ?? null, nodeInfo?.data?.node?.space_id ?? job.destination.spaceId ?? null);
+            }
+            // 退化 inline：补跑内联摘要阶段（时序不同的降级，语义同 #75）
+            if (!effectiveSubdoc && digestText === null) {
+              const stage = await this.#runDigestStage(job, workerId, lease, timeline);
+              digestText = stage.digestText;
+              digestWarnings.push(...stage.warnings);
+            }
+            prepared = composePrepared();
+            await writeFile(contentPath, prepared.markdown, 'utf8');
+            // 新建文档正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
             await run([
               'docs', '+update', '--as', 'user', '--doc', document.documentId,
               '--command', 'append', '--doc-format', 'markdown',
               '--content', '@content.md', '--format', 'json',
             ], { cwd: scratch, timeoutMs: 120_000 });
+            // 父文档顶部插子页面列表块（block_type 51，wiki_token = 剪藏文档节点 token）作导航
+            // 入口；失败仅警告——正文里已有子文档链接可点
+            if (effectiveSubdoc && parentWikiToken) {
+              try {
+                await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${document.documentId}/children`, [
+                  '--params', '{"document_revision_id": "-1"}',
+                  '--data', JSON.stringify({ index: 0, children: [{ block_type: 51, sub_page_list: { wiki_token: parentWikiToken } }] }),
+                ]);
+              } catch (error) {
+                if (error.code === 'LEASE_LOST') throw error;
+                digestWarnings.push(`父文档顶部子页面列表插入失败（${String(error?.message || error).slice(0, 120)}），可从正文链接进入摘要子文档`);
+              }
+            }
           } else {
-            const created = await run([
-              'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
-              '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
-              '--content', '@content.md', '--format', 'json',
-            ], { cwd: scratch, timeoutMs: 120_000 });
-            document = parseDocument(created);
+            prepared = composePrepared();
+            await writeFile(contentPath, prepared.markdown, 'utf8');
+            if (job.destination.kind === 'space') {
+              // 空间根目标走两步：先在空间根层创建空 docx 节点，再整体写入 Markdown 正文
+              const node = await run([
+                'wiki', '+node-create', '--as', 'user', '--space-id', job.destination.spaceId,
+                '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
+              ], { cwd: scratch });
+              document = parseCreatedNode(node);
+              // 新建节点正文为空，append 等价于整体写入，且不会把正文首个 H1 提升为文档标题
+              await run([
+                'docs', '+update', '--as', 'user', '--doc', document.documentId,
+                '--command', 'append', '--doc-format', 'markdown',
+                '--content', '@content.md', '--format', 'json',
+              ], { cwd: scratch, timeoutMs: 120_000 });
+            } else {
+              const created = await run([
+                'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,
+                '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown',
+                '--content', '@content.md', '--format', 'json',
+              ], { cwd: scratch, timeoutMs: 120_000 });
+              document = parseDocument(created);
+            }
           }
         } catch (error) {
           // 空间目标的两步合并为一个 create_document 阶段；失败也要先记阶段再落盘
@@ -800,46 +961,107 @@ export class ClipExecutor {
         }
         await this.store.recordDocument(job.attemptId, workerId, document);
         timeline.push({ kind: 'stage', name: 'create_document', ms: Date.now() - createStageAt });
+      } else {
+        // 重跑路径（文档已建档）：prepared 只服务图片/iframe 锚点；subdoc 同样渲染链接版正文。
+        // digestDoc 未落库（上次 recordDigestDoc 失败）时按标题找回 wiki 上既有子文档复用，
+        // 找不到再重建——否则子文档永远停在占位行、AI 永不重跑（违反幂等 spec）
+        if (effectiveSubdoc && !digestDoc && digestText === null) {
+          let parentToken = null;
+          let spaceId = job.destination?.spaceId ?? null;
+          try {
+            const nodeInfo = await api('POST', '/open-apis/wiki/v2/spaces/get_node', [
+              '--params', JSON.stringify({ obj_token: document.documentId, obj_type: 'docx' }),
+            ]);
+            parentToken = nodeInfo?.data?.node?.node_token ?? null;
+            spaceId = nodeInfo?.data?.node?.space_id ?? spaceId;
+          } catch { parentToken = null; }
+          let recovered = null;
+          if (parentToken && spaceId) {
+            try {
+              const children = await run([
+                'wiki', '+node-list', '--as', 'user', '--space-id', spaceId,
+                '--parent-node-token', parentToken, '--format', 'json',
+              ], { cwd: scratch });
+              const items = children.data?.items ?? children.data?.nodes ?? [];
+              const hit = items.find((item) => item?.title === digestTitle && item?.obj_type === 'docx');
+              // wiki 节点列表不带 url：由父文档 URL 的 origin 拼 wiki 链接（租户无关）
+              if (hit?.obj_token && hit?.node_token) {
+                recovered = { documentId: hit.obj_token, nodeToken: hit.node_token, url: `${new URL(document.url).origin}/wiki/${hit.node_token}` };
+              }
+            } catch { recovered = null; }
+          }
+          if (recovered) {
+            digestDoc = recovered;
+            try {
+              await this.store.recordDigestDoc(job.attemptId, workerId, digestDoc);
+            } catch (error) {
+              if (error.code === 'LEASE_LOST') throw error;
+              digestWarnings.push(`摘要子文档句柄落库失败（${String(error?.message || error).slice(0, 120)}），下次重跑将重新找回`);
+            }
+          } else {
+            // 找回不到（子文档被删/首次未建成）：重建——正文里的旧链接可能指向孤儿，wiki 允许同名
+            await setupDigestDoc(parentToken, spaceId);
+          }
+        }
+        prepared = composePrepared();
       }
 
-      // digest 警告（#75/#79）与图片/iframe 警告同一通道，随 complete 落库呈现为部分成功
+      // digest 警告（#75/#79/#98）与图片/iframe 警告同一通道，随 complete 落库呈现为部分成功
       const warnings = [...digestWarnings];
       // PDF 引用补插（#93）：#91 并行后 pdf 常先于 clip 建档完成，这里反向补插
       if (document) await this.#backfillPdfReference(job, document, warnings, timeline);
       let totalBytes = 0;
       // 图片/iframe 两个阶段共用的文档块操作辅助（原图片阶段内部函数提升）：
-      // 频控退避、原生块 API 调用、全量块拉取、占位符文本替换
-      const apiRaw = (method, apiPath, extra = []) =>
-        run(['api', method, apiPath, ...extra, '--format', 'json'], { timeoutMs: 15_000 });
-      // 频控（429/99991400）带抖动的指数退避，最多重试 2 次；其他错误直接抛
-      const withBackoff = async (fn) => {
-        for (let attempt = 0; ; attempt += 1) {
-          try { return await fn(); } catch (error) {
-            const text = `${error?.code || ''} ${error?.message || ''}`;
-            if (attempt >= 2 || !/429|99991400/.test(text)) throw error;
-            await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.random() * 300));
-          }
-        }
-      };
-      const api = (method, apiPath, extra = []) => withBackoff(() => apiRaw(method, apiPath, extra));
+      // 全量块拉取、占位符文本替换（频控退避与 api 调用已提升到建档分支之前，#98 子文档流程共用）
       const removeRange = (parentId, start, end) =>
         api('DELETE', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${parentId}/children/batch_delete`, [
           '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ start_index: start, end_index: end }),
         ]);
       // 一次全量块拉取定位所有锚点，取代旧流程每锚点的 keyword 探测（14 图约 22s）；
-      // 锚点段落无论在哪（顶层/表格单元格/引用里），父块与下标都能直接算出来
-      const listBlocks = async () => {
+      // 锚点段落无论在哪（顶层/表格单元格/引用里），父块与下标都能直接算出来。
+      // 参数化 documentId：子文档重写（#98）清的是 digestDoc 而不是剪藏主文档
+      const listBlocksOf = async (documentId) => {
         const blocks = [];
         let pageToken = null;
         do {
           const params = { page_size: 500 };
           if (pageToken) params.page_token = pageToken;
-          const page = await api('GET', `/open-apis/docx/v1/documents/${document.documentId}/blocks`, ['--params', JSON.stringify(params)]);
+          const page = await api('GET', `/open-apis/docx/v1/documents/${documentId}/blocks`, ['--params', JSON.stringify(params)]);
           blocks.push(...(page.data?.items || []));
           pageToken = page.data?.has_more ? page.data?.page_token || null : null;
         } while (pageToken);
         return blocks;
       };
+      const listBlocks = () => listBlocksOf(document.documentId);
+      // subdoc 摘要阶段（#98）：建档之后、图片/iframe 之前。digestDoc 落库即复用（不重建子文档）；
+      // digestText 已缓存 → 整段短路。AI 完成（或失败）后清空子文档全部块（占位行/上次失败
+      // 原因）再 append 本次结果；失败写与 job 警告同文案的失败原因，job 部分成功
+      if (effectiveSubdoc && digestDoc && digestText === null) {
+        const digestDocAt = Date.now();
+        const stage = await this.#runDigestStage(job, workerId, lease, timeline, { subdoc: true });
+        digestText = stage.digestText;
+        warnings.push(...stage.warnings);
+        try {
+          const blocks = await listBlocksOf(digestDoc.documentId);
+          const page = blocks.find((block) => block.block_type === 1);
+          const count = page?.children?.length ?? 0;
+          if (count > 0) {
+            await api('DELETE', `/open-apis/docx/v1/documents/${digestDoc.documentId}/blocks/${page.block_id}/children/batch_delete`, [
+              '--params', '{"document_revision_id":"-1"}', '--data', JSON.stringify({ start_index: 0, end_index: count }),
+            ]);
+          }
+          await writeFile(digestPath, digestText ?? stage.failureText ?? '', 'utf8');
+          await run([
+            'docs', '+update', '--as', 'user', '--doc', digestDoc.documentId,
+            '--command', 'append', '--doc-format', 'markdown',
+            '--content', '@digest.md', '--format', 'json',
+          ], { cwd: scratch, timeoutMs: 120_000 });
+        } catch (error) {
+          if (error.code === 'LEASE_LOST') throw error;
+          warnings.push(`摘要子文档写入失败（${String(error?.message || error).slice(0, 120)}）`);
+        }
+        timeline.push({ kind: 'stage', name: 'digest_doc', ms: Date.now() - digestDocAt });
+      }
       // str_replace 只用于降级路径：把残留占位符换成可读的链接文本，正文不留占位符
       const replaceMarker = async (marker, replacement) => {
         await run([

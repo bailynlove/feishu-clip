@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AI_DEFAULT_BASE_URL, AI_FILE_MAX_BYTES, AI_MAX_INPUT_CHARS, AI_TIMEOUT_MS, AiConfigStore, applyDigest, DEFAULT_DIGEST_INSTRUCTION, generateDigest, hasFilePlaceholder, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeAiConfig, sanitizeProvider, stripFilePlaceholder } from '../src/bridge/ai-digest.mjs';
+import { AI_API_TYPES, AI_DEFAULT_BASE_URL, AI_FILE_MAX_BYTES, AI_MAX_INPUT_CHARS, AI_TIMEOUT_MS, AiConfigStore, applyDigest, applyDigestLink, DEFAULT_DIGEST_INSTRUCTION, generateDigest, hasFilePlaceholder, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeAiConfig, sanitizeProvider, stripFilePlaceholder } from '../src/bridge/ai-digest.mjs';
 import { DEFAULT_DIGEST_INSTRUCTION as EXTENSION_DEFAULT_DIGEST_INSTRUCTION } from '../src/extension/presets.js';
 
 // 捕获请求的 fake fetch + 可编程应答；body 做成可异步迭代（与 fetch 的 Response.body 同形）
@@ -360,6 +360,18 @@ test('applyDigest：无占位符时非空 digestText 走默认布局，null 原�
   assert.equal(applyDigest('# 正文', ''), '# 正文', '空串等同没有摘要');
 });
 
+// applyDigestLink（#98）：subdoc 模式下 {{digest}} 渲染为子文档活链接（markdown 链接语法，
+// 建档时子文档 URL 已在手）；无占位符时原样返回——默认布局不再注入 # Digest / # RAW content
+// 两节，导航靠父文档顶部的子页面列表块
+test('applyDigestLink：占位符原位渲染为子文档链接，无占位符不再注入默认两节', () => {
+  const link = { title: 'Digest', url: 'https://example.feishu.cn/wiki/node-digest' };
+  assert.equal(applyDigestLink('前文 {{digest}} 后文', link), '前文 [Digest](https://example.feishu.cn/wiki/node-digest) 后文');
+  assert.equal(applyDigestLink('{{digest}} 与 {{ digest }} 两处', link), '[Digest](https://example.feishu.cn/wiki/node-digest) 与 [Digest](https://example.feishu.cn/wiki/node-digest) 两处', '带空格写法归一且全部替换');
+  assert.equal(applyDigestLink('# 正文', link), '# 正文', '无占位符原样返回（不写默认两节）');
+  assert.equal(applyDigestLink('前文 {{digest}} 后文', null), '前文  后文', 'link 为 null（子文档不可用）时占位符置空');
+  assert.equal(applyDigestLink('前文 {{digest}} 后文', { title: '摘要[1]\n换行', url: 'https://u' }), '前文 [摘要\\[1\\] 换行](https://u) 后文', '链接文本转义方括号并去除换行');
+});
+
 test('normalizeAiConfigInput：机器码校验 + baseUrl 允许私有/回环地址', async () => {
   const bad = (body, code) => assert.throws(() => normalizeAiConfigInput(body), (error) => error.code === code);
   bad({}, 'AI_TYPE_INVALID');
@@ -670,4 +682,142 @@ test('{{@file}} 无 PDF 附件（降级路径）：占位符照样剥除，请�
   // 指令只有占位符：剥空回落内置默认
   await generateDigest({ config: CONFIG.responses, instruction: '{{@file}}', content: '正文', fetchImpl: fetch });
   assert.equal(calls[1].body.instructions, DEFAULT_DIGEST_INSTRUCTION);
+});
+
+// ——— 思考计数（#97）：thinking 相位 tokens 随 reasoning delta 增长；
+// usage 的 reasoning/thinking 字段校准思考计数（缺省保留近似值） ———
+
+test('#97 thinking 相位 tokens 随 reasoning delta 增长；usage reasoning 字段校准思考计数', async () => {
+  // chat-completions：reasoning_content 逐次计数；末帧 completion_tokens_details.reasoning_tokens 校准
+  const chatEvents = [
+    { data: { choices: [{ delta: { reasoning_content: '想想' } }] } },
+    { data: { choices: [{ delta: { reasoning_content: '再想想' } }] } },
+    { data: { choices: [{ delta: { content: '要点' } }] } },
+    { data: { choices: [], usage: { completion_tokens: 7, completion_tokens_details: { reasoning_tokens: 120 } } } },
+    '[DONE]',
+  ];
+  const chat = fakeFetch(async () => sseResponse(chatEvents));
+  const chatProgress = [];
+  const chatDigest = await generateDigest({ config: CONFIG['chat-completions'], instruction: 'i', content: 'c', fetchImpl: chat.fetch, onProgress: (update) => chatProgress.push(update) });
+  assert.equal(chatDigest, '要点');
+  assert.deepEqual(chatProgress[0], { phase: 'thinking', tokens: 2 });
+  assert.deepEqual(chatProgress[1], { phase: 'thinking', tokens: 5 }, 'thinking 相位 tokens 随 reasoning delta 增长');
+  assert.deepEqual(chatProgress.at(-2), { phase: 'thinking', tokens: 120 }, 'usage 的 reasoning_tokens 校准思考计数');
+  assert.deepEqual(chatProgress.at(-1), { phase: 'writing', tokens: 7 }, '正文仍按 completion_tokens 校准');
+
+  // responses：终帧 usage.output_tokens_details.reasoning_tokens
+  const respEvents = [
+    { data: { type: 'response.reasoning_summary_text.delta', delta: '想想' } },
+    { data: { type: 'response.output_text.delta', delta: '要点' } },
+    { data: { type: 'response.completed', response: { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '要点' }] }], usage: { output_tokens: 7, output_tokens_details: { reasoning_tokens: 55 } } } } },
+  ];
+  const resp = fakeFetch(async () => sseResponse(respEvents));
+  const respProgress = [];
+  await generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: resp.fetch, onProgress: (update) => respProgress.push(update) });
+  assert.deepEqual(respProgress[0], { phase: 'thinking', tokens: 2 });
+  assert.deepEqual(respProgress.at(-2), { phase: 'thinking', tokens: 55 }, 'responses 终帧 reasoning_tokens 校准');
+  assert.deepEqual(respProgress.at(-1), { phase: 'writing', tokens: 7 });
+
+  // messages：部分网关附 usage.thinking_tokens（标准 Anthropic 无此字段）；容忍读取
+  const msgEvents = [
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '思考' } } },
+    { event: 'content_block_start', data: { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } } },
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '要点' } } },
+    { event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7, thinking_tokens: 33 } } },
+    { event: 'message_stop', data: { type: 'message_stop' } },
+  ];
+  const msg = fakeFetch(async () => sseResponse(msgEvents));
+  const msgProgress = [];
+  await generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: msg.fetch, onProgress: (update) => msgProgress.push(update) });
+  assert.deepEqual(msgProgress[0], { phase: 'thinking', tokens: 2 }, 'thinking_delta 计数');
+  assert.deepEqual(msgProgress.at(-2), { phase: 'thinking', tokens: 33 }, 'usage.thinking_tokens 校准');
+  assert.deepEqual(msgProgress.at(-1), { phase: 'writing', tokens: 7 });
+});
+
+test('#97 无 reasoning usage 字段时不发思考校准帧（缺省保留近似值）', async () => {
+  // messages 标准流：message_delta 只有 output_tokens → 只有正文校准帧，无额外 thinking 帧
+  const msg = fakeFetch(async () => sseResponse([
+    { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '思考' } } },
+    ...SSE_OK.messages('要点'),
+  ]));
+  const progress = [];
+  await generateDigest({ config: CONFIG.messages, instruction: 'i', content: 'c', fetchImpl: msg.fetch, onProgress: (update) => progress.push(update) });
+  assert.deepEqual(progress[0], { phase: 'thinking', tokens: 2 });
+  assert.ok(!progress.slice(1).some((update) => update.phase === 'thinking'), '无 reasoning usage 字段时不额外校准');
+});
+
+// ——— reasoning 三态开关（#96）：默认（不发参数，跟随服务端默认）/ 开 / 关 ———
+
+test('reasoning 默认态不注入参数：三型请求体均无 reasoning/thinking 字段（回归）', async () => {
+  for (const apiType of AI_API_TYPES) {
+    const { calls, fetch } = fakeFetch(async () => sseResponse(SSE_OK[apiType]()));
+    await generateDigest({ config: CONFIG[apiType], instruction: 'i', content: 'c', fetchImpl: fetch });
+    assert.ok(!('reasoning' in calls[0].body) && !('thinking' in calls[0].body) && !('reasoning_effort' in calls[0].body), `${apiType} 默认态请求形状不变`);
+  }
+});
+
+test('reasoning（#96）：responses 注入 reasoning.effort（开 medium / 关 low），流式与非流式一致', async () => {
+  for (const stream of [true, false]) {
+    const respond = stream
+      ? async () => sseResponse(SSE_OK.responses())
+      : async () => jsonResponse({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }] });
+    const on = fakeFetch(respond);
+    await generateDigest({ config: { ...CONFIG.responses, reasoning: 'on' }, instruction: 'i', content: 'c', fetchImpl: on.fetch, stream });
+    assert.deepEqual(on.calls[0].body.reasoning, { effort: 'medium' }, `stream=${stream} 开 → medium effort`);
+    const off = fakeFetch(respond);
+    await generateDigest({ config: { ...CONFIG.responses, reasoning: 'off' }, instruction: 'i', content: 'c', fetchImpl: off.fetch, stream });
+    assert.deepEqual(off.calls[0].body.reasoning, { effort: 'low' }, `stream=${stream} 关 → low effort（保守档）`);
+  }
+});
+
+test('reasoning（#96）：chat-completions 注入 GLM 惯例 thinking.type（开 enabled / 关 disabled）', async () => {
+  for (const stream of [true, false]) {
+    const respond = stream
+      ? async () => sseResponse(SSE_OK['chat-completions']())
+      : async () => jsonResponse({ choices: [{ message: { content: 'ok' } }] });
+    const on = fakeFetch(respond);
+    await generateDigest({ config: { ...CONFIG['chat-completions'], reasoning: 'on' }, instruction: 'i', content: 'c', fetchImpl: on.fetch, stream });
+    assert.deepEqual(on.calls[0].body.thinking, { type: 'enabled' }, `stream=${stream} 开 → thinking enabled`);
+    const off = fakeFetch(respond);
+    await generateDigest({ config: { ...CONFIG['chat-completions'], reasoning: 'off' }, instruction: 'i', content: 'c', fetchImpl: off.fetch, stream });
+    assert.deepEqual(off.calls[0].body.thinking, { type: 'disabled' }, `stream=${stream} 关 → thinking disabled`);
+    assert.ok(!('reasoning_effort' in off.calls[0].body), '采用 GLM 惯例而非 OpenAI 兼容的 reasoning_effort');
+  }
+});
+
+test('reasoning（#96）：messages 开 = thinking enabled + budget（< max_tokens，上限 8192）；关 = 省略 thinking 字段', async () => {
+  const respond = async () => sseResponse(SSE_OK.messages());
+  const on = fakeFetch(respond);
+  await generateDigest({ config: { ...CONFIG.messages, reasoning: 'on' }, instruction: 'i', content: 'c', fetchImpl: on.fetch });
+  assert.deepEqual(on.calls[0].body.thinking, { type: 'enabled', budget_tokens: 2047 }, '默认 maxOutputTokens 2048 → budget 收敛到 max_tokens-1');
+  const big = fakeFetch(respond);
+  await generateDigest({ config: { ...CONFIG.messages, reasoning: 'on', maxOutputTokens: 10_000 }, instruction: 'i', content: 'c', fetchImpl: big.fetch });
+  assert.deepEqual(big.calls[0].body.thinking, { type: 'enabled', budget_tokens: 8192 }, 'budget 上限 8192');
+  const off = fakeFetch(respond);
+  await generateDigest({ config: { ...CONFIG.messages, reasoning: 'off' }, instruction: 'i', content: 'c', fetchImpl: off.fetch });
+  assert.ok(!('thinking' in off.calls[0].body), 'messages 关 = 省略 thinking 字段（与默认同形）');
+  // 非流式（测试连接）同一映射
+  const probe = fakeFetch(async () => jsonResponse({ content: [{ type: 'text', text: 'ok' }] }));
+  await generateDigest({ config: { ...CONFIG.messages, reasoning: 'on' }, instruction: 'i', content: 'c', fetchImpl: probe.fetch, stream: false });
+  assert.deepEqual(probe.calls[0].body.thinking, { type: 'enabled', budget_tokens: 2047 }, '非流式同样注入');
+});
+
+test('normalizeAiConfigInput：reasoning 三态（on/off/留空默认），非法值带机器码', () => {
+  assert.equal(normalizeAiConfigInput({ apiType: 'responses', model: 'm', apiKey: 'k', reasoning: 'on' }).reasoning, 'on');
+  assert.equal(normalizeAiConfigInput({ apiType: 'responses', model: 'm', apiKey: 'k', reasoning: 'off' }).reasoning, 'off');
+  const plain = normalizeAiConfigInput({ apiType: 'responses', model: 'm', apiKey: 'k', reasoning: '' });
+  assert.ok(!('reasoning' in plain), '留空 = 默认（不发参数），落库/回显不出现');
+  const badReasoning = (value) => assert.throws(() => normalizeAiConfigInput({ apiType: 'responses', model: 'm', reasoning: value }), (error) => error.code === 'AI_REASONING_INVALID');
+  for (const value of ['maybe', 'ON', true, 1]) badReasoning(value);
+});
+
+test('mergeAiTestConfig / sanitizeAiConfig：reasoning 覆盖回落已存、随配置回显', () => {
+  const saved = { apiType: 'responses', baseUrl: 'https://x.com/v1', model: 'm', apiKey: 'k', reasoning: 'off' };
+  assert.equal(mergeAiTestConfig({}, saved).reasoning, 'off', '省略回落已存（与 headers 等高级项同语义）');
+  assert.equal(mergeAiTestConfig({ reasoning: 'on' }, saved).reasoning, 'on');
+  assert.throws(() => mergeAiTestConfig({ reasoning: 'maybe' }, saved), (error) => error.code === 'AI_REASONING_INVALID', '非法覆盖报错，不静默回落');
+  const bare = mergeAiTestConfig({}, { apiType: 'responses', baseUrl: 'https://x.com/v1', model: 'm', apiKey: 'k' });
+  assert.ok(!('reasoning' in bare), '已存无 reasoning 时合并结果也不出现');
+  assert.equal(sanitizeAiConfig({ apiType: 'responses', baseUrl: 'https://x.com/v1', model: 'm', apiKey: 'sk-x', reasoning: 'on' }).reasoning, 'on', '随配置回显供设置页回填');
+  assert.ok(!('reasoning' in sanitizeAiConfig({ apiType: 'responses', baseUrl: 'https://x.com/v1', model: 'm', apiKey: '' })), '未配置不出现');
 });

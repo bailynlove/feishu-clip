@@ -4,6 +4,7 @@
 // 跨页打开弹窗一次（终态 job 被静默丢弃是对的）顺带把指针清了，回到原页面也无状态可恢复。
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const PAGE = 'https://example.com/article';
@@ -450,12 +451,32 @@ test('GET_SETTINGS 返回 aiDigestInstruction（全局摘要指令，供设置�
 
 test('CLIP digestEnabled：{{digest}} 以字面量穿过正文渲染，digest 随任务上报 bridge', async () => {
   await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, title: 'T', customBody: '{{digest}}\n\n{{content}}', digestEnabled: true, digestInstruction: '预设指令' });
-  assert.deepEqual(lastJobsBody.digest, { enabled: true, instruction: '预设指令' });
+  assert.deepEqual(lastJobsBody.digest, { enabled: true, instruction: '预设指令', mode: 'subdoc', docTitle: 'Digest' }, 'mode 缺省 subdoc、docTitle 缺省 Digest（#98）');
   assert.ok(lastJobsBody.snapshot.markdown.startsWith('{{digest}}\n\n# 正文'), '占位符字面量原位保留进 snapshot.markdown');
 
   // 带空格写法归一
   await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, title: 'T', customBody: '{{ digest }} {{content}}', digestEnabled: true, digestInstruction: 'x' });
   assert.ok(lastJobsBody.snapshot.markdown.startsWith('{{digest}} # 正文'), '{{ digest }} 归一为 {{digest}}');
+});
+
+// mode/docTitle（#98）：mode 由弹窗按预设透传（inline 原样、缺省 subdoc）；
+// docTitle 用与正文同一模板上下文渲染预设级 docTitleTemplate，空白回落 Digest
+test('CLIP digestEnabled：mode 透传与 docTitle 模板渲染（#98）', async () => {
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, title: '深入理解剪藏', digestEnabled: true, digestInstruction: 'x', digestMode: 'inline' });
+  assert.equal(lastJobsBody.digest.mode, 'inline', 'inline 原样透传（可还原）');
+  assert.equal(lastJobsBody.digest.docTitle, 'Digest', '模板缺省回落 Digest');
+
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, title: '深入理解剪藏', digestEnabled: true, digestInstruction: 'x', digestMode: 'subdoc', digestDocTitleTemplate: '摘要 · {{title}}' });
+  assert.equal(lastJobsBody.digest.mode, 'subdoc');
+  assert.equal(lastJobsBody.digest.docTitle, '摘要 · 深入理解剪藏', 'docTitleTemplate 用剪藏上下文渲染（{{title}} 等变量生效）');
+
+  // 模板渲成空白 → 回落 Digest
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, title: 'T', digestEnabled: true, digestInstruction: 'x', digestDocTitleTemplate: '{{unknown}}' });
+  assert.equal(lastJobsBody.digest.docTitle, 'Digest', '渲染空白回落 Digest');
+
+  // 非法 mode 按缺省 subdoc 归一
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, title: 'T', digestEnabled: true, digestInstruction: 'x', digestMode: 'weird' });
+  assert.equal(lastJobsBody.digest.mode, 'subdoc', '非法 mode 归一 subdoc');
 });
 
 test('CLIP digestEnabled 指令回落顺序：预设级 > 全局 > 内置默认；长指令不截断', async () => {
@@ -521,4 +542,13 @@ test('LIST_AI_PROVIDERS / SAVE_AI_PROVIDER / DELETE_AI_PROVIDER / TEST_AI 代理
 
   await send({ type: 'TEST_AI' });
   assert.deepEqual(lastAiTestBody, {}, '省略 name/覆盖发空对象（bridge 用默认 provider 逐项回落）');
+});
+
+// 凭据回传（#68）的 SW fetch 依赖目标站 host 权限才能绕开 CORS——MDPI 实测：
+// 无权限时跨域 fetch 直接 TypeError（连 403 分支都到不了），回传路径对所有真实站点全灭。
+// manifest 回归守卫：host_permissions 必须覆盖任意 http(s) 站点。
+test('manifest：host_permissions 覆盖任意站点，凭据回传的 SW fetch 不受 CORS 拦截', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../src/extension/manifest.json', import.meta.url), 'utf8'));
+  assert.ok(manifest.host_permissions.includes('https://*/*'), '需含 https://*/*');
+  assert.ok(manifest.host_permissions.includes('http://*/*'), '需含 http://*/*');
 });

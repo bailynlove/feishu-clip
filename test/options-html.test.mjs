@@ -103,6 +103,20 @@ test('preset editor has an AI digest switch, initially off, with a hidden instru
   assert.ok(classAttr('f-digest-provider-hint').includes('hidden'), '降级提示初始隐藏（读到列表后不显示）');
 });
 
+// 摘要呈现方式（#98）：开关开启才显示的 ps-seg 分段（subdoc 子文档 / inline 内联），
+// 以及仅 subdoc 显示的子文档标题模板输入框（placeholder = 默认标题 Digest）
+test('preset editor has digest mode segmented control and doc-title field, both initially hidden (#98)', () => {
+  assert.ok(classAttr('f-digest-mode-row').includes('hidden'), 'mode 行初始隐藏（随开关开启才显示）');
+  const seg = html.match(/<div class="ps-seg" id="f-digest-mode">([\s\S]*?)<\/div>/);
+  assert.ok(seg, '应有 #f-digest-mode 分段控件');
+  const values = [...seg[1].matchAll(/data-value="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(values, ['subdoc', 'inline'], '分段选项为 subdoc 子文档 / inline 内联');
+  assert.ok(classAttr('f-digest-doctitle-row').includes('hidden'), '子文档标题行初始隐藏（仅 subdoc 显示）');
+  const input = html.match(/<input[^>]*id="f-digest-doctitle"[^>]*>/);
+  assert.ok(input, '应有 #f-digest-doctitle 输入框');
+  assert.ok(input[0].includes('placeholder="Digest"'), 'placeholder = 默认标题 Digest');
+});
+
 // ——— 设置页分区折叠（#76）：第 2/3 区用 details 包裹可折叠，默认展开（open），
 // 配对/开发者模式两区不参与；折叠状态持久化逻辑在 options-state.js ———
 test('sections 2 (AI 摘要) and 3 (预设管理) are collapsible details, default open', () => {
@@ -147,4 +161,15 @@ test('preset instruction has an initially-hidden {{@file}}-without-pdfDrive hint
   assert.ok(classAttr('f-digest-file-hint').includes('hidden'), '#f-digest-file-hint 初始应隐藏');
   const hint = html.match(/<[^>]*id="f-digest-file-hint"[^>]*>([\s\S]*?)<\/[^>]+>/);
   assert.ok(hint[1].includes('PDF 存云盘'), '提示应指向「PDF 存云盘」开关');
+});
+
+// reasoning 三态开关（#96）：与 headers/maxOutputTokens/timeoutMs 并列在「高级设置」折叠区，
+// 三态下拉（默认 = 跟随服务端 / 开 / 关），默认 option 的 value 为空串（aiConfigPayload 据此不进 body）
+test('AI 高级设置含 reasoning 三态下拉（默认/开/关）（#96）', () => {
+  const select = html.match(/<select id="ai-reasoning"[^>]*>([\s\S]*?)<\/select>/);
+  assert.ok(select, '应有 #ai-reasoning 下拉');
+  const values = [...select[1].matchAll(/<option value="([^"]*)">/g)].map((match) => match[1]);
+  assert.deepEqual(values, ['', 'on', 'off'], '三态顺序：默认（跟随服务端）/ 开 / 关');
+  const advanced = html.match(/<details class="ps-advanced">([\s\S]*?)<\/details>/);
+  assert.ok(advanced[1].includes('id="ai-reasoning"'), 'reasoning 下拉在高级设置折叠区内');
 });

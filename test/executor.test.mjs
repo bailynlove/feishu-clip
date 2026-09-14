@@ -1209,11 +1209,13 @@ test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清�
 import { readFile } from 'node:fs/promises';
 
 // 无图片的 clip job（imageMode off 跳过图片阶段）；假 lark 在 docs +create 时读出
-// 落盘的 content.md（摘要是经 applyDigest 注入后再 prepareMarkdown，直接验证最终正文）
+// 落盘的 content.md（摘要是经 applyDigest 注入后再 prepareMarkdown，直接验证最终正文）。
+// digest 缺省钉 mode:'inline'（#75 既有语义的回归组；#98 起缺省读作 subdoc，子文档模式
+// 另有专用 rig，见文末 subdocSetup）
 function digestSetup({ markdown, digest = null, digestText = null, pdfSource = null }) {
   const job = fakeJob({ markdown, images: [] });
   job.imageMode = 'off';
-  if (digest) job.digest = digest;
+  if (digest) job.digest = { mode: 'inline', ...digest };
   if (digestText !== null) job.digestText = digestText;
   job.pdfSource = pdfSource;
   const store = fakeStore(job);
@@ -1478,7 +1480,7 @@ test('双通道（#91）：pdf 与 clip 并行消费，pdf 不等 clip 的长摘
   const clipJob = {
     ...fakeJob({ markdown: '# T\n\n正文', images: [] }),
     kind: 'clip', attemptId: 'lane-clip', imageMode: 'off',
-    digest: { enabled: true, instruction: '总结' },
+    digest: { enabled: true, instruction: '总结', mode: 'inline' },
   };
   const pdfJob = { ...PDF_JOB, attemptId: 'lane-pdf' };
   const queued = new Set([clipJob.attemptId, pdfJob.attemptId]);
@@ -1750,7 +1752,7 @@ function shareSetup() {
   const clipJob = {
     ...fakeJob({ markdown: '# T\n\n正文', images: [] }),
     kind: 'clip', attemptId, imageMode: 'off',
-    digest: { enabled: true, instruction: '结合附件总结 {{@file}}' },
+    digest: { enabled: true, instruction: '结合附件总结 {{@file}}', mode: 'inline' },
     pdfSource: { type: 'url', url: 'https://arxiv.org/pdf/2608.26263', name: '2608.26263.pdf' },
   };
   const pdfJob = {
@@ -1906,7 +1908,7 @@ const STAGED_SHA256 = createHash('sha256').update(STAGED_PDF).digest('hex');
 function digestStagingSetup({ pdfJobStatus = 'queued' } = {}) {
   const job = fakeJob({ markdown: '# T\n\n正文', images: [] });
   job.imageMode = 'off';
-  job.digest = { enabled: true, instruction: '结合附件总结 {{@file}}' };
+  job.digest = { enabled: true, instruction: '结合附件总结 {{@file}}', mode: 'inline' };
   job.pdfSource = { type: 'url', url: 'https://example.com/paywalled.pdf', name: 'paywalled.pdf' };
   let drained = false;
   let onSettled;
@@ -2116,4 +2118,286 @@ test('{{@file}} 凭据回退：bytes 声明超 32 MB → 提前放弃（不等�
     assert.equal(rig.digestCalls[0].pdf, undefined);
     assert.deepEqual(rig.store.completed.warnings, ['PDF 超过 AI 附件上限（32 MB），已按纯文本生成摘要']);
   });
+});
+
+// ——— AI 摘要子文档模式（#98）：digest.mode 'subdoc'（缺省）把摘要挪到建档之后——
+// 建父节点 → 建「Digest」子文档节点（占位行）→ digestDoc 落库 → 写正文（{{digest}} 渲染为
+// 子文档链接，不再有 # Digest/# RAW content 两节）→ 顶部插 sub_page_list 块 → AI 流式 →
+// 清空子文档重写。重跑靠 digestDoc/digestText 幂等；拿不到子文档（node 目标无 wiki token、
+// 创建失败）退化内联摘要并记警告
+function subdocSetup({
+  markdown = '# T\n\n前文 {{digest}} 后文', digest = {}, digestText = null, digestDoc = null,
+  document = null, destination = { kind: 'space', spaceId: 'space-1' }, failOn = null,
+  nodeLookup = { node_token: 'node-created', space_id: 'space-x' },
+  childNodes = [],
+} = {}) {
+  const job = fakeJob({ markdown, images: [] });
+  job.imageMode = 'off';
+  job.destination = destination;
+  job.digest = { enabled: true, instruction: '总结', ...digest };
+  if (digestText !== null) job.digestText = digestText;
+  if (digestDoc) job.digestDoc = digestDoc;
+  if (document) job.document = document;
+  const events = [];
+  const calls = [];
+  const writes = [];
+  const store = fakeStore(job);
+  store.digestDocRecorded = null;
+  store.recordDigestDoc = async (_id, _worker, recorded) => { events.push('record-digest-doc'); store.digestDocRecorded = recorded; };
+  const lark = {
+    calls,
+    async run(args, options) {
+      calls.push(args);
+      if (failOn?.(args)) throw new Error('lark boom');
+      const [head, sub] = args;
+      if (head === 'wiki' && sub === '+node-create') {
+        if (args.includes('--parent-node-token')) {
+          events.push('create-digest');
+          return { ok: true, data: { node: { obj_token: 'doc-digest', node_token: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest' } } };
+        }
+        events.push('create-parent');
+        return { ok: true, data: { node: { obj_token: 'doc-parent', node_token: 'node-parent', url: 'https://example.feishu.cn/wiki/node-parent' } } };
+      }
+      if (head === 'wiki' && sub === '+node-list') {
+        events.push('list-children');
+        return { ok: true, data: { items: childNodes } };
+      }
+      if (head === 'docs' && sub === '+create') {
+        events.push('create-doc');
+        return { ok: true, data: { document: { document_id: 'doc-parent', url: 'https://example.feishu.cn/wiki/doc-parent' } } };
+      }
+      if (head === 'docs' && sub === '+update') {
+        const doc = args[args.indexOf('--doc') + 1];
+        const at = args.find((arg) => String(arg).startsWith('@'));
+        const content = at ? await readFile(path.join(options.cwd, at.slice(1)), 'utf8') : null;
+        events.push(`write:${doc}`);
+        writes.push({ doc, content });
+        return { ok: true, data: {} };
+      }
+      if (head === 'api') {
+        const [, method, apiPath] = args;
+        if (apiPath.includes('get_node')) {
+          events.push('get-node');
+          if (!nodeLookup) throw new Error('get_node 失败');
+          return { ok: true, data: { node: nodeLookup } };
+        }
+        if (method === 'GET' && apiPath.endsWith('/blocks')) {
+          // 子文档当前内容：页块下挂一个占位文本块
+          return { ok: true, data: { items: [containerBlock('doc-digest', '', 1, ['ph']), textBlock('ph', 'doc-digest', 'AI 摘要生成中…')], has_more: false } };
+        }
+        if (method === 'DELETE') { events.push(`clear:${apiPath.match(/documents\/([^/]+)/)?.[1]}`); return { ok: true, data: {} }; }
+        if (method === 'POST' && apiPath.includes('/children')) { events.push('sub-page-list'); return { ok: true, data: { children: [{ block_id: 'sp-1' }] } }; }
+        return { ok: true, data: {} };
+      }
+      throw new Error(`unexpected lark call: ${args.join(' ')}`);
+    },
+  };
+  const generateDigest = async () => { events.push('ai'); return 'AI 要点'; };
+  return { store, lark, events, calls, writes, job, generateDigest };
+}
+
+test('AI 摘要子文档（#98）：space 目标完整时序——父文档秒建不等 AI，摘要落子文档', async () => {
+  const { store, lark, events, writes, generateDigest } = subdocSetup();
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.deepEqual(events, [
+    'create-parent', 'create-digest', 'record-digest-doc',
+    'write:doc-digest', 'write:doc-parent', 'sub-page-list',
+    'ai', 'clear:doc-digest', 'write:doc-digest',
+  ], '建父节点 → 建子文档 → 落库 → 占位 → 正文 → 子页面列表 → AI → 清空重写');
+  assert.deepEqual(store.digestDocRecorded, {
+    documentId: 'doc-digest', nodeToken: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest',
+  }, '子文档句柄落库（重跑幂等）');
+  const parentWrite = writes.find((entry) => entry.doc === 'doc-parent');
+  assert.match(parentWrite.content, /前文 \[Digest\]\(https:\/\/example\.feishu\.cn\/wiki\/node-digest\) 后文/, '{{digest}} 渲染为子文档链接');
+  assert.doesNotMatch(parentWrite.content, /\{\{\s*digest\s*\}\}/);
+  assert.doesNotMatch(parentWrite.content, /^# Digest$/m, 'subdoc 不再写默认 Digest 节');
+  assert.doesNotMatch(parentWrite.content, /# RAW content/, 'subdoc 不再写 RAW content 节');
+  assert.deepEqual(writes.filter((entry) => entry.doc === 'doc-digest').map((entry) => entry.content), ['AI 摘要生成中…', 'AI 要点'], '子文档先占位后正文');
+  const subPageList = apiCalls(lark.calls, 'POST', '/children');
+  assert.equal(subPageList.length, 1);
+  assert.deepEqual(JSON.parse(subPageList[0][subPageList[0].indexOf('--data') + 1]), {
+    index: 0, children: [{ block_type: 51, sub_page_list: { wiki_token: 'node-parent' } }],
+  }, '父文档顶部插 sub_page_list 块（wiki_token=clip 文档节点 token）');
+  const clear = apiCalls(lark.calls, 'DELETE', 'batch_delete');
+  assert.deepEqual(deleteBody(clear[0]), { start_index: 0, end_index: 1 }, '重写前清空子文档全部块');
+  assert.equal(store.digestRecorded, 'AI 要点', '摘要文本照常缓存');
+  assert.deepEqual(store.completed.warnings, []);
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'digest_doc'), '子文档写入阶段计时');
+});
+
+test('AI 摘要子文档（#98）：digest.docTitle 决定子文档标题与父文档链接文本', async () => {
+  const { store, lark, calls, writes, generateDigest } = subdocSetup({ digest: { docTitle: '本文要点' } });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  const createDigest = calls.find((args) => args[1] === '+node-create' && args.includes('--parent-node-token'));
+  assert.equal(createDigest[createDigest.indexOf('--title') + 1], '本文要点', '子文档标题取 digest.docTitle');
+  assert.match(writes.find((entry) => entry.doc === 'doc-parent').content, /\[本文要点\]\(https:\/\/example\.feishu\.cn\/wiki\/node-digest\)/, '链接文本同一标题');
+});
+
+test('AI 摘要子文档（#98）：document+digestDoc+digestText 齐全的重跑整段短路——零 lark 调用零 AI', async () => {
+  const { store, lark, events } = subdocSetup({
+    document: { documentId: 'doc-parent', url: 'https://example.feishu.cn/wiki/node-parent' },
+    digestDoc: { documentId: 'doc-digest', nodeToken: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest' },
+    digestText: '缓存摘要',
+  });
+  let ai = 0;
+  const generateDigest = async () => { ai += 1; throw new Error('缓存命中不得调 AI'); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.equal(ai, 0);
+  assert.deepEqual(events, [], '不重写父文档也不重写子文档');
+  assert.deepEqual(store.completed.warnings, []);
+});
+
+test('AI 摘要子文档（#98）：摘要失败后的重跑复用已落库 digestDoc——不重建子文档，清空重写', async () => {
+  const { store, lark, events, generateDigest } = subdocSetup({
+    document: { documentId: 'doc-parent', url: 'https://example.feishu.cn/wiki/node-parent' },
+    digestDoc: { documentId: 'doc-digest', nodeToken: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest' },
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.deepEqual(events, ['ai', 'clear:doc-digest', 'write:doc-digest'], '复用同一子文档，不重建档不重复落库');
+  assert.equal(store.digestDocRecorded, null, '不再调 recordDigestDoc');
+  assert.equal(store.digestRecorded, 'AI 要点');
+  assert.deepEqual(store.completed.warnings, []);
+});
+
+test('AI 摘要子文档（#98）：digestDoc 未落库的重跑按标题找回既有子文档——不重建、AI 重跑写入', async () => {
+  // 首次运行 recordDigestDoc 失败（子文档已在 wiki 上建好但句柄没落下）：重跑必须找回它，
+  // 否则子文档永远停在占位行、AI 永不重调（违反幂等 spec）
+  const { store, lark, events, writes, generateDigest } = subdocSetup({
+    document: { documentId: 'doc-parent', url: 'https://example.feishu.cn/wiki/node-parent' },
+    nodeLookup: { node_token: 'node-parent', space_id: 'space-1' },
+    childNodes: [{ title: 'Digest', obj_type: 'docx', obj_token: 'doc-digest-old', node_token: 'node-digest-old' }],
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.ok(!events.includes('create-parent') && !events.includes('create-digest'), '找回路径不重建任何文档');
+  assert.ok(events.includes('list-children'), '列出子节点按标题找回');
+  assert.deepEqual(store.digestDocRecorded, {
+    documentId: 'doc-digest-old', nodeToken: 'node-digest-old', url: 'https://example.feishu.cn/wiki/node-digest-old',
+  }, '找回的句柄补落库');
+  assert.deepEqual(events.slice(events.indexOf('ai')), ['ai', 'clear:doc-digest-old', 'write:doc-digest-old'], 'AI 重跑并清空重写找回的子文档');
+  assert.deepEqual(store.completed.warnings, []);
+});
+
+test('AI 摘要子文档（#98）：找回不到子文档（被删/首次未建成）的重跑重建子文档', async () => {
+  const { store, lark, events, generateDigest } = subdocSetup({
+    document: { documentId: 'doc-parent', url: 'https://example.feishu.cn/wiki/node-parent' },
+    nodeLookup: { node_token: 'node-parent', space_id: 'space-1' },
+    childNodes: [],
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.ok(events.includes('list-children') && events.includes('create-digest'), '找回落空 → 重建子文档');
+  assert.deepEqual(store.digestDocRecorded, {
+    documentId: 'doc-digest', nodeToken: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest',
+  }, '新子文档句柄落库');
+  assert.ok(events.includes('ai'), 'AI 重跑');
+});
+
+test('AI 摘要子文档（#98）：AI 失败——子文档写入失败原因（与 job 警告同文案），job 部分成功', async () => {
+  const { store, lark, writes } = subdocSetup();
+  const generateDigest = async () => { throw Object.assign(new Error('invalid key'), { code: 'AI_AUTH_FAILED' }); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, '摘要失败不 fail job');
+  assert.equal(store.failed, null);
+  assert.deepEqual(store.completed.warnings, ['AI 摘要生成失败：AI API 密钥无效或没有权限']);
+  const digestWrites = writes.filter((entry) => entry.doc === 'doc-digest').map((entry) => entry.content);
+  assert.equal(digestWrites.at(-1), 'AI 摘要生成失败：AI API 密钥无效或没有权限', '子文档留下与警告同文案的失败原因');
+  assert.equal(store.digestRecorded, null, '失败不写缓存');
+});
+
+test('AI 摘要子文档（#98）：provider 悬空——子文档写明原因，不调 AI，job 仍成功', async () => {
+  const { store, lark, writes } = subdocSetup({ digest: { provider: 'ghost' } });
+  let ai = 0;
+  const generateDigest = async () => { ai += 1; return 'x'; };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async (name) => (name === 'ghost' ? null : AI_CONFIG) }).kick();
+  await store.settled;
+
+  assert.equal(ai, 0, 'provider 缺失不调 AI');
+  assert.deepEqual(store.completed.warnings, ['AI provider「ghost」不存在（可能已被删除），本次未生成摘要']);
+  const digestWrites = writes.filter((entry) => entry.doc === 'doc-digest').map((entry) => entry.content);
+  assert.equal(digestWrites.at(-1), 'AI provider「ghost」不存在（可能已被删除），本次未生成摘要');
+});
+
+test('AI 摘要子文档（#98）：node 目标——空建文档 + get_node 取 wiki 节点后挂子文档', async () => {
+  const { store, lark, events, calls, generateDigest } = subdocSetup({ destination: { kind: 'node', nodeToken: 'node-1' } });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  const createDoc = calls.find((args) => args[1] === '+create');
+  assert.ok(createDoc, 'node 目标走 docs +create');
+  assert.ok(!createDoc.includes('--content'), '先建空文档（正文等 get_node 后 append）');
+  assert.deepEqual(events, [
+    'create-doc', 'get-node', 'create-digest', 'record-digest-doc',
+    'write:doc-digest', 'write:doc-parent', 'sub-page-list',
+    'ai', 'clear:doc-digest', 'write:doc-digest',
+  ]);
+  const createDigest = calls.find((args) => args[1] === '+node-create');
+  assert.equal(createDigest[createDigest.indexOf('--parent-node-token') + 1], 'node-created', '子文档挂在 clip 文档的 wiki 节点下');
+  assert.equal(createDigest[createDigest.indexOf('--space-id') + 1], 'space-x', 'spaceId 取自 get_node 应答');
+  const subPageList = apiCalls(lark.calls, 'POST', '/children');
+  assert.match(JSON.parse(subPageList[0][subPageList[0].indexOf('--data') + 1]).children[0].sub_page_list.wiki_token, /node-created/);
+  assert.deepEqual(store.completed.warnings, []);
+});
+
+test('AI 摘要子文档（#98）：node 目标拿不到 wiki 节点 → 退化内联摘要 + 警告', async () => {
+  const { store, lark, events, writes, generateDigest } = subdocSetup({ destination: { kind: 'node', nodeToken: 'node-1' }, nodeLookup: null });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, '退化不 fail job');
+  assert.ok(!events.includes('create-digest'), '不建子文档');
+  assert.ok(events.includes('ai'), '补跑内联摘要阶段');
+  const parentWrite = writes.find((entry) => entry.doc === 'doc-parent');
+  assert.match(parentWrite.content, /前文 AI 要点 后文/, '占位符原位替换为摘要文本');
+  assert.match(store.completed.warnings.join('\n'), /回退为内联摘要/);
+  assert.equal(store.digestRecorded, 'AI 要点', '内联摘要照常缓存');
+});
+
+test('AI 摘要子文档（#98）：sub_page_list 插入失败仅记警告，子文档与正文照常', async () => {
+  const { store, lark, events, writes, generateDigest } = subdocSetup({
+    failOn: (args) => args[0] === 'api' && args[1] === 'POST' && args[2].includes('/children'),
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, '插入失败不 fail job');
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /子页面列表/);
+  assert.ok(events.includes('ai'), '摘要照常生成');
+  assert.equal(writes.filter((entry) => entry.doc === 'doc-digest').at(-1).content, 'AI 要点');
+});
+
+test('AI 摘要子文档（#98）：进度条目 digest 阶段开始建 waiting、调 AI 前翻 thinking、阶段结束即删', async () => {
+  const { store, lark } = subdocSetup();
+  let executor;
+  const seen = {};
+  const getAiConfig = async () => {
+    seen.atConfig = executor.digestProgressOf('attempt-pipe');
+    return AI_CONFIG;
+  };
+  const generateDigest = async ({ onProgress }) => {
+    assert.equal(typeof onProgress, 'function');
+    seen.atAi = executor.digestProgressOf('attempt-pipe');
+    onProgress({ phase: 'writing', tokens: 7 });
+    return 'AI 要点';
+  };
+  executor = new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig });
+  executor.kick();
+  await store.settled;
+
+  assert.deepEqual(seen.atConfig, { phase: 'waiting', tokens: 0 }, '阶段开始（取配置时）已是 waiting 条目');
+  assert.deepEqual(seen.atAi, { phase: 'thinking', tokens: 0 }, '调 AI 前翻 thinking（与内联一致）');
+  assert.equal(executor.digestProgressOf('attempt-pipe'), null, 'digest 阶段结束即删条目（后续图片阶段不误判 digesting）');
 });

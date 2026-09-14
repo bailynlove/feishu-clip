@@ -172,7 +172,7 @@ test('resolveDigest：缺字段/非法值一律归一为 null', () => {
     undefined,
   ]) {
     if (preset?.digest?.enabled === true) {
-      assert.deepEqual(resolveDigest(preset), { enabled: true, instruction: '', provider: '' }, '多余字段不携带');
+      assert.deepEqual(resolveDigest(preset), { enabled: true, instruction: '', provider: '', mode: 'subdoc', docTitleTemplate: 'Digest' }, '多余字段不携带');
     } else {
       assert.equal(resolveDigest(preset), null, JSON.stringify(preset));
     }
@@ -180,9 +180,26 @@ test('resolveDigest：缺字段/非法值一律归一为 null', () => {
 });
 
 test('resolveDigest：enabled:true 透传 instruction；非字符串 instruction 归一为空串（= 用全局）', () => {
-  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: '只保留结论' } }), { enabled: true, instruction: '只保留结论', provider: '' });
-  assert.deepEqual(resolveDigest({ digest: { enabled: true } }), { enabled: true, instruction: '', provider: '' });
-  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: 42 } }), { enabled: true, instruction: '', provider: '' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: '只保留结论' } }), { enabled: true, instruction: '只保留结论', provider: '', mode: 'subdoc', docTitleTemplate: 'Digest' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true } }), { enabled: true, instruction: '', provider: '', mode: 'subdoc', docTitleTemplate: 'Digest' });
+  assert.deepEqual(resolveDigest({ digest: { enabled: true, instruction: 42 } }), { enabled: true, instruction: '', provider: '', mode: 'subdoc', docTitleTemplate: 'Digest' });
+});
+
+// mode/docTitleTemplate（#98）：mode 缺省与非法值读作 'subdoc'（存量预设读侧迁移，改回
+// inline 可还原）；docTitleTemplate 非空白字符串直用，缺省/空白回落 'Digest'
+test('resolveDigest：mode 缺省读作 subdoc，inline 原样保留，非法值归一 subdoc', () => {
+  assert.equal(resolveDigest({ digest: { enabled: true } }).mode, 'subdoc', '缺省 = subdoc（存量预设迁移）');
+  assert.equal(resolveDigest({ digest: { enabled: true, mode: 'inline' } }).mode, 'inline', 'inline 可还原');
+  assert.equal(resolveDigest({ digest: { enabled: true, mode: 'subdoc' } }).mode, 'subdoc');
+  assert.equal(resolveDigest({ digest: { enabled: true, mode: 'weird' } }).mode, 'subdoc', '非法值归一 subdoc');
+  assert.equal(resolveDigest({ digest: { enabled: true, mode: 42 } }).mode, 'subdoc', '非字符串归一 subdoc');
+});
+
+test('resolveDigest：docTitleTemplate 缺省/空白回落 Digest，非空白原样透传', () => {
+  assert.equal(resolveDigest({ digest: { enabled: true } }).docTitleTemplate, 'Digest');
+  assert.equal(resolveDigest({ digest: { enabled: true, docTitleTemplate: '' } }).docTitleTemplate, 'Digest', '空白回落默认');
+  assert.equal(resolveDigest({ digest: { enabled: true, docTitleTemplate: 42 } }).docTitleTemplate, 'Digest', '非字符串回落默认');
+  assert.equal(resolveDigest({ digest: { enabled: true, docTitleTemplate: '摘要 · {{date}}' } }).docTitleTemplate, '摘要 · {{date}}', '模板原样透传');
 });
 
 // provider（#78）：预设选用的 AI provider 名；空串 = 默认 provider。缺省/非字符串归一为空串

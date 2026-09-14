@@ -52,7 +52,8 @@ export function resolvePdfDrive(preset) {
 
 // AI 摘要预设字段（#75）：读取时迁移——缺字段/非法值一律归一为 null；
 // enabled:true + instruction:'' = 开启但用全局指令（空串语义在 resolveDigestInstruction 解析）；
-// provider（#78）：选用的 AI provider 名，空串/缺省 = 默认 provider
+// provider（#78）：选用的 AI provider 名，空串/缺省 = 默认 provider；
+// mode（#98）：'inline' 建档前内联 / 'subdoc' 建档后写入 Digest 子文档，缺省读作 subdoc（含存量预设）
 export function resolveDigest(preset) {
   const value = preset?.digest;
   if (!value || typeof value !== 'object' || value.enabled !== true) return null;
@@ -60,8 +61,16 @@ export function resolveDigest(preset) {
     enabled: true,
     instruction: typeof value.instruction === 'string' ? value.instruction : '',
     provider: typeof value.provider === 'string' ? value.provider.trim() : '',
+    mode: value.mode === 'inline' ? 'inline' : 'subdoc',
+    docTitleTemplate:
+      typeof value.docTitleTemplate === 'string' && value.docTitleTemplate.trim()
+        ? value.docTitleTemplate
+        : DEFAULT_DIGEST_DOC_TITLE,
   };
 }
+
+// 子文档模式下 Digest 子文档的标题模板默认值（#98）：预设回落与设置页 placeholder 共用
+export const DEFAULT_DIGEST_DOC_TITLE = 'Digest';
 
 // 摘要指令解析顺序（#75）：预设级 > 全局（chrome.storage.local 的 aiDigestInstruction）> 内置默认；
 // 空串/非字符串视为未设置。在 background CLIP 路径解析，弹窗只透传预设级原值

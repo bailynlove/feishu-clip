@@ -1,7 +1,7 @@
 // 弹窗 job 状态的纯归约逻辑。recovered 表示该 attempt 是打开弹窗时从存储恢复的旧会话：
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
-import { createDefaultPreset, createDriveFolder, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDefaultPreset, createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
 import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
@@ -29,13 +29,16 @@ function warningsText(warnings) {
   return list.length > 1 ? `${list[0]}（等 ${list.length} 条）` : list[0];
 }
 
-// AI 摘要阶段进行中（#75）：digest 在建档（beginCreate）之前运行——此刻 step 仍是
+// AI 摘要阶段进行中（#75 inline / #98 subdoc）：inline 在建档（beginCreate）之前运行——此刻 step 仍是
 // create_document 且 createInFlight 未置位、document 未建档、digestText 未落库，
-// 与真正的建档阶段用 createInFlight 区分（这些字段都已在 job 视图里，无需改协议）
+// 与真正的建档阶段用 createInFlight 区分；subdoc 在建档后运行——document 已建档，
+// digestProgress 条目存活即摘要进行中（executor 在 digest 阶段开始建 waiting 条目、阶段结束即删）
 function clipInDigest(job) {
-  return job?.digest?.enabled === true
-    && (job.digestText ?? null) === null
-    && job.step === 'create_document'
+  if (job?.digest?.enabled !== true || (job.digestText ?? null) !== null) return false;
+  if (job.digest.mode !== 'inline') {
+    return Boolean(job.document) && job.digestProgress != null;
+  }
+  return job.step === 'create_document'
     && !job.createInFlight
     && !job.document;
 }
@@ -50,10 +53,14 @@ export function reduceDigestSince(jobs, digestSince, now) {
 }
 
 // digest 阶段进度文案：job 视图带 digestProgress（#86 流式）时优先相位/计数——
-// thinking（仅 reasoning delta）→「思考中」；writing →「已生成 N tokens」；
+// thinking（reasoning delta）→「思考中 · 约 N tokens」（#97；计数为 0 = 代理不吐 reasoning
+// delta，退回「思考中…」；与等待秒数同时可得时优先计数，单行太挤）；writing →「已生成 N tokens」；
 // 字段缺失（旧 bridge）退回 #85 的等待秒数，秒数也没有则维持原样
 function digestPhaseText(waitSeconds, digestProgress = null) {
-  if (digestProgress?.phase === 'thinking') return 'AI 摘要思考中…';
+  if (digestProgress?.phase === 'thinking') {
+    const tokens = digestProgress.tokens ?? 0;
+    return tokens > 0 ? `AI 摘要思考中 · 约 ${tokens} tokens` : 'AI 摘要思考中…';
+  }
   if (digestProgress?.phase === 'writing') return `AI 摘要生成中 · 已生成 ${digestProgress.tokens ?? 0} tokens`;
   return waitSeconds == null ? 'AI 摘要生成中…' : `AI 摘要生成中 · 已等待 ${waitSeconds} 秒`;
 }
@@ -149,8 +156,11 @@ export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds
     if (pdfAwaitingBytes) return { kind: 'progress', message: '需要浏览器凭据回传 PDF，正在传输…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
     return { kind: 'progress', message: 'PDF 上传中…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
   }
-  // 运行中：单条进度 + 阶段文案轮替
-  return { kind: 'progress', message: `${clipPhase(clip, digestWaitSeconds)} · ${pdfPhase(pdf)}`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
+  // 运行中：单条进度 + 阶段文案轮替。文档已成（带警告）但 PDF 仍在途时警告随进度条呈现——
+  // 否则「已按纯文本生成摘要」这类降级在 PDF 未完成期间完全不可见（MDPI 事故复盘）
+  const runningWarning = docOk && clip ? warningsText(clip.warnings) : null;
+  const runningMessage = `${clipPhase(clip, digestWaitSeconds)} · ${pdfPhase(pdf)}`;
+  return { kind: 'progress', message: runningWarning ? `${runningMessage} · ${runningWarning}` : runningMessage, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
 }
 
 // ——— PDF 存云盘会话开关（#65）：识别结果与会话开关都是仅本次状态，不回写预设 ———
@@ -523,12 +533,19 @@ export function composeClip(state, snapshot) {
 
 // 弹窗 CLIP 消息携带的 AI 摘要字段（#75）：开关 + 指令原值（空串 = 回落全局）+ provider 名
 // （空串 = 默认 provider）。#84 起取会话覆盖后的有效值：临时指令留空（含纯空白）则回落
-// 预设级指令，预设也没有则空串——全局指令与内置默认的回落在 background 解析，弹窗不读全局设置
+// 预设级指令，预设也没有则空串——全局指令与内置默认的回落在 background 解析，弹窗不读全局设置。
+// mode/docTitleTemplate（#98）不暴露会话覆盖，恒跟随当前预设（resolveDigest 已含缺省迁移）
 export function clipDigest(state) {
   const digest = sessionDigest(state);
-  const presetInstruction = resolveDigest(currentPreset(state))?.instruction ?? '';
-  const instruction = digest.instruction.trim() !== '' ? digest.instruction : presetInstruction;
-  return { digestEnabled: digest.on, digestInstruction: instruction, digestProvider: digest.provider };
+  const presetDigest = resolveDigest(currentPreset(state));
+  const instruction = digest.instruction.trim() !== '' ? digest.instruction : presetDigest?.instruction ?? '';
+  return {
+    digestEnabled: digest.on,
+    digestInstruction: instruction,
+    digestProvider: digest.provider,
+    digestMode: presetDigest?.mode ?? 'subdoc',
+    digestDocTitleTemplate: presetDigest?.docTitleTemplate ?? DEFAULT_DIGEST_DOC_TITLE,
+  };
 }
 
 // 导出文件名：渲染标题做文件系统安全清洗，空则回退 clip

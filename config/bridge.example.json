@@ -6,5 +6,6 @@
   "jobFile": "/Users/you/Library/Application Support/FeishuClip/state/jobs.json",
   "pairingFile": "/Users/you/Library/Application Support/FeishuClip/config/pairing.json",
   "aiConfigFile": "/Users/you/Library/Application Support/FeishuClip/config/ai.json",
-  "sweepIntervalMs": 60000
+  "sweepIntervalMs": 60000,
+  "awaitingBytesTtlMs": 600000
 }
