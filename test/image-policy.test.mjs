@@ -25,6 +25,16 @@ test('pinned DNS lookup supports Node single-address and all-address callback mo
   assert.deepEqual(all, [{ address: '8.8.8.8', family: 4 }]);
 });
 
+// 边缘节点轮转（#92）：定IP（SSRF 钉孔）意味着重试总打同一个 CDN 边缘节点——
+// 该节点被中间盒 RST 注入时全部重试都白搭。attempt 参数让重试换下一个 A 记录
+test('resolvePublicHost：attempt 参数在多 A 记录间轮转，取模轮回', async () => {
+  const records = [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }];
+  const lookup = async () => records;
+  assert.equal((await resolvePublicHost('example.test', lookup)).address, '8.8.8.8', '默认第 0 条');
+  assert.equal((await resolvePublicHost('example.test', lookup, 'IMAGE_SSRF_REJECTED', 1)).address, '1.1.1.1', '第 1 次重试换节点');
+  assert.equal((await resolvePublicHost('example.test', lookup, 'IMAGE_SSRF_REJECTED', 2)).address, '8.8.8.8', '取模轮回到第 0 条');
+});
+
 test('image byte policy accepts a small PNG and rejects unsupported or oversized content', () => {
   const png = Buffer.alloc(32);
   png.writeUInt32BE(320, 16);

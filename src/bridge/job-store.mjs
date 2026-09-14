@@ -93,10 +93,12 @@ export const JOB_KIND_STRATEGY = Object.freeze({
     consumer: 'pdf',
     // bytes 型提交（#68）直接落 awaiting_bytes 等扩展分块回传；url 型落 queued 由 executor 下载
     initialStatus: (pdfSource) => (pdfSource?.type === 'bytes' ? JOB_STATUS.AWAITING_BYTES : JOB_STATUS.QUEUED),
-    // pdf job 的 document 是上传产物 { fileToken, url }；上传歧义不走到这里（歧义按失败）
-    completePatch(job, { document }) {
+    // pdf job 的 document 是上传产物 { fileToken, url }；上传歧义不走到这里（歧义按失败）。
+    // 引用回填（#88）插入失败等部分成功以 warnings 落库，终态保持 succeeded——
+    // 弹窗聚合（describeAttemptView）只认 pdf.status === 'succeeded'
+    completePatch(job, { document, warnings }) {
       if (!document?.url) throw new TypeError('pdf job completion requires the uploaded file (url)');
-      return { document: structuredClone(document), status: JOB_STATUS.SUCCEEDED };
+      return { document: structuredClone(document), status: JOB_STATUS.SUCCEEDED, warnings: [...warnings] };
     },
     // pdf 最小状态集（#60）：上传歧义一律按失败处理——同名复传合法并存、孤儿文件无害，
     // 不做 reconciling/needs_attention/孤儿清理
@@ -186,8 +188,10 @@ export class PersistentJobStore {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
     if (!JOB_KINDS.has(kind)) throw new TypeError(`Unknown job kind: ${kind}`);
     // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名；
-    // folderToken（#66）是目标云盘目录，null 即根目录
-    const normalizedPdfSource = kind === JOB_KIND.PDF ? normalizePdfSource(pdfSource) : null;
+    // folderToken（#66）是目标云盘目录，null 即根目录。
+    // clip job（#79）：pdfSource 选填（digest 阶段 {{@file}} 附件用），给了就走同一份校验
+    const normalizedPdfSource = pdfSource ? normalizePdfSource(pdfSource) : null;
+    if (kind === JOB_KIND.PDF && !normalizedPdfSource) throw Object.assign(new TypeError('pdfSource.type must be url or bytes'), { code: 'PDF_SOURCE_REQUIRED' });
     const normalizedFolderToken = typeof folderToken === 'string' && folderToken ? folderToken : null;
 
     return this.#mutate(async (data) => {
@@ -279,6 +283,11 @@ export class PersistentJobStore {
         // 结果缓存——落库后重跑（reconcile 重排/任何原因重入 #execute）都不再调 AI
         digest: digest ? structuredClone(digest) : null,
         digestText: null,
+        // {{@file}} 附件（#79）：本次剪藏检出的 PDF，digest 阶段据此下载字节随摘要请求发出
+        pdfSource: normalizedPdfSource ? structuredClone(normalizedPdfSource) : null,
+        // PDF 云盘引用回填的幂等标记（#88）：pdf job 上传成功后把 PDF 插到本文档开头，
+        // 置位后 pdf job 重试/重跑不再重复插入
+        pdfRefInserted: false,
         status: JOB_STATUS.QUEUED,
         step: JOB_STEP.CREATE_DOCUMENT,
         document: null,
@@ -426,6 +435,23 @@ export class PersistentJobStore {
     });
   }
 
+  // PDF 云盘引用回填的幂等标记（#88）：mark-before-insert——pdf job 先置位再插入，
+  // 租约过期被 recoverExpired 重排后另一执行体读不到 claimed 就跳过，不双插；
+  // 插入失败由调用方以 inserted=false 清除标记，重试可补插。返回 { job, claimed }：
+  // claimed=true 仅当本调用完成 false→true 跃迁（抢到了插入权）。
+  // clip job 此时通常已是终态（凭据回退场景 pdf 晚于 clip 完成），故不做 worker 守卫
+  async markPdfRefInserted(attemptId, inserted = true) {
+    if (typeof inserted !== 'boolean') throw new TypeError('inserted must be a boolean');
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.CLIP);
+      const claimed = inserted === true && job.pdfRefInserted !== true;
+      if (job.pdfRefInserted === inserted) return { result: { job: structuredClone(job), claimed }, changed: false };
+      job.pdfRefInserted = inserted;
+      job.updatedAt = this.#now();
+      return { result: { job: structuredClone(job), claimed }, changed: true };
+    });
+  }
+
   async cancel(attemptId, kind = JOB_KIND.CLIP) {
     return this.#mutate(async (data) => {
       const job = this.#findJob(data, attemptId, kind);
@@ -498,6 +524,23 @@ export class PersistentJobStore {
       this.#assertActiveWorker(job, workerId);
       job.status = JOB_STATUS.AWAITING_BYTES;
       this.#releaseLease(job);
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
+  // 凭据回退的另一半触发路径（#80）：clip 的 digest 阶段自行下载撞 401/403 时，pdf job 还
+  // 排在队列里（提交序 clip 在前、executor 串行消费），等不到它自己撞凭据——由 clip 侧把
+  // 排队中的 url 型 pdf job 直接转 awaiting_bytes（与 awaitBytes 同终态），弹窗轮询看到后喂字节。
+  // 已 awaiting（含 bytes 型提交）幂等空转；其余状态拒绝，调用方按降级语义处理
+  async requestBytes(attemptId) {
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      if (job.status === JOB_STATUS.AWAITING_BYTES) return { result: structuredClone(job), changed: false };
+      if (job.status !== JOB_STATUS.QUEUED || job.pdfSource?.type !== 'url') {
+        throw new Error(`Cannot request bytes for pdf job in ${job.status} state`);
+      }
+      job.status = JOB_STATUS.AWAITING_BYTES;
       job.updatedAt = this.#now();
       return { result: structuredClone(job), changed: true };
     });
@@ -635,10 +678,14 @@ export class PersistentJobStore {
         // 存量 pdf job 没有 folderToken（#66 前目录固定根目录），读取时补 null
         job.kind = jobKind(job);
         if (job.kind === JOB_KIND.PDF) job.folderToken ??= null;
-        // AI 摘要（#75）：存量 clip job 没有 digest/digestText，读取时补 null
+        // AI 摘要（#75）：存量 clip job 没有 digest/digestText，读取时补 null；
+        // {{@file}} 附件（#79）：存量 clip job 没有 pdfSource，读取时补 null
         if (job.kind === JOB_KIND.CLIP) {
           job.digest ??= null;
           job.digestText ??= null;
+          job.pdfSource ??= null;
+          // 引用回填（#88）：存量 clip job 没有 pdfRefInserted，读取时补 false
+          job.pdfRefInserted ??= false;
         }
       }
       return data;

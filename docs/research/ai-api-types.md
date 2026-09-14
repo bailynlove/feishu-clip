@@ -54,6 +54,14 @@
 4. **文本提取容错**：三种路径分别为——遍历 `output[].content[]` 找 `output_text` / `choices[0].message.content` / `content[]` 找 `type=="text"`；同时检查 OpenAI 的 `status != "completed"` 和 Anthropic 的 `stop_reason == "max_tokens"`。
 5. **错误处理**：两个厂商都把错误塞在 `error` 对象里（OpenAI `{message,type,param,code}`，Anthropic `{type:"error",error:{type,message}}`），统一读 `error.message` 展示即可；429/529/5xx 可重试（尊重 `Retry-After`）。
 
+## 附：PDF 文件附件契约（#79，digest 指令 `{{@file}}` 占位符）
+
+调查日期：2026-09-14。三型都支持把 PDF 以 base64 附件加进请求；附件块一律放在文本块之前（Anthropic 官方建议 PDFs before text）。上限取 32 MB（Anthropic 整请求体上限，三型共一档，超出由 executor 降级纯文本）。
+
+- **Responses**：`input` 从纯字符串升级为 user 消息项 `[{ role: "user", content: [{ type: "input_file", filename, file_data: "data:application/pdf;base64,..." }, { type: "input_text", text }] }]`；`instructions` 顶层不变。来源：[OpenAI File inputs 指南](https://platform.openai.com/docs/guides/pdf-files)、openai-dotnet issue [#382](https://github.com/openai/openai-dotnet/issues/382) 的官方示例。
+- **Chat Completions**：user 消息 `content` 升级为块数组 `[{ type: "file", file: { filename, file_data: "data:application/pdf;base64,..." } }, { type: "text", text }]`。来源：同上指南、OpenAI 社区[实测请求体](https://community.openai.com/t/base64-file-not-going-through-api/1144263/2)。
+- **Messages（Anthropic）**：user 消息 `content` 升级为块数组 `[{ type: "document", source: { type: "base64", media_type: "application/pdf", data: "<裸 base64，无 data: 前缀>" } }, { type: "text", text }]`；`max_tokens` 必传不变。来源：[Claude PDF support 官方文档](https://platform.claude.com/docs/en/build-with-claude/pdf-support)（含 32 MB 请求上限、600 页上限）。
+
 ## 证据与复核方式
 
 - OpenAI 文档页（JS 渲染重，"主文本"抽取不完整时）以官方 OpenAPI spec 为准：`curl -sL https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml`，查 `CreateResponse`（required: model, input）、`ResponseProperties.instructions/max_output_tokens`、`Response.status/error/incomplete_details`、`ErrorResponse/Error`、`CreateChatCompletionRequest`（required: model, messages；max_tokens deprecated 文案）。

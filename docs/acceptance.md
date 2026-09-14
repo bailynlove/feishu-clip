@@ -1,3 +1,5 @@
+> **This file is a frozen archive as of 2026-09-14.** Acceptance specs and evidence now live in the 验收 Specs field of each ticket in the Feishu Bitable issue tracker (https://my.feishu.cn/wiki/YwzbwEheuiYSkbk2Shfc2lcWnzd). Do not append new sections here.
+
 # MVP acceptance evidence
 
 Date: 2026-08-12 (Asia/Shanghai)

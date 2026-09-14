@@ -231,6 +231,8 @@
 .popup .status-text{flex:1}
 .popup .status-close{border:0;background:rgba(255,255,255,.55);color:var(--brand-ink);border-radius:999px;width:20px;height:20px;font-size:13px;line-height:1;cursor:pointer;flex-shrink:0;padding:0;display:grid;place-content:center}
 .popup .status.error{background:#fff0f1;color:#962932;box-shadow:none}
+/* 与 error 同理：warning 需盖过上方 .popup .status 的品牌底纹（同优先级后定义者胜出） */
+.popup .status.warning{background:#fff5dd;color:#7a4800;box-shadow:none}
 .popup .cta{margin-top:auto;display:flex;flex-direction:column;gap:8px}
 /* 双产物链接并排（#65）：单链接时自然占满整行 */
 .popup .cta-links{display:flex;gap:8px}

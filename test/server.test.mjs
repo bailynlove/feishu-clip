@@ -229,6 +229,7 @@ test('POST /v1/jobs with pdfSource queues a second pdf job; GET returns both job
     const accepted = await submitted.json();
     assert.equal(accepted.ok, true);
     assert.equal(accepted.job.kind ?? 'clip', 'clip');
+    assert.equal(accepted.job.pdfSource.url, pdfSource.url, 'clip job 同携 pdfSource（#79：digest {{@file}} 附件用）');
     assert.equal(accepted.pdfJob.kind, 'pdf', '响应带第二条 pdf job');
     assert.equal(accepted.pdfJob.title, 'Attention Is All You Need');
     assert.equal(accepted.pdfJob.pdfSource.url, pdfSource.url);
@@ -694,7 +695,7 @@ test('AI provider 端点（#77）：列表/增改/改名/删除保护/key 不回
   }
 });
 
-test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction ≤4000 字符，合法值随 job 落库', async () => {
+test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction（长度不设限），合法值随 job 落库', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-digest-'));
   const pairingFile = path.join(directory, 'pairing.json');
   const code = 'digest-pairing-code';
@@ -726,12 +727,11 @@ test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction �
       return body.jobs?.find((job) => job.kind === 'clip') ?? null;
     };
 
-    // enabled===true 时：缺 instruction / 空串 / 超长 一律 400 DIGEST_INVALID
+    // enabled===true 时：缺 instruction / 空串 / 非字符串 一律 400 DIGEST_INVALID（长度不设限）
     for (const [index, digest] of [
       { enabled: true },
       { enabled: true, instruction: '' },
       { enabled: true, instruction: '   ' },
-      { enabled: true, instruction: 'x'.repeat(4001) },
       { enabled: true, instruction: 42 },
       // provider（#78）：非字符串/空白/超长同样 DIGEST_INVALID
       { enabled: true, instruction: 'i', provider: 42 },
@@ -743,7 +743,11 @@ test('POST /v1/jobs 的 digest 字段：enabled 时必须带非空 instruction �
       assert.equal((await rejected.json()).code, 'DIGEST_INVALID');
     }
 
-    // 合法 digest 随 job 落库；enabled:false 归一为 null
+    // 合法 digest 随 job 落库；长指令（原 4000 上限已取消）原样落库不截断；enabled:false 归一为 null
+    const longInstruction = `总结成三点。${'长'.repeat(5000)}`;
+    const longValid = await submit('80808080-1111-4111-8111-111111111111', { enabled: true, instruction: longInstruction });
+    assert.equal(longValid.status, 202, '长指令不再被拒绝');
+    assert.equal((await readClipJob('80808080-1111-4111-8111-111111111111')).digest.instruction, longInstruction, '长指令原样落库');
     const valid = await submit('81818181-1111-4111-8111-111111111111', { enabled: true, instruction: '总结成三点' });
     assert.equal(valid.status, 202);
     const off = await submit('82828282-1111-4111-8111-111111111111', { enabled: false });

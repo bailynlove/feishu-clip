@@ -65,6 +65,43 @@ test('in-flight jobs keep polling with progress text', () => {
   assert.equal(describeJobView({ status: 'running' }, { recovered: false }).kind, 'progress');
 });
 
+// ——— AI 摘要失败的可见性：bridge 把 digest 失败并入 job.warnings（部分成功降级），
+// 弹窗必须如实呈现警告内容，而不是笼统的「N 张图片需要注意」———
+
+test('digest 失败警告 → warning 行直接呈现首条警告内容', () => {
+  const digestFailed = { status: 'succeeded_with_warnings', warnings: ['AI 摘要生成失败：AI 响应未成功（max_output_tokens）'], document: { url: 'https://example.feishu.cn/wiki/d1' } };
+  const view = describeJobView(digestFailed);
+  assert.equal(view.kind, 'warning');
+  assert.equal(view.message, '已保存到飞书 · AI 摘要生成失败：AI 响应未成功（max_output_tokens）');
+  assert.equal(view.documentUrl, digestFailed.document.url);
+  assert.equal(view.swapPrimary, true, '文档已保存，当次会话仍换「打开文档」主按钮');
+});
+
+test('多条警告 → 取首条并追加「等 N 条」', () => {
+  const view = describeJobView({ status: 'succeeded_with_warnings', warnings: ['AI 摘要生成失败：boom', '图片 2：超时'], document: { url: 'https://example.feishu.cn/wiki/d2' } });
+  assert.equal(view.kind, 'warning');
+  assert.equal(view.message, '已保存到飞书 · AI 摘要生成失败：boom（等 2 条）');
+});
+
+test('成功且无警告时现状文案不变（回归）', () => {
+  assert.equal(describeJobView(succeededJob).kind, 'success');
+  assert.equal(describeJobView(succeededJob).message, '已保存到飞书。');
+});
+
+// digest 阶段在建档（beginCreate）之前运行：step 仍是 create_document 且 createInFlight 未置位，
+// job 视图已带这些字段（step/createInFlight/digest/digestText），弹窗据此区分「AI 摘要生成中…」
+test('digest 阶段进行中 → 进度文案「AI 摘要生成中…」；其余阶段文案不变', () => {
+  const digesting = { status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+  assert.equal(describeJobView(digesting).message, 'AI 摘要生成中…');
+  const creating = { ...digesting, createInFlight: true };
+  assert.equal(describeJobView(creating).message, '正在创建飞书文档并处理图片…', '建档进行中不误判成摘要阶段');
+  const cached = { ...digesting, digestText: '摘要正文' };
+  assert.equal(describeJobView(cached).message, '正在创建飞书文档并处理图片…', 'digestText 已缓存（重跑）即摘要阶段已结束');
+  assert.equal(describeJobView({ status: 'running' }).message, '正在创建飞书文档并处理图片…', '未开摘要的剪藏行为不变');
+  const queued = { status: 'queued', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+  assert.equal(describeJobView(queued).message, '已提交，等待本地 Bridge 处理…', '排队中优先显示排队文案');
+});
+
 // ——— #36：预设选择与可编辑标题 ———
 
 const tab = { title: '深入理解剪藏', url: 'https://blog.example.com/posts/42' };
@@ -663,6 +700,23 @@ test('describeAttemptView：运行中 → 单条进度 + 阶段文案', () => {
   const half = describeAttemptView([clipOk, { kind: 'pdf', status: 'running' }]);
   assert.equal(half.kind, 'progress');
   assert.equal(half.message, '文档 ✓ · PDF 上传中…');
+});
+
+test('describeAttemptView：clip 在 digest 阶段 → 阶段文案轮替出「AI 摘要生成中…」', () => {
+  const clipDigesting = { kind: 'clip', status: 'running', step: 'create_document', createInFlight: false, document: null, digest: { enabled: true }, digestText: null };
+  const view = describeAttemptView([clipDigesting, { kind: 'pdf', status: 'running' }]);
+  assert.equal(view.kind, 'progress');
+  assert.equal(view.message, 'AI 摘要生成中… · PDF 上传中…');
+});
+
+test('describeAttemptView：文档与 PDF 均成功但 clip 有警告 → warning 呈现警告内容', () => {
+  const clipWarn = { kind: 'clip', status: 'succeeded_with_warnings', warnings: ['AI 摘要生成失败：AI 响应未成功（max_output_tokens）'], document: { url: 'https://example.feishu.cn/wiki/d3' } };
+  const view = describeAttemptView([clipWarn, pdfOk]);
+  assert.equal(view.kind, 'warning');
+  assert.equal(view.message, '已保存 ✓ 文档与 PDF 均已入库 · AI 摘要生成失败：AI 响应未成功（max_output_tokens）');
+  assert.equal(view.documentUrl, clipWarn.document.url);
+  assert.equal(view.pdfUrl, pdfOk.document.url);
+  assert.equal(view.swapPrimary, true);
 });
 
 test('describeAttemptView：pdf-only 尝试防御性处理；空数组返回 null', () => {

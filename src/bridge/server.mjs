@@ -124,6 +124,8 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
   const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? (name) => (name ? aiStore.readProvider(name) : aiStore.readDefault()) : async () => null });
   // 过期恢复 + 建档歧义查证（reconcile）+ 消费队列：启动时跑一遍，之后周期 sweep，
   // reconciling 任务不再依赖 bridge 重启才能被捞起（#51）。unref 不拖进程退出。
+  // sweep 是轻量本地操作，默认 60s 一次（#90，原 10min 间隔下死任务最长 10 分钟才被恢复，
+  // 用户看到的是任务长时间无更新）；lease 60s 过期后最迟约 1 分钟内被 recoverExpired 发现
   // staging 清理（#68）：随 recoverExpired 的 expired 列表即时 discard，再按 mtime 扫超龄孤儿；
   // cancelled 的 pdf job（cancel 无 HTTP 端点、store 层不碰文件系统）也在这里即时 discard，
   // 不等超龄孤儿兜底
@@ -138,7 +140,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
   await sweep();
   const sweepTimer = setInterval(() => {
     sweep().catch((error) => logger.error('periodic sweep failed', error));
-  }, config.sweepIntervalMs ?? 10 * 60_000);
+  }, config.sweepIntervalMs ?? 60_000);
   sweepTimer.unref();
 
   const server = createServer(async (request, response) => {
@@ -369,13 +371,14 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         catch (error) { return send(response, 422, { ok: false, code: 'INVALID_TARGET', message: error.message }, origin); }
         // 图片写入模式（#53）：合法三态直用；非法/缺省回退旧 includeImages 布尔语义（false → off，其余 → preview）
         const imageMode = IMAGE_MODES.includes(body.imageMode) ? body.imageMode : (body.includeImages === false ? 'off' : 'preview');
-        // AI 摘要（#75）：digest.enabled===true 时要求非空 instruction ≤4000 字符；pdf-only 路径忽略。
+        // AI 摘要（#75）：digest.enabled===true 时要求非空 instruction（长度不设限——长系统指令
+        // 是合法用法，截断曾切掉尾部 {{@file}} 导致 AI 收不到 PDF）；pdf-only 路径忽略。
         // provider（#78）：选填，非空字符串 ≤64（与 provider 命名上限一致）；缺省 = 默认 provider
         let digest = null;
         if (body.digest?.enabled === true) {
           const instruction = body.digest.instruction;
-          if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 4000) {
-            return send(response, 400, { ok: false, code: 'DIGEST_INVALID', message: '开启 AI 摘要时必须提供非空摘要指令（≤4000 字符）' }, origin);
+          if (typeof instruction !== 'string' || !instruction.trim()) {
+            return send(response, 400, { ok: false, code: 'DIGEST_INVALID', message: '开启 AI 摘要时必须提供非空摘要指令' }, origin);
           }
           digest = { enabled: true, instruction };
           const provider = body.digest.provider;
@@ -395,6 +398,8 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           imageMode,
           clientTiming,
           digest,
+          // {{@file}} 附件（#79）：clip job 同携 pdfSource，digest 阶段检出占位符时据此下载
+          pdfSource,
         });
         // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名；
         // folderToken（#66）是 picker/弹窗选定的云盘目录，null 即根目录

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>预设弹窗原型（#33）</title>
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="variant-a.css">
+<link rel="stylesheet" href="variant-b.css">
+<link rel="stylesheet" href="variant-c.css">
+<style>
+  /* 原型外壳样式，不属于任何变体 */
+  body { margin: 0; background: #e8eaee; font-family: -apple-system, "PingFang SC", sans-serif; display: flex; flex-direction: column; align-items: center; padding: 24px 0 90px; }
+  .console { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 560px; margin-bottom: 16px; padding: 10px 14px; background: #d5d9e0; border-radius: 10px; }
+  .console span { font-size: 12px; color: #555; align-self: center; margin-right: 4px; }
+  .console button { font-size: 12px; padding: 4px 10px; border: 1px solid #b8bec9; background: #fff; border-radius: 6px; cursor: pointer; }
+  .console button.on { background: #333; color: #fff; border-color: #333; }
+  #frame { width: 380px; height: 560px; border-radius: 12px; overflow: hidden; position: relative; box-shadow: 0 8px 32px rgba(20,30,50,.18); background: #fff; }
+  .switcher { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; background: #1c2333; color: #fff; border-radius: 999px; padding: 8px 16px; font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.35); z-index: 99; }
+  .switcher button { background: none; border: none; color: #fff; font-size: 16px; cursor: pointer; padding: 2px 8px; }
+  .switcher .vname { min-width: 170px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="console" id="console"><span>原型控制台 · 强制状态：</span></div>
+<div id="frame"></div>
+<div class="switcher">
+  <button id="prev" title="←">‹</button>
+  <span class="vname" id="vname"></span>
+  <button id="next" title="→">›</button>
+</div>
+<script src="mock.js"></script>
+<script src="ui.js"></script>
+<script src="variant-a.js"></script>
+<script src="variant-b.js"></script>
+<script src="variant-c.js"></script>
+<script src="shell.js"></script>
+</body>
+</html>

@@ -458,7 +458,7 @@ test('CLIP digestEnabled：{{digest}} 以字面量穿过正文渲染，digest �
   assert.ok(lastJobsBody.snapshot.markdown.startsWith('{{digest}} # 正文'), '{{ digest }} 归一为 {{digest}}');
 });
 
-test('CLIP digestEnabled 指令回落顺序：预设级 > 全局 > 内置默认；超长截断 4000', async () => {
+test('CLIP digestEnabled 指令回落顺序：预设级 > 全局 > 内置默认；长指令不截断', async () => {
   const destination = { kind: 'node', nodeToken: 'n1' };
   try {
     // 预设级与全局都未设置 → 内置默认（陈旧弹窗发来空指令也不会落空）
@@ -475,9 +475,9 @@ test('CLIP digestEnabled 指令回落顺序：预设级 > 全局 > 内置默认�
     await send({ type: 'CLIP', destination, digestEnabled: true, digestInstruction: '预设指令' });
     assert.equal(lastJobsBody.digest.instruction, '预设指令');
 
-    // 超长截断到 bridge 校验上限 4000
+    // 长指令不截断（4000 上限已取消——截断曾切掉尾部 {{@file}} 导致 AI 收不到 PDF）
     await send({ type: 'CLIP', destination, digestEnabled: true, digestInstruction: '长'.repeat(5000) });
-    assert.equal(lastJobsBody.digest.instruction.length, 4000);
+    assert.equal(lastJobsBody.digest.instruction.length, 5000, '长指令原样进 body');
 
     // provider（#78）：digestProvider 非空随 digest 落 body；空串/缺省不带该键（= 默认 provider）
     await send({ type: 'CLIP', destination, digestEnabled: true, digestProvider: 'ds' });

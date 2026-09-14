@@ -49,7 +49,7 @@ export function isPublicIp(address) {
   return false;
 }
 
-export async function resolvePublicHost(hostname, lookup = dns.lookup, code = 'IMAGE_SSRF_REJECTED') {
+export async function resolvePublicHost(hostname, lookup = dns.lookup, code = 'IMAGE_SSRF_REJECTED', attempt = 0) {
   if (net.isIP(hostname)) {
     if (!isPublicIp(hostname)) throw Object.assign(new Error(code), { code });
     return { address: hostname, family: net.isIP(hostname) };
@@ -58,7 +58,9 @@ export async function resolvePublicHost(hostname, lookup = dns.lookup, code = 'I
   if (!records.length || records.some((record) => !isPublicIp(record.address))) {
     throw Object.assign(new Error(code), { code });
   }
-  return records[0];
+  // 边缘节点轮转（#92）：钉孔固定单一 IP，重试打同一个被 RST 注入的 CDN 边缘会全部白费；
+  // attempt 取模让每次重试换下一个 A 记录（与浏览器/curl 的 try-next-address 行为对齐）
+  return records[attempt % records.length];
 }
 
 function dimensions(buffer, mimeType) {
@@ -200,11 +202,11 @@ export function requestPublicBytes(url, record, { accept, maxBytes, label, timeo
   }).finally(release));
 }
 
-export async function downloadPublicImage(source, { limits = IMAGE_LIMITS, lookup = dns.lookup } = {}) {
+export async function downloadPublicImage(source, { limits = IMAGE_LIMITS, lookup = dns.lookup, attempt = 0 } = {}) {
   let url = new URL(source);
   for (let redirects = 0; redirects <= limits.maxRedirects; redirects += 1) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error('IMAGE_URL_REJECTED'), { code: 'IMAGE_URL_REJECTED' });
-    const record = await resolvePublicHost(url.hostname, lookup);
+    const record = await resolvePublicHost(url.hostname, lookup, 'IMAGE_SSRF_REJECTED', attempt);
     const result = await requestPublicBytes(url, record, { accept: 'image/jpeg,image/png,image/gif,image/webp', maxBytes: limits.maxImageBytes, label: 'IMAGE' });
     if (result.redirect) { url = result.redirect; continue; }
     return { ...result, source: url.href, metadata: validateImageBytes(result.buffer, result.mimeType, limits) };
@@ -230,11 +232,11 @@ export function assertPdfBytes(buffer) {
   }
 }
 
-export async function downloadPublicPdf(source, { limits = PDF_LIMITS, lookup = dns.lookup } = {}) {
+export async function downloadPublicPdf(source, { limits = PDF_LIMITS, lookup = dns.lookup, attempt = 0 } = {}) {
   let url = new URL(source);
   for (let redirects = 0; redirects <= limits.maxRedirects; redirects += 1) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error('PDF_URL_REJECTED'), { code: 'PDF_URL_REJECTED' });
-    const record = await resolvePublicHost(url.hostname, lookup, 'PDF_SSRF_REJECTED');
+    const record = await resolvePublicHost(url.hostname, lookup, 'PDF_SSRF_REJECTED', attempt);
     const result = await requestPublicBytes(url, record, {
       accept: 'application/pdf',
       maxBytes: limits.maxBytes,

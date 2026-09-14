@@ -14,13 +14,40 @@ export const AI_DEFAULT_BASE_URL = Object.freeze({
   messages: 'https://api.anthropic.com',
 });
 
-export const AI_TIMEOUT_MS = 60_000;
+// 内置默认 180s：reasoning 模型（glm-5.3-flash 等）思考也耗时，60s 对慢 provider 太紧；
+// 用户可在「高级设置」按 provider 覆盖（config.timeoutMs）
+export const AI_TIMEOUT_MS = 180_000;
 export const AI_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const AI_MAX_INPUT_CHARS = 100_000;
 export const AI_MAX_OUTPUT_TOKENS = 2048;
 // maxOutputTokens 选填上限：reasoning 模型（gpt-5 系/o 系）reasoning 也烧 output tokens，
 // 默认 2048 可能不够，用户可在「高级设置」调高；上限防手滑
 export const AI_MAX_OUTPUT_TOKENS_LIMIT = 128_000;
+// timeoutMs（高级设置）选填范围：5–1800 秒（毫秒整数）；下限防误配成秒数，上限防手滑
+export const AI_TIMEOUT_MS_MIN = 5_000;
+export const AI_TIMEOUT_MS_LIMIT = 1_800_000;
+
+// {{@file}} 占位符（#79）：指令中检出即把本次剪藏的 PDF 以 base64 附件加进 AI 请求。
+// 附件上限 32 MB 对齐 Anthropic 请求体上限（三型共一档）；超出由 executor 降级为纯文本摘要
+export const AI_FILE_MAX_BYTES = 32 * 1024 * 1024;
+// 内置默认摘要指令：与 src/extension/presets.js 的 DEFAULT_DIGEST_INSTRUCTION 同一份——
+// SW 与 bridge 分属两个运行时，无法共享模块，修改须两边同步
+export const DEFAULT_DIGEST_INSTRUCTION = '请用与正文相同的语言，把以下网页正文总结为 3-6 条要点，每条一句话，直接输出要点列表，不要输出额外解释。';
+
+const FILE_PLACEHOLDER = /\{\{\s*@file\s*\}\}/;
+
+export function hasFilePlaceholder(instruction) {
+  return FILE_PLACEHOLDER.test(String(instruction ?? ''));
+}
+
+// 剥除 {{@file}}（全部出现，含空格写法）；剥完为空白时回落内置默认（与扩展侧解析兜底同一份）。
+// 无占位符时原样返回——不动 trim，保证无 {{@file}} 指令的请求体与既有行为逐字节一致
+export function stripFilePlaceholder(instruction) {
+  const text = String(instruction ?? '');
+  if (!FILE_PLACEHOLDER.test(text)) return text;
+  const stripped = text.replace(new RegExp(FILE_PLACEHOLDER.source, 'g'), '').trim();
+  return stripped || DEFAULT_DIGEST_INSTRUCTION;
+}
 
 const AI_LIMITS = Object.freeze({
   baseUrlChars: 300,
@@ -41,35 +68,76 @@ function trimTrailingSlash(value) {
 
 // ——— 请求构造器（每型 ~20 行，非流式）：认证方式与请求体形状按类型各自的契约 ———
 
+// pdf 附件（#79）：{ filename, dataBase64 }，null 表示纯文本摘要（请求体与现状完全一致）。
+// OpenAI 两型走 base64 data URL 的 file 输入块；Anthropic 走 document 块（data 为裸 base64）
+function pdfDataUrl(pdf) {
+  return `data:application/pdf;base64,${pdf.dataBase64}`;
+}
+
 const REQUEST_BUILDERS = {
   // OpenAI Responses：instructions 是顶层系统指令字段，input 可以是纯字符串；
   // store:false 关闭服务端留存；max_output_tokens 是这型的上限字段。
   // config.headers（高级设置的自定义请求头）最后展开：可追加路由头（如 opencode-go 的
-  // x-opencode-session），也可覆盖默认头（特殊网关改认证方案场景）——三型同一约定
-  responses(config, instruction, content, maxOutputTokens) {
+  // x-opencode-session），也可覆盖默认头（特殊网关改认证方案场景）——三型同一约定。
+  // 带附件时 input 升级为 user 消息项：input_file 块（filename + file_data data URL）在文本前
+  responses(config, instruction, content, maxOutputTokens, pdf = null) {
     return {
       url: `${trimTrailingSlash(config.baseUrl)}/responses`,
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...config.headers },
-      body: { model: config.model, instructions: instruction, input: content, store: false, max_output_tokens: maxOutputTokens },
+      body: {
+        model: config.model,
+        instructions: instruction,
+        input: pdf
+          ? [{ role: 'user', content: [
+            { type: 'input_file', filename: pdf.filename, file_data: pdfDataUrl(pdf) },
+            { type: 'input_text', text: content },
+          ] }]
+          : content,
+        store: false,
+        max_output_tokens: maxOutputTokens,
+      },
     };
   },
-  // OpenAI Chat Completions：max_tokens 已废弃，必须用 max_completion_tokens
-  'chat-completions': (config, instruction, content, maxOutputTokens) => ({
+  // OpenAI Chat Completions：max_tokens 已废弃，必须用 max_completion_tokens；
+  // 带附件时 user 消息 content 升级为块数组：file 块（file.file_data data URL）在文本前
+  'chat-completions': (config, instruction, content, maxOutputTokens, pdf = null) => ({
     url: `${trimTrailingSlash(config.baseUrl)}/chat/completions`,
     headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...config.headers },
     body: {
       model: config.model,
-      messages: [{ role: 'system', content: instruction }, { role: 'user', content }],
+      messages: [
+        { role: 'system', content: instruction },
+        pdf
+          ? { role: 'user', content: [
+            { type: 'file', file: { filename: pdf.filename, file_data: pdfDataUrl(pdf) } },
+            { type: 'text', text: content },
+          ] }
+          : { role: 'user', content },
+      ],
       max_completion_tokens: maxOutputTokens,
     },
   }),
   // Anthropic Messages：max_tokens 必填；system 是顶层字段不在 messages 里；
-  // anthropic-version 为必传头，硬编码当前文档示例值
-  messages(config, instruction, content, maxOutputTokens) {
+  // anthropic-version 为必传头，硬编码当前文档示例值。
+  // 带附件时 user content 升级为块数组：document 块（base64 source，data 为裸 base64）在文本前
+  messages(config, instruction, content, maxOutputTokens, pdf = null) {
     return {
       url: `${trimTrailingSlash(config.baseUrl)}/v1/messages`,
       headers: { 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json', ...config.headers },
-      body: { model: config.model, max_tokens: maxOutputTokens, system: instruction, messages: [{ role: 'user', content }] },
+      body: {
+        model: config.model,
+        max_tokens: maxOutputTokens,
+        system: instruction,
+        messages: [{
+          role: 'user',
+          content: pdf
+            ? [
+              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf.dataBase64 } },
+              { type: 'text', text: content },
+            ]
+            : content,
+        }],
+      },
     };
   },
 };
@@ -156,17 +224,20 @@ function truncateInput(content) {
   return `${text.slice(0, AI_MAX_INPUT_CHARS)}\n\n（正文过长，已截断）`;
 }
 
-// fetchImpl 可注入（测试不走网络）；maxOutputTokens 显式参数（测试连通性探针与超时测试）
-// 优先，其次 config.maxOutputTokens（高级设置），最后内置默认 2048
-export async function generateDigest({ config, instruction, content, fetchImpl = fetch, maxOutputTokens, timeoutMs = AI_TIMEOUT_MS }) {
+// fetchImpl 可注入（测试不走网络）；maxOutputTokens/timeoutMs 显式参数（测试连通性探针与超时测试）
+// 优先，其次 config 里的高级设置，最后内置默认（2048 / AI_TIMEOUT_MS 180s）。
+// pdf（#79）：{{@file}} 附件 { filename, dataBase64 }，由 executor 检出占位符并下载后传入；
+// 占位符剥除与空指令兜底在这里统一做，无论附件是否随请求发出
+export async function generateDigest({ config, instruction, content, pdf = null, fetchImpl = fetch, maxOutputTokens, timeoutMs }) {
   if (!config || !AI_API_TYPES.includes(config.apiType) || !config.model || !config.apiKey) {
     throw aiError('AI_NOT_CONFIGURED', '未配置 AI API');
   }
   const merged = { ...config, baseUrl: config.baseUrl || AI_DEFAULT_BASE_URL[config.apiType] };
   const outputTokens = maxOutputTokens ?? merged.maxOutputTokens ?? AI_MAX_OUTPUT_TOKENS;
-  const request = REQUEST_BUILDERS[merged.apiType](merged, instruction, truncateInput(content), outputTokens);
+  const requestTimeoutMs = timeoutMs ?? merged.timeoutMs ?? AI_TIMEOUT_MS;
+  const request = REQUEST_BUILDERS[merged.apiType](merged, stripFilePlaceholder(instruction), truncateInput(content), outputTokens, pdf);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   let response;
   try {
     // redirect:'error'：AI 端点不该跳转，跳转了多半是配置错的网关/代理，直接失败
@@ -273,6 +344,15 @@ function normalizeMaxOutputTokens(value) {
   return value;
 }
 
+// 请求超时（高级设置）：选填整数毫秒 [5_000, 1_800_000]（5–1800 秒）；留空按「未配置」归一为 undefined
+function normalizeTimeoutMs(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < AI_TIMEOUT_MS_MIN || value > AI_TIMEOUT_MS_LIMIT) {
+    throw bad('AI_TIMEOUT_MS_INVALID', 'timeoutMs 必须是 5000–1800000 的整数（5–1800 秒）');
+  }
+  return value;
+}
+
 export function normalizeAiConfigInput(body, { requireKey = false } = {}) {
   if (!body || typeof body !== 'object') throw bad('AI_CONFIG_INVALID', 'AI 配置必须是对象');
   if (!AI_API_TYPES.includes(body.apiType)) throw bad('AI_TYPE_INVALID', 'apiType 必须是 responses / chat-completions / messages');
@@ -288,8 +368,10 @@ export function normalizeAiConfigInput(body, { requireKey = false } = {}) {
   // 高级设置（选填）：保存语义与 baseUrl/model 相同——表单是事实源，清空即移除
   const headers = normalizeHeaders(body.headers);
   const maxOutputTokens = normalizeMaxOutputTokens(body.maxOutputTokens);
+  const timeoutMs = normalizeTimeoutMs(body.timeoutMs);
   if (headers) config.headers = headers;
   if (maxOutputTokens) config.maxOutputTokens = maxOutputTokens;
+  if (timeoutMs) config.timeoutMs = timeoutMs;
   return config;
 }
 
@@ -310,17 +392,20 @@ export function mergeAiTestConfig(overrides = {}, saved = null) {
   // 高级项同 apiKey 语义：省略/空回落已存；覆盖值本身非法则报错（不静默回落）
   const headers = normalizeHeaders(overrides.headers) ?? saved?.headers;
   const maxOutputTokens = normalizeMaxOutputTokens(overrides.maxOutputTokens) ?? saved?.maxOutputTokens;
+  const timeoutMs = normalizeTimeoutMs(overrides.timeoutMs) ?? saved?.timeoutMs;
   if (headers) merged.headers = headers;
   if (maxOutputTokens) merged.maxOutputTokens = maxOutputTokens;
+  if (timeoutMs) merged.timeoutMs = timeoutMs;
   return merged;
 }
 
 // 端点出参脱敏：绝不回显 key，只回 hasKey（按实存 key 推导，不写死）；
-// headers/maxOutputTokens 非机密，随配置回显供设置页回填
+// headers/maxOutputTokens/timeoutMs 非机密，随配置回显供设置页回填
 export function sanitizeAiConfig(config) {
   const safe = { apiType: config.apiType, baseUrl: config.baseUrl, model: config.model, hasKey: Boolean(config.apiKey) };
   if (config.headers) safe.headers = config.headers;
   if (config.maxOutputTokens) safe.maxOutputTokens = config.maxOutputTokens;
+  if (config.timeoutMs) safe.timeoutMs = config.timeoutMs;
   return safe;
 }
 

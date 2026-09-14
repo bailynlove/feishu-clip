@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "brand": "feishu",
+  "identity": "user",
+  "space": {
+    "name": "临时数据",
+    "spaceId": "7146043860681490433"
+  },
+  "parentNode": {
+    "title": "feishu-clip MVP 验收",
+    "nodeToken": "WR3ywAneoiKlk6kC1ChcJy4Ynn2",
+    "objectType": "docx",
+    "url": "https://my.feishu.cn/wiki/WR3ywAneoiKlk6kC1ChcJy4Ynn2"
+  }
+}

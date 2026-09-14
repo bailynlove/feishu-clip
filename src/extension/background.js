@@ -269,12 +269,13 @@ async function handle(message) {
       if (title) snapshot.title = title;
       // AI 摘要（#75）：开关开启时让 {{digest}} 以字面量穿过正文渲染（最终替换在 bridge 侧），
       // 并在 CLIP 路径解析指令兜底（预设级 > 全局 > 内置默认）——弹窗只透传预设级原值，
-      // 在这里解析可防陈旧弹窗发来空指令；instruction 上限 4000 字符（bridge 校验口径），超长截断
+      // 在这里解析可防陈旧弹窗发来空指令；instruction 长度不设限（长系统指令是合法用法，
+      // 此前的 4000 字截断曾切掉尾部 {{@file}} 占位符导致 AI 收不到 PDF）
       const digestEnabled = message.digestEnabled === true;
       let digest = null;
       if (digestEnabled) {
         const stored = await localGet(['aiDigestInstruction']);
-        digest = { enabled: true, instruction: resolveDigestInstruction(message.digestInstruction, stored.aiDigestInstruction).slice(0, 4000) };
+        digest = { enabled: true, instruction: resolveDigestInstruction(message.digestInstruction, stored.aiDigestInstruction) };
         // provider（#78）：预设选用的 provider 名；空白/缺省不带键（bridge = 默认 provider），
         // 上限 64 字符与 bridge 校验口径一致，超长截断
         const provider = typeof message.digestProvider === 'string' ? message.digestProvider.trim().slice(0, 64) : '';

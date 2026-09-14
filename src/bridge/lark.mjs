@@ -148,4 +148,35 @@ export class LarkClient {
     if (!data.file_token || !data.url) throw new Error('LARK_UPLOAD_MISSING_FILE');
     return { fileToken: data.file_token, url: data.url };
   }
+
+  // 文档开头插入 PDF 云盘引用（#88）：一次 descendant 调用建成「引用容器（quote container，
+  // block_type 34）+ 内含 mention_doc 的文本块」，index 0 即文档最前（Digest 段之上）。
+  // 引用用 mention_doc 文本元素：obj_type 12 = File，token 是 drive file token，url 需
+  // URL Encode。File 块（block_type 23）的 token 只读、只能重新上传，不可用；
+  // lark-cli 无对口命令，走 api 逃生舱
+  async insertDocFileReference({ documentId, fileToken, fileUrl, name }) {
+    await this.run([
+      'api', 'POST', `/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/descendant`,
+      '--params', '{"document_revision_id":"-1"}',
+      '--data', JSON.stringify({
+        index: 0,
+        children_id: ['pdf-ref-quote'],
+        descendants: [
+          { block_id: 'pdf-ref-quote', block_type: 34, quote_container: {}, children: ['pdf-ref-text'] },
+          {
+            block_id: 'pdf-ref-text',
+            block_type: 2,
+            text: {
+              style: {},
+              elements: [
+                { text_run: { content: '📎 附件：', text_element_style: {} } },
+                { mention_doc: { token: fileToken, obj_type: 12, url: encodeURIComponent(fileUrl), title: name } },
+              ],
+            },
+          },
+        ],
+      }),
+      '--format', 'json',
+    ], { timeoutMs: 15_000 });
+  }
 }

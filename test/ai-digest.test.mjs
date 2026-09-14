@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AI_DEFAULT_BASE_URL, AI_MAX_INPUT_CHARS, AiConfigStore, applyDigest, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeAiConfig, sanitizeProvider } from '../src/bridge/ai-digest.mjs';
+import { AI_DEFAULT_BASE_URL, AI_FILE_MAX_BYTES, AI_MAX_INPUT_CHARS, AI_TIMEOUT_MS, AiConfigStore, applyDigest, DEFAULT_DIGEST_INSTRUCTION, generateDigest, hasFilePlaceholder, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeAiConfig, sanitizeProvider, stripFilePlaceholder } from '../src/bridge/ai-digest.mjs';
+import { DEFAULT_DIGEST_INSTRUCTION as EXTENSION_DEFAULT_DIGEST_INSTRUCTION } from '../src/extension/presets.js';
 
 // 捕获请求的 fake fetch + 可编程应答；body 做成可异步迭代（与 fetch 的 Response.body 同形）
 function fakeFetch(respond) {
@@ -145,6 +146,23 @@ test('超时：AbortController 到期中断映射为 AI_TIMEOUT', async () => {
   await assert.rejects(
     () => generateDigest({ config: CONFIG.responses, instruction: 'i', content: 'c', fetchImpl: hanging, timeoutMs: 20 }),
     (error) => error.code === 'AI_TIMEOUT',
+  );
+});
+
+test('timeoutMs 解析顺序：显式参数 > config.timeoutMs（高级设置）> 内置默认 180s', async () => {
+  assert.equal(AI_TIMEOUT_MS, 180_000, '内置默认从 60s 上调到 180s（reasoning 模型思考也耗时，60s 对慢 provider 太紧）');
+  const hanging = async (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+  await assert.rejects(
+    () => generateDigest({ config: { ...CONFIG.responses, timeoutMs: 20 }, instruction: 'i', content: 'c', fetchImpl: hanging }),
+    (error) => error.code === 'AI_TIMEOUT',
+    'config.timeoutMs 优先于内置默认',
+  );
+  await assert.rejects(
+    () => generateDigest({ config: { ...CONFIG.responses, timeoutMs: 600_000 }, instruction: 'i', content: 'c', fetchImpl: hanging, timeoutMs: 20 }),
+    (error) => error.code === 'AI_TIMEOUT',
+    '显式参数优先于 config.timeoutMs',
   );
 });
 
@@ -367,13 +385,14 @@ test('maxOutputTokens：配置值优先于内置默认 2048；显式参数（测
   assert.equal(calls[1].body.max_output_tokens, 64, '显式参数优先于配置值');
 });
 
-test('normalizeAiConfigInput：headers/maxOutputTokens 选填，非法值带机器码', () => {
-  const good = normalizeAiConfigInput({ apiType: 'responses', model: 'm', apiKey: 'k', headers: { 'x-opencode-session': 's' }, maxOutputTokens: 8192 });
+test('normalizeAiConfigInput：headers/maxOutputTokens/timeoutMs 选填，非法值带机器码', () => {
+  const good = normalizeAiConfigInput({ apiType: 'responses', model: 'm', apiKey: 'k', headers: { 'x-opencode-session': 's' }, maxOutputTokens: 8192, timeoutMs: 300_000 });
   assert.deepEqual(good.headers, { 'x-opencode-session': 's' });
   assert.equal(good.maxOutputTokens, 8192);
+  assert.equal(good.timeoutMs, 300_000);
   // 省略则不出现（落库/回显保持干净）
   const plain = normalizeAiConfigInput({ apiType: 'responses', model: 'm', apiKey: 'k' });
-  assert.ok(!('headers' in plain) && !('maxOutputTokens' in plain));
+  assert.ok(!('headers' in plain) && !('maxOutputTokens' in plain) && !('timeoutMs' in plain));
   const bad = (body, code) => assert.throws(() => normalizeAiConfigInput(body), (error) => error.code === code);
   bad({ apiType: 'responses', model: 'm', headers: 'x: y' }, 'AI_HEADERS_INVALID');
   bad({ apiType: 'responses', model: 'm', headers: ['x'] }, 'AI_HEADERS_INVALID');
@@ -384,32 +403,132 @@ test('normalizeAiConfigInput：headers/maxOutputTokens 选填，非法值带机�
   bad({ apiType: 'responses', model: 'm', maxOutputTokens: 0 }, 'AI_MAX_OUTPUT_TOKENS_INVALID');
   bad({ apiType: 'responses', model: 'm', maxOutputTokens: 3.5 }, 'AI_MAX_OUTPUT_TOKENS_INVALID');
   bad({ apiType: 'responses', model: 'm', maxOutputTokens: 1_000_000 }, 'AI_MAX_OUTPUT_TOKENS_INVALID');
+  bad({ apiType: 'responses', model: 'm', timeoutMs: 'slow' }, 'AI_TIMEOUT_MS_INVALID');
+  bad({ apiType: 'responses', model: 'm', timeoutMs: 0 }, 'AI_TIMEOUT_MS_INVALID');
+  bad({ apiType: 'responses', model: 'm', timeoutMs: 3.5 }, 'AI_TIMEOUT_MS_INVALID');
+  bad({ apiType: 'responses', model: 'm', timeoutMs: 4999 }, 'AI_TIMEOUT_MS_INVALID');
+  bad({ apiType: 'responses', model: 'm', timeoutMs: 1_800_001 }, 'AI_TIMEOUT_MS_INVALID');
 });
 
-test('mergeAiTestConfig：headers/maxOutputTokens 覆盖与回落已存，非法覆盖报错', () => {
+test('mergeAiTestConfig：headers/maxOutputTokens/timeoutMs 覆盖与回落已存，非法覆盖报错', () => {
   const saved = {
     apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'saved-key',
-    headers: { 'x-opencode-session': 'saved-sess' }, maxOutputTokens: 8192,
+    headers: { 'x-opencode-session': 'saved-sess' }, maxOutputTokens: 8192, timeoutMs: 300_000,
   };
   assert.deepEqual(mergeAiTestConfig({}, saved), saved, '全省略回落已存（含高级项）');
   assert.deepEqual(mergeAiTestConfig({ headers: {} }, saved).headers, saved.headers, '空 headers 对象回落已存');
   assert.deepEqual(mergeAiTestConfig({ headers: { 'x-opencode-session': 'new-sess' } }, saved).headers, { 'x-opencode-session': 'new-sess' });
   assert.equal(mergeAiTestConfig({ maxOutputTokens: 4096 }, saved).maxOutputTokens, 4096);
   assert.throws(() => mergeAiTestConfig({ maxOutputTokens: 'big' }, saved), (error) => error.code === 'AI_MAX_OUTPUT_TOKENS_INVALID');
-  // 已存无高级项时合并结果也不出现这两个键
+  assert.equal(mergeAiTestConfig({ timeoutMs: 120_000 }, saved).timeoutMs, 120_000);
+  assert.throws(() => mergeAiTestConfig({ timeoutMs: 'slow' }, saved), (error) => error.code === 'AI_TIMEOUT_MS_INVALID');
+  // 已存无高级项时合并结果也不出现这三个键
   const bare = { apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', apiKey: 'k' };
   const merged = mergeAiTestConfig({}, bare);
-  assert.ok(!('headers' in merged) && !('maxOutputTokens' in merged));
+  assert.ok(!('headers' in merged) && !('maxOutputTokens' in merged) && !('timeoutMs' in merged));
 });
 
-test('sanitizeAiConfig：headers/maxOutputTokens 随配置回显（设置页回填用），key 永不回显', () => {
+test('sanitizeAiConfig：headers/maxOutputTokens/timeoutMs 随配置回显（设置页回填用），key 永不回显', () => {
   const full = sanitizeAiConfig({
     apiType: 'responses', baseUrl: 'https://x.com/v1', model: 'm', apiKey: 'sk-secret',
-    headers: { 'x-opencode-session': 'sess-1' }, maxOutputTokens: 4096,
+    headers: { 'x-opencode-session': 'sess-1' }, maxOutputTokens: 4096, timeoutMs: 300_000,
   });
   assert.deepEqual(full.headers, { 'x-opencode-session': 'sess-1' });
   assert.equal(full.maxOutputTokens, 4096);
+  assert.equal(full.timeoutMs, 300_000);
   assert.ok(!JSON.stringify(full).includes('sk-secret'));
   const bare = sanitizeAiConfig({ apiType: 'responses', baseUrl: 'https://x.com/v1', model: 'm', apiKey: '' });
-  assert.ok(!('headers' in bare) && !('maxOutputTokens' in bare), '未配置高级项时不出现');
+  assert.ok(!('headers' in bare) && !('maxOutputTokens' in bare) && !('timeoutMs' in bare), '未配置高级项时不出现');
+});
+
+// ——— {{@file}} 占位符（#79）：本次剪藏的 PDF 以 base64 附件随摘要请求发出；
+// 占位符从指令剥除（剥空回落内置默认）；降级（无 PDF / 超 32 MB）由 executor 决策 ———
+
+const PDF_B64 = Buffer.from('%PDF-1.7 fake-pdf-bytes').toString('base64');
+const PDF_DATA_URL = `data:application/pdf;base64,${PDF_B64}`;
+
+test('{{@file}} 占位符检出与剥除：空格写法归一；剥空回落内置默认；默认值与扩展侧同步', () => {
+  assert.equal(hasFilePlaceholder('结合附件总结 {{@file}}'), true);
+  assert.equal(hasFilePlaceholder('{{ @file }}'), true, '带空格写法同样检出');
+  assert.equal(hasFilePlaceholder('总结它'), false);
+  assert.equal(hasFilePlaceholder(''), false);
+  assert.equal(stripFilePlaceholder('结合附件总结 {{@file}}'), '结合附件总结');
+  assert.equal(stripFilePlaceholder('{{ @file }}'), DEFAULT_DIGEST_INSTRUCTION, '剥空回落内置默认');
+  assert.equal(stripFilePlaceholder('总结它'), '总结它', '无占位符原样返回');
+  assert.equal(stripFilePlaceholder('  总结它  '), '  总结它  ', '无占位符不做 trim，请求体与既有行为逐字节一致');
+  assert.equal(AI_FILE_MAX_BYTES, 32 * 1024 * 1024, '附件上限 32 MB（对齐 Anthropic 请求体上限）');
+  assert.equal(DEFAULT_DIGEST_INSTRUCTION, EXTENSION_DEFAULT_DIGEST_INSTRUCTION, '与扩展侧内置默认同一份（两运行时无法共享模块）');
+});
+
+test('{{@file}} + PDF：responses 走 input_file 块（base64 data URL），instructions 占位符已剥除', async () => {
+  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: '摘要' }] }] };
+  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const pdf = { filename: 'paper.pdf', dataBase64: PDF_B64 };
+  await generateDigest({ config: CONFIG.responses, instruction: '结合附件总结 {{@file}}', content: '正文', pdf, fetchImpl: fetch });
+  assert.deepEqual(calls[0].body, {
+    model: 'gpt-5',
+    instructions: '结合附件总结',
+    input: [{
+      role: 'user',
+      content: [
+        { type: 'input_file', filename: 'paper.pdf', file_data: PDF_DATA_URL },
+        { type: 'input_text', text: '正文' },
+      ],
+    }],
+    store: false,
+    max_output_tokens: 2048,
+  });
+});
+
+test('{{@file}} + PDF：chat-completions 走 file content part（file.file_data base64 data URL）', async () => {
+  const ok = { choices: [{ message: { role: 'assistant', content: '摘要' } }] };
+  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const pdf = { filename: 'paper.pdf', dataBase64: PDF_B64 };
+  await generateDigest({ config: CONFIG['chat-completions'], instruction: '结合附件总结 {{@file}}', content: '正文', pdf, fetchImpl: fetch });
+  assert.deepEqual(calls[0].body, {
+    model: 'gpt-5',
+    messages: [
+      { role: 'system', content: '结合附件总结' },
+      {
+        role: 'user',
+        content: [
+          { type: 'file', file: { filename: 'paper.pdf', file_data: PDF_DATA_URL } },
+          { type: 'text', text: '正文' },
+        ],
+      },
+    ],
+    max_completion_tokens: 2048,
+  });
+});
+
+test('{{@file}} + PDF：messages 走 document 块（base64 source，data 不带 data: 前缀）', async () => {
+  const ok = { content: [{ type: 'text', text: '摘要' }], stop_reason: 'end_turn' };
+  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  const pdf = { filename: 'paper.pdf', dataBase64: PDF_B64 };
+  await generateDigest({ config: CONFIG.messages, instruction: '结合附件总结 {{@file}}', content: '正文', pdf, fetchImpl: fetch });
+  assert.deepEqual(calls[0].body, {
+    model: 'claude-x',
+    max_tokens: 2048,
+    system: '结合附件总结',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PDF_B64 } },
+        { type: 'text', text: '正文' },
+      ],
+    }],
+  });
+});
+
+test('{{@file}} 无 PDF 附件（降级路径）：占位符照样剥除，请求体与纯文本现状一致', async () => {
+  const ok = { output: [{ type: 'message', content: [{ type: 'output_text', text: 'x' }] }] };
+  const { calls, fetch } = fakeFetch(async () => jsonResponse(ok));
+  await generateDigest({ config: CONFIG.responses, instruction: '结合附件总结 {{@file}}', content: '正文', fetchImpl: fetch });
+  assert.deepEqual(calls[0].body, {
+    model: 'gpt-5', instructions: '结合附件总结', input: '正文', store: false, max_output_tokens: 2048,
+  }, '无附件时 input 仍是纯字符串（与现状一致）');
+
+  // 指令只有占位符：剥空回落内置默认
+  await generateDigest({ config: CONFIG.responses, instruction: '{{@file}}', content: '正文', fetchImpl: fetch });
+  assert.equal(calls[1].body.instructions, DEFAULT_DIGEST_INSTRUCTION);
 });

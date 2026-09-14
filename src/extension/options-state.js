@@ -8,6 +8,17 @@ import { createDefaultPreset } from './presets.js';
 // 占位符才会被替换，否则按未知变量置空，插入按钮不做开关感知）
 export const TEMPLATE_VARIABLES = ['title', 'url', 'host', 'date', 'time', 'datetime', 'content', 'digest'];
 
+// {{@file}} 附件占位符（#81）：摘要指令专属——bridge 检出该占位符时把本次剪藏 PDF 以 base64
+// 附件随摘要请求发给 AI；无 PDF 时降级为纯文本摘要。不进 TEMPLATE_VARIABLES：
+// 标题/正文模板变量在摘要指令里不会被替换，指令框的变量行只列 @file
+export const FILE_ATTACHMENT_VARIABLE = '@file';
+
+// .ps-vars 变量行的按钮名单：data-vars 显式指定（逗号/空格分隔）时优先，否则用默认模板变量集
+export function variableRowNames(dataVars) {
+  const explicit = String(dataVars ?? '').split(/[,\s]+/).filter(Boolean);
+  return explicit.length > 0 ? explicit : TEMPLATE_VARIABLES;
+}
+
 // 图片写入模式三态（#53）：选项顺序即设置页分段控件顺序；说明文案体现三者的取舍
 export const IMAGE_MODE_OPTIONS = [
   { value: 'preview', label: '预览优先', hint: '公开图片直接嵌入预览块，最快；依赖原站可持续访问' },
@@ -244,6 +255,16 @@ export function jobDetailRows(job) {
 // ——— AI 摘要（#75）：设置页 AI API 配置的纯展示/归约逻辑 ———
 // API key 只存 bridge 的 ai.json，扩展侧不落地；这里只有表单草稿 → 请求体的归约与结果展示
 
+// {{@file}} 行内提示（#81）：预设级指令含 {{@file}} 但该预设未开「PDF 存云盘」（pdfDrive）时提示——
+// 只提示不阻止保存：指令分全局/预设两层，全局指令场景无法静态判定有没有 PDF 可附。
+// 检出口径与 bridge 端 hasFilePlaceholder（src/bridge/ai-digest.mjs）同一正则（容忍 {{ @file }} 空格
+// 写法）——两运行时无法共享模块，修改须两边同步
+const FILE_PLACEHOLDER = /\{\{\s*@file\s*\}\}/;
+
+export function digestFileHintNeeded(instruction, pdfDriveEnabled) {
+  return FILE_PLACEHOLDER.test(String(instruction ?? '')) && pdfDriveEnabled !== true;
+}
+
 // API 类型下拉选项（value = bridge 契约的 apiType，label 为设置页展示名）
 export const AI_API_TYPE_OPTIONS = [
   { value: 'responses', label: 'OpenAI Responses' },
@@ -292,11 +313,19 @@ export function aiMaxOutputTokensFromText(text) {
   return Number.parseInt(trimmed, 10);
 }
 
+// 超时输入框（秒）：留空 = 未设置；否则须为正整数，换算成毫秒进 body（范围由 bridge 校验）
+export function aiTimeoutMsFromText(text) {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) throw new Error('超时秒数必须是正整数');
+  return Number.parseInt(trimmed, 10) * 1000;
+}
+
 // 表单草稿 → 保存/测试请求体：baseUrl 留空用类型默认值；apiKey 留空不放进 body
 // （bridge 语义：省略/空串 = 保留已存 key）；apiType 非法值归一为 responses。
-// 高级设置两项留空同样不进 body（bridge 回落已存/内置默认）；格式非法抛错由调用方展示。
+// 高级设置三项留空同样不进 body（bridge 回落已存/内置默认）；格式非法抛错由调用方展示。
 // name/renameFrom（#77 多 provider）：name 为保存目标名；改名时 renameFrom 带原名
-export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText, name, renameFrom } = {}) {
+export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, maxOutputTokensText, timeoutText, name, renameFrom } = {}) {
   const type = AI_DEFAULT_BASE_URLS[apiType] ? apiType : 'responses';
   const payload = {
     apiType: type,
@@ -309,6 +338,8 @@ export function aiConfigPayload({ apiType, baseUrl, model, apiKey, headersText, 
   if (Object.keys(headers).length) payload.headers = headers;
   const maxOutputTokens = aiMaxOutputTokensFromText(maxOutputTokensText);
   if (maxOutputTokens !== undefined) payload.maxOutputTokens = maxOutputTokens;
+  const timeoutMs = aiTimeoutMsFromText(timeoutText);
+  if (timeoutMs !== undefined) payload.timeoutMs = timeoutMs;
   const providerName = String(name ?? '').trim();
   if (providerName) payload.name = providerName;
   if (renameFrom) payload.renameFrom = String(renameFrom).trim();

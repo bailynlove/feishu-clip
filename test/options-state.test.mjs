@@ -4,6 +4,7 @@ import { createDefaultPreset } from '../src/extension/presets.js';
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
+  variableRowNames, digestFileHintNeeded,
   jobStatusTone, jobStatusLabel, formatDuration, jobTotalLabel, formatClock, jobDisplayTitle, jobDetailRows,
   IMAGE_MODE_OPTIONS, imageModeHint,
 } from '../src/extension/options-state.js';
@@ -171,6 +172,26 @@ test('TEMPLATE_VARIABLES covers the v1 variable set (#30) plus digest (#75)', ()
   assert.deepEqual(TEMPLATE_VARIABLES, ['title', 'url', 'host', 'date', 'time', 'datetime', 'content', 'digest']);
 });
 
+// {{@file}} 附件占位符（#81）：摘要指令框的变量行只列 @file——标题/正文模板变量在指令里
+// 不会被替换，不能混进指令框的快捷插入按钮
+test('variableRowNames defaults to TEMPLATE_VARIABLES and honors an explicit data-vars list', () => {
+  assert.deepEqual(variableRowNames(undefined), TEMPLATE_VARIABLES, '无 data-vars 用默认模板变量集');
+  assert.deepEqual(variableRowNames(''), TEMPLATE_VARIABLES, '空 data-vars 同样回落默认集');
+  assert.deepEqual(variableRowNames('@file'), ['@file'], '指令框只列 @file');
+  assert.deepEqual(variableRowNames('@file, digest'), ['@file', 'digest'], '逗号/空格分隔多项');
+});
+
+// {{@file}} 行内提示（#81）：预设级指令含 {{@file}} 但该预设未开「PDF 存云盘」时提示；
+// 只提示不阻止保存（全局指令场景无法静态判定）
+test('digestFileHintNeeded flags {{@file}} instructions on presets without pdfDrive', () => {
+  assert.equal(digestFileHintNeeded('总结要点，参考附件 {{@file}}', false), true);
+  assert.equal(digestFileHintNeeded('总结要点，参考附件 {{ @file }}', false), true, '空格写法同样检出（与 bridge 端口径一致）');
+  assert.equal(digestFileHintNeeded('总结要点，参考附件 {{@file}}', true), false, '开了「PDF 存云盘」不提示');
+  assert.equal(digestFileHintNeeded('总结要点', false), false, '无 {{@file}} 不提示');
+  assert.equal(digestFileHintNeeded('', false), false, '空指令（用全局）不提示');
+  assert.equal(digestFileHintNeeded(null, false), false, '非字符串归一为不提示');
+});
+
 // ——— 开发者模式：任务耗时日志展示逻辑 ———
 
 test('jobStatusTone buckets statuses into success/warning/error/running', () => {
@@ -312,21 +333,24 @@ test('aiTestResultView renders success with latency and reply excerpt, failure w
 });
 
 
-test('aiConfigPayload parses 高级设置：headersText 逐行解析 + maxOutputTokensText 整数', () => {
+test('aiConfigPayload parses 高级设置：headersText 逐行解析 + maxOutputTokensText/timeoutText 整数', () => {
   const payload = aiConfigPayload({
     apiType: 'responses', model: 'gpt-5-mini', apiKey: 'sk-x',
-    headersText: 'x-opencode-session: sess-1\n\n  x-foo:  bar  ', maxOutputTokensText: ' 4096 ',
+    headersText: 'x-opencode-session: sess-1\n\n  x-foo:  bar  ', maxOutputTokensText: ' 4096 ', timeoutText: ' 300 ',
   });
   assert.deepEqual(payload.headers, { 'x-opencode-session': 'sess-1', 'x-foo': 'bar' }, '逐行 Name: value，去空白、跳过空行');
   assert.equal(payload.maxOutputTokens, 4096);
+  assert.equal(payload.timeoutMs, 300_000, '超时秒数换算成毫秒');
 
-  const bare = aiConfigPayload({ apiType: 'responses', model: 'm', headersText: ' \n  ', maxOutputTokensText: '' });
-  assert.ok(!('headers' in bare) && !('maxOutputTokens' in bare), '留空则两项都不进 body（bridge 回落已存/默认）');
+  const bare = aiConfigPayload({ apiType: 'responses', model: 'm', headersText: ' \n  ', maxOutputTokensText: '', timeoutText: '' });
+  assert.ok(!('headers' in bare) && !('maxOutputTokens' in bare) && !('timeoutMs' in bare), '留空则三项都不进 body（bridge 回落已存/默认）');
 
   assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', headersText: 'no-colon-line' }), /请求头/);
   assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', headersText: ': v' }), /请求头/);
   assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', maxOutputTokensText: 'abc' }), /tokens/i);
   assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', maxOutputTokensText: '3.5' }), /tokens/i);
+  assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', timeoutText: 'abc' }), /超时/);
+  assert.throws(() => aiConfigPayload({ apiType: 'responses', model: 'm', timeoutText: '3.5' }), /超时/);
 });
 
 test('aiHeadersToText serializes saved headers back to textarea lines', () => {

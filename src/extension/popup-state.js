@@ -21,22 +21,39 @@ export function isJobForPage(job, pageUrl) {
   return source !== null && page !== null && source === page;
 }
 
+// 警告行文本：terminal 有 warnings 时状态条如实呈现内容——取首条，多条追加「等 N 条」
+// （状态条单行容量有限）。覆盖图片/iframe 警告与 AI 摘要失败（#75 部分成功降级）同一通道
+function warningsText(warnings) {
+  const list = Array.isArray(warnings) ? warnings.filter((warning) => typeof warning === 'string' && warning !== '') : [];
+  if (list.length === 0) return null;
+  return list.length > 1 ? `${list[0]}（等 ${list.length} 条）` : list[0];
+}
+
+// AI 摘要阶段进行中（#75）：digest 在建档（beginCreate）之前运行——此刻 step 仍是
+// create_document 且 createInFlight 未置位、document 未建档、digestText 未落库，
+// 与真正的建档阶段用 createInFlight 区分（这些字段都已在 job 视图里，无需改协议）
+function clipInDigest(job) {
+  return job?.digest?.enabled === true
+    && (job.digestText ?? null) === null
+    && job.step === 'create_document'
+    && !job.createInFlight
+    && !job.document;
+}
+
 export function describeJobView(job, { recovered = false } = {}) {
   if (job.status === 'succeeded' || job.status === 'succeeded_with_warnings') {
-    const warning = job.status === 'succeeded_with_warnings';
-    return {
-      kind: warning ? 'warning' : 'success',
-      message: warning ? `正文已保存；${job.warnings.length} 张图片需要注意。` : '已保存到飞书。',
-      swapPrimary: !recovered,
-      documentUrl: job.document?.url || null,
-    };
+    const warning = warningsText(job.warnings);
+    if (warning) {
+      return { kind: 'warning', message: `已保存到飞书 · ${warning}`, swapPrimary: !recovered, documentUrl: job.document?.url || null };
+    }
+    return { kind: 'success', message: '已保存到飞书。', swapPrimary: !recovered, documentUrl: job.document?.url || null };
   }
   if (TERMINAL_STATUSES.has(job.status)) {
     return { kind: 'failure', message: job.error || '剪藏未完成，请修复后重新发起。', swapPrimary: false, documentUrl: null };
   }
   return {
     kind: 'progress',
-    message: job.status === 'queued' ? '已提交，等待本地 Bridge 处理…' : '正在创建飞书文档并处理图片…',
+    message: job.status === 'queued' ? '已提交，等待本地 Bridge 处理…' : clipInDigest(job) ? 'AI 摘要生成中…' : '正在创建飞书文档并处理图片…',
     swapPrimary: false,
     documentUrl: null,
   };
@@ -61,6 +78,7 @@ function clipPhase(clip) {
   if (!clip) return null;
   if (clipSucceeded(clip)) return '文档 ✓';
   if (TERMINAL_STATUSES.has(clip.status)) return '文档失败';
+  if (clip.status !== 'queued' && clipInDigest(clip)) return 'AI 摘要生成中…';
   return '文档保存中…';
 }
 
@@ -85,8 +103,12 @@ export function describeAttemptView(jobs, { recovered = false } = {}) {
   const documentUrl = clip?.document?.url || null;
   const pdfUrl = pdf.document?.url || null;
 
-  // 双产物就位：一行结论 + 两个链接并排（变体 A）
+  // 双产物就位：一行结论 + 两个链接并排（变体 A）；clip 有警告（如 AI 摘要失败）时降级 warning 呈现
   if (docOk && pdfOk) {
+    const warning = clip ? warningsText(clip.warnings) : null;
+    if (warning) {
+      return { kind: 'warning', message: `已保存 ✓ 文档与 PDF 均已入库 · ${warning}`, swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false, pdfAwaitingBytes };
+    }
     return { kind: 'success', message: '已保存 ✓ 文档与 PDF 均已入库。', swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false, pdfAwaitingBytes };
   }
   // PDF 失败：文档不受影响，警告横幅 + [打开文档][重试 PDF]

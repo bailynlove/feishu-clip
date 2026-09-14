@@ -1,0 +1,24 @@
+/* PROTOTYPE — Variant A：单栏流式布局。 */
+.pa-root { min-height: 560px; height: 560px; background: #fff; color: #1a2233; font-size: 14px; position: relative; display: flex; flex-direction: column; }
+.pa-hero { background: var(--brand); color: var(--brand-ink); padding: 16px 18px 18px; }
+.pa-hero-title { margin-top: 14px; }
+.pa-hero-host { font-size: 11px; opacity: .7; margin-top: 6px; }
+.pa-body { padding: 14px 18px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow-y: auto; }
+.pa-body > * { flex-shrink: 0; }
+
+/* 预览卡片：默认折叠成摘要条，展开后内部滚动 */
+.pa-pv-bar { display: flex; align-items: center; gap: 8px; width: 100%; border: 1.5px solid #e2e7ee; background: #f7f9fc; border-radius: 12px; padding: 10px 14px; cursor: pointer; font-size: 12.5px; font-family: inherit; color: #1a2233; }
+.pa-pv-bar-text { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pa-pv-bar-caret { color: var(--brand-deep); font-size: 11.5px; white-space: nowrap; }
+.pa-pv-card { border: 1.5px solid #e2e7ee; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+.pa-pv-card .pa-pv-bar { border: 0; border-radius: 0; border-bottom: 1px solid #eef1f6; }
+.pa-pv-scroll { max-height: 180px; overflow-y: auto; padding: 12px 14px; }
+
+/* 本次设置折叠区 */
+.pa-settings { border: 1.5px solid #e2e7ee; border-radius: 12px; overflow: hidden; }
+.pa-settings-head { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 0; background: #f7f9fc; padding: 10px 14px; font-size: 12.5px; font-weight: 600; color: #1a2233; cursor: pointer; font-family: inherit; }
+.pa-settings-head em { font-style: normal; font-weight: 400; font-size: 11px; color: #9aa3b2; margin-left: 4px; }
+.pa-settings-caret { color: var(--brand-deep); }
+.pa-settings .ps-settings-body { padding: 12px 14px 14px; }
+
+.pa-cta { margin-top: auto; }

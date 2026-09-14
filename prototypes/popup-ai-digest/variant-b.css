@@ -1,0 +1,14 @@
+/* PROTOTYPE — 变体 B（v2）：子卡头 = 开关行（开=展开，关=折叠）；provider 分段选择器 */
+.variant-b .ai-fold{border-style:dashed}
+.variant-b .ai-fold-head{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f6fefb;cursor:pointer}
+.variant-b .ai-fold-head .img-text{flex:1}
+.variant-b .ai-fold-head strong{font-size:13.5px}
+.variant-b .ai-fold-head small{font-size:11px;color:#9aa3b2;display:block;margin-top:1px}
+.variant-b .ai-fold-head input{position:absolute;opacity:0;width:0;height:0}
+.variant-b .ai-fold-head input:checked+.switch{background:linear-gradient(rgba(255,255,255,.5),rgba(255,255,255,.05) 60%),var(--brand);box-shadow:inset 0 1px 3px rgba(255,255,255,.75),inset 0 -2px 3px rgba(8,80,60,.14)}
+.variant-b .ai-fold-head input:checked+.switch::after{left:21px}
+.variant-b .ai-seg{display:flex;gap:6px}
+.variant-b .ai-seg-opt{flex:1;border:1.5px solid var(--brand-line);background:#fff;border-radius:10px;padding:7px;font-size:12px;font-weight:600;color:#182030;cursor:pointer;font-family:inherit}
+.variant-b .ai-seg-opt.on{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);box-shadow:inset 0 1px 2px rgba(255,255,255,.7)}
+.variant-b .ai-empty{margin:0;font-size:12px;color:#9aa3b2}
+.variant-b .ai-instruction{min-height:48px}

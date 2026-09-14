@@ -254,6 +254,47 @@ test('LarkClient.uploadDriveFile rejects envelopes without file_token/url（上�
   );
 });
 
+// 文档开头插入 PDF 云盘引用（#88）：api 逃生舱 argv + descendant 请求体形状——
+// quote container(34) 容器嵌套 text(2)，内含 mention_doc（obj_type 12 = File）
+test('LarkClient.insertDocFileReference builds the docx descendant argv and request body', async () => {
+  const calls = [];
+  const client = new LarkClient({ cliPath: '/fake' });
+  client.run = async (args, options) => {
+    calls.push({ args, options });
+    return { ok: true, data: {} };
+  };
+
+  await client.insertDocFileReference({
+    documentId: 'doc-1',
+    fileToken: 'ft-1',
+    fileUrl: 'https://example.feishu.cn/file/ft-1?x=1&y=2',
+    name: '论文标题.pdf',
+  });
+
+  const { args, options } = calls[0];
+  assert.deepEqual(args.slice(0, 3), ['api', 'POST', '/open-apis/docx/v1/documents/doc-1/blocks/doc-1/descendant'], '块 id 用文档根（= documentId）');
+  assert.ok(args.includes('--format') && args.includes('json'));
+  assert.equal(options.timeoutMs, 15_000);
+  const params = JSON.parse(args[args.indexOf('--params') + 1]);
+  assert.deepEqual(params, { document_revision_id: '-1' });
+  const body = JSON.parse(args[args.indexOf('--data') + 1]);
+  assert.equal(body.index, 0, '插在文档开头（Digest 段之上）');
+  assert.deepEqual(body.children_id, ['pdf-ref-quote']);
+  const [quote, text] = body.descendants;
+  assert.equal(quote.block_id, 'pdf-ref-quote');
+  assert.equal(quote.block_type, 34, '引用容器 quote container');
+  assert.deepEqual(quote.quote_container, {});
+  assert.deepEqual(quote.children, ['pdf-ref-text'], '容器嵌套文本块');
+  assert.equal(text.block_id, 'pdf-ref-text');
+  assert.equal(text.block_type, 2, '容器内为文本块');
+  const [label, mention] = text.text.elements;
+  assert.equal(label.text_run.content, '📎 附件：');
+  assert.equal(mention.mention_doc.obj_type, 12, 'mention_doc obj_type 12 = File');
+  assert.equal(mention.mention_doc.token, 'ft-1', 'token 是 drive file token');
+  assert.equal(mention.mention_doc.url, encodeURIComponent('https://example.feishu.cn/file/ft-1?x=1&y=2'), 'url 需 URL Encode');
+  assert.equal(mention.mention_doc.title, '论文标题.pdf');
+});
+
 // ——— Drive 目录选择器端点族（#66）———
 
 test('drive folders route lists items with pagination and validates the query', async () => {

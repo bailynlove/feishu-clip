@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ClipExecutor, prepareMarkdown } from '../src/bridge/executor.mjs';
+import { AI_FILE_MAX_BYTES } from '../src/bridge/ai-digest.mjs';
 import { PdfChunkStaging } from '../src/bridge/pdf-chunks.mjs';
 
 test('snapshot markers become traceable image anchors and unsafe sources are plain text', () => {
@@ -110,6 +112,7 @@ function fakeStore(job) {
     settled,
     async list() { return drained ? [] : [job]; },
     async claim() {},
+    async heartbeat() {},
     async beginCreate() {},
     async recordDocument() {},
     async recordDigest(_id, _worker, digestText) { store.digestRecorded = digestText; },
@@ -828,8 +831,10 @@ test('pdfFileName：标题渲染结果 + .pdf；清洗文件名非法字符，�
   assert.equal(pdfFileName({ title: '长'.repeat(300), url: 'https://example.com/x' }).length, 240 + 4, '标题截断 240 字符留足 .pdf 后缀');
 });
 
-// pdf 管道的假 store：记录 claim/complete/fail 的 kind 与产物；list 一次性吐出 pdf job
-function pdfFakeStore(job) {
+// pdf 管道的假 store：记录 claim/complete/fail 的 kind 与产物；list 一次性吐出 pdf job。
+// clipJob（#88）：get 带 clip kind 时返回的 clip job（引用回填查 documentId/pdfRefInserted 用）；
+// markError/markClaimed：markPdfRefInserted 的故障/竞态注入（claimed 强制返回值）
+function pdfFakeStore(job, { clipJob = null, markError = null, markClaimed = null } = {}) {
   let drained = false;
   let onSettled;
   const settled = new Promise((resolve) => { onSettled = resolve; });
@@ -839,12 +844,21 @@ function pdfFakeStore(job) {
     awaitedBytes: null,
     settled,
     claims: [],
+    pdfRefMarks: [],
     async list() { return drained ? [] : [job]; },
     async claim(attemptId, workerId, kind) { store.claims.push({ attemptId, workerId, kind }); store.workerId = workerId; },
-    async get(attemptId, kind) { return kind === 'pdf' ? { status: 'running', workerId: store.workerId } : null; },
+    async heartbeat() {},
+    async get(attemptId, kind) { return kind === 'pdf' ? { status: 'running', workerId: store.workerId } : clipJob; },
     async complete(_id, _worker, result, kind) { store.completed = { ...result, kind }; drained = true; onSettled(); },
     async fail(_id, _worker, result, kind) { store.failed = { ...result, kind }; drained = true; onSettled(); },
     async awaitBytes(attemptId, workerId) { store.awaitedBytes = { attemptId, workerId }; drained = true; onSettled(); },
+    async markPdfRefInserted(attemptId, inserted = true) {
+      if (markError) throw markError;
+      const was = clipJob?.pdfRefInserted === true;
+      if (clipJob) clipJob.pdfRefInserted = inserted;
+      store.pdfRefMarks.push({ attemptId, inserted });
+      return { claimed: markClaimed ?? (inserted === true && !was) };
+    },
   };
   return store;
 }
@@ -1019,6 +1033,139 @@ test('pdf job：带 PDF_* 业务码的错误绝不重试（401/403 仍走 awaiti
   assert.equal(store.completed, null);
 });
 
+// ——— PDF 云盘引用回填（#88）：pdf job 上传成功后，把 PDF 以「@」引用（mention_doc）
+// 插到本次 clip 文档开头的引用容器；幂等靠 clip job 的 pdfRefInserted 标记 ———
+
+const CLIP_WITH_DOC = {
+  kind: 'clip',
+  status: 'succeeded',
+  document: { documentId: 'doc-1', url: 'https://example.feishu.cn/docx/doc-1' },
+  pdfRefInserted: false,
+};
+
+test('pdf job：上传成功后把 PDF 以 mention_doc 引用插到 clip 文档开头，先置位再插入（mark-before-insert）', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-ref' }, { clipJob: { ...CLIP_WITH_DOC } });
+  const order = [];
+  const refs = [];
+  const lark = {
+    async uploadDriveFile() { order.push('upload'); return { fileToken: 'ft-pdf', url: 'https://example.feishu.cn/file/ft-pdf' }; },
+    async insertDocFileReference(options) { order.push('insert'); refs.push(options); },
+  };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+
+  assert.deepEqual(order, ['upload', 'insert'], '先上传成功，再插入引用');
+  assert.deepEqual(refs, [{
+    documentId: 'doc-1',
+    fileToken: 'ft-pdf',
+    fileUrl: 'https://example.feishu.cn/file/ft-pdf',
+    name: 'Attention Is All You Need.pdf',
+  }], '引用参数：clip 的 documentId + 上传产物 fileToken/url + 云盘文件名');
+  // mark-before-insert：置位在插入之前，重排竞态下另一执行体读到已置位会跳过
+  assert.deepEqual(store.pdfRefMarks, [{ attemptId: 'pdf-ref', inserted: true }]);
+  assert.equal(store.completed?.kind, 'pdf');
+  assert.deepEqual(store.completed.warnings, []);
+  assert.equal(store.failed, null);
+});
+
+test('pdf job：不产生引用的情形静默跳过（已插过/无 clip job/clip 失败终态无文档）', async () => {
+  const cases = [
+    ['已插过（pdfRefInserted）', { ...CLIP_WITH_DOC, pdfRefInserted: true }],
+    ['PDF 标签页直存云盘（无 clip job）', null],
+    ['clip 失败终态（无 document）', { kind: 'clip', status: 'failed', document: null, pdfRefInserted: false }],
+  ];
+  for (const [index, [label, clipJob]] of cases.entries()) {
+    const store = pdfFakeStore({ ...PDF_JOB, attemptId: `pdf-ref-skip-${index}` }, { clipJob });
+    let inserted = 0;
+    const lark = {
+      async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; },
+      async insertDocFileReference() { inserted += 1; },
+    };
+    const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+    await store.settled;
+    assert.equal(inserted, 0, `${label}：不应插入引用`);
+    assert.equal(store.pdfRefMarks.length, 0, `${label}：不写幂等标记`);
+    assert.equal(store.completed?.kind, 'pdf', `${label}：上传仍正常完成`);
+    assert.deepEqual(store.completed.warnings, [], `${label}：静默跳过，不记警告`);
+  }
+});
+
+test('pdf job：clip 文档尚未建好（非终态无 document）→ 跳过插入并记警告（协议空隙，不自动补插）', async () => {
+  for (const status of ['queued', 'running', 'reconciling']) {
+    const clipJob = { kind: 'clip', status, document: null, pdfRefInserted: false };
+    const store = pdfFakeStore({ ...PDF_JOB, attemptId: `pdf-ref-pending-${status}` }, { clipJob });
+    let inserted = 0;
+    const lark = {
+      async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; },
+      async insertDocFileReference() { inserted += 1; },
+    };
+    const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+    await store.settled;
+    assert.equal(inserted, 0, `clip ${status}：不插入`);
+    assert.equal(store.pdfRefMarks.length, 0, `clip ${status}：不置位（clip 建档后 pdf 重试可补插）`);
+    assert.equal(store.completed?.kind, 'pdf');
+    assert.equal(store.completed.warnings.length, 1, `clip ${status}：记一条可见警告`);
+    assert.match(store.completed.warnings[0], /clip 文档尚未建好/);
+  }
+});
+
+test('pdf job：重排竞态——mark 返回 claimed=false（另一执行体已置位）→ 跳过插入不双插', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-ref-race' }, { clipJob: { ...CLIP_WITH_DOC }, markClaimed: false });
+  let inserted = 0;
+  const lark = {
+    async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; },
+    async insertDocFileReference() { inserted += 1; },
+  };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.equal(inserted, 0, '置位被抢先则不插入');
+  assert.equal(store.completed?.kind, 'pdf');
+  assert.deepEqual(store.completed.warnings, [], '竞态跳过不记警告');
+});
+
+test('pdf job：幂等标记置位失败（store 异常）→ 不插入，记警告，job 仍 succeeded', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-ref-mark-fail' },
+    { clipJob: { ...CLIP_WITH_DOC }, markError: new Error('jobs.json 写失败') });
+  let inserted = 0;
+  const lark = {
+    async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; },
+    async insertDocFileReference() { inserted += 1; },
+  };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.equal(inserted, 0, '置位失败不得插入');
+  assert.equal(store.failed, null);
+  assert.equal(store.completed?.kind, 'pdf');
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /jobs\.json 写失败/, '警告透传置位失败的原始消息');
+});
+
+test('pdf job：引用插入失败清除幂等标记并记警告，job 仍 succeeded，上传产物保留', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-ref-fail' }, { clipJob: { ...CLIP_WITH_DOC } });
+  const lark = {
+    async uploadDriveFile() { return { fileToken: 'ft-pdf', url: 'https://example.feishu.cn/file/ft-pdf' }; },
+    async insertDocFileReference() { throw new Error('docx api 999'); },
+  };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+
+  assert.equal(store.failed, null, '插入失败不得 fail job');
+  assert.equal(store.completed?.kind, 'pdf');
+  assert.deepEqual(store.completed.document, { fileToken: 'ft-pdf', url: 'https://example.feishu.cn/file/ft-pdf' }, '上传产物照常落库');
+  assert.equal(store.completed.warnings.length, 1, '失败警告随 result.warnings 落库');
+  assert.match(store.completed.warnings[0], /引用插入失败/);
+  assert.deepEqual(store.pdfRefMarks, [
+    { attemptId: 'pdf-ref-fail', inserted: true },
+    { attemptId: 'pdf-ref-fail', inserted: false },
+  ], '先置位、插入失败后清除标记（重试可补插），不与插入失败混为同一条 catch 误报');
+});
+
 test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清理 staging', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-exec-staging-'));
   const stagingDir = path.join(directory, 'staging');
@@ -1063,11 +1210,12 @@ import { readFile } from 'node:fs/promises';
 
 // 无图片的 clip job（imageMode off 跳过图片阶段）；假 lark 在 docs +create 时读出
 // 落盘的 content.md（摘要是经 applyDigest 注入后再 prepareMarkdown，直接验证最终正文）
-function digestSetup({ markdown, digest = null, digestText = null }) {
+function digestSetup({ markdown, digest = null, digestText = null, pdfSource = null }) {
   const job = fakeJob({ markdown, images: [] });
   job.imageMode = 'off';
   if (digest) job.digest = digest;
   if (digestText !== null) job.digestText = digestText;
+  job.pdfSource = pdfSource;
   const store = fakeStore(job);
   const contents = [];
   const lark = {
@@ -1204,4 +1352,701 @@ test('AI 摘要（#78）：provider 不存在 → 剪藏成功、占位符置空
   assert.doesNotMatch(contents[0], /\{\{\s*digest\s*\}\}/, '占位符置空');
   const entry = store.completed.timeline.find((item) => item.kind === 'stage' && item.name === 'digest');
   assert.ok(entry?.detail?.includes('ghost'), 'timeline 留 detail');
+});
+
+// ——— 租约心跳（#89）：digest/下载/CLI 等长阶段动辄超过 60s 租约（glm reasoning 摘要实测
+// 180s+），执行期间按 heartbeatMs 周期续约，防 recoverExpired 把活跃任务误重排（摘要重复执行、
+// 原执行体收尾被拒「Only the active worker」）；心跳失败 = 租约真被收走 → 安全中止不写库 ———
+
+test('租约心跳（#89）：长 digest 期间周期性续约，执行结束后心跳停止', async () => {
+  const { store, lark } = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction: '总结' } });
+  let heartbeats = 0;
+  store.heartbeat = async () => { heartbeats += 1; };
+  const generateDigest = () => new Promise((resolve) => setTimeout(() => resolve('要点'), 60));
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG, heartbeatMs: 10 }).kick();
+  await store.settled;
+
+  assert.ok(heartbeats >= 3, `60ms digest + 10ms 心跳应续约多次，实际 ${heartbeats}`);
+  const stopped = heartbeats;
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(heartbeats, stopped, '执行结束后心跳计时器已停');
+});
+
+test('租约心跳（#89）：心跳失败（租约丢失）→ 安全中止，不写摘要缓存/不建档/不落终态', async () => {
+  const { store, lark } = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction: '总结' } });
+  // 租约丢失 = 任务已被别的执行体接管/重排：建模为心跳抛错后任务不再处于 queued
+  let stolen = false;
+  const realList = store.list.bind(store);
+  store.list = async (...args) => (stolen ? [] : realList(...args));
+  store.heartbeat = async () => { stolen = true; throw new Error('lease lost'); };
+  let digestResolved = false;
+  const generateDigest = () => new Promise((resolve) => setTimeout(() => { digestResolved = true; resolve('要点'); }, 60));
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG, heartbeatMs: 10 }).kick();
+  // 中止路径不落任何终态，settled 不 resolve，等固定时长后断言
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.ok(digestResolved, '在途 digest 请求跑完（无法取消），但结果不得再写库');
+  assert.equal(store.digestRecorded, null, '租约丢失不写摘要缓存');
+  assert.equal(store.completed, null, '不写 complete');
+  assert.equal(store.failed, null, '不 fail（由接管的新执行体负责）');
+});
+
+test('租约心跳（#89）：pdf job 长下载期间同样周期性续约', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-heartbeat' });
+  let heartbeats = 0;
+  store.heartbeat = async () => { heartbeats += 1; };
+  const lark = { async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; } };
+  const downloadPdf = () => new Promise((resolve) => setTimeout(() => resolve({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 }), 50));
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf, heartbeatMs: 10 }).kick();
+  await store.settled;
+
+  assert.ok(heartbeats >= 2, `pdf 下载期间应续约，实际 ${heartbeats}`);
+  assert.equal(store.completed?.kind, 'pdf');
+});
+
+// ——— 双通道消费（#91）：clip 通道串行（防 wiki 建档竞争），pdf 独立通道与 clip 并行——
+// pdf 不再等 clip 的长摘要/建档，同批任务总耗时 ≈ max(两者) 而非 sum ———
+
+test('双通道（#91）：pdf 与 clip 并行消费，pdf 不等 clip 的长摘要先完成', async () => {
+  const clipJob = {
+    ...fakeJob({ markdown: '# T\n\n正文', images: [] }),
+    kind: 'clip', attemptId: 'lane-clip', imageMode: 'off',
+    digest: { enabled: true, instruction: '总结' },
+  };
+  const pdfJob = { ...PDF_JOB, attemptId: 'lane-pdf' };
+  const queued = new Set([clipJob.attemptId, pdfJob.attemptId]);
+  const done = {};
+  let onBoth;
+  const both = new Promise((resolve) => { onBoth = resolve; });
+  const store = {
+    async list() { return [clipJob, pdfJob].filter((job) => queued.has(job.attemptId)); },
+    async claim() {},
+    async heartbeat() {},
+    async beginCreate() {},
+    async recordDocument() {},
+    async recordDigest() {},
+    async get() { return { status: 'succeeded' }; },
+    async complete(attemptId) {
+      done[attemptId] = Date.now();
+      queued.delete(attemptId);
+      if (queued.size === 0) onBoth();
+    },
+    async fail(_id, _w, result) { throw new Error(`不得失败: ${JSON.stringify(result)}`); },
+  };
+  const lark = {
+    async run() { return { ok: true, data: { document: { document_id: 'doc1', url: 'https://doc1' } } }; },
+    async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; },
+  };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: pdfJob.pdfSource.url, sizeBytes: 5 });
+  const generateDigest = () => new Promise((resolve) => setTimeout(() => resolve('要点'), 60));
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await both;
+
+  assert.ok(done['lane-pdf'] && done['lane-clip'], '两个任务都完成');
+  assert.ok(done['lane-pdf'] < done['lane-clip'], 'pdf 不等 clip 的 60ms 摘要，并行先完成');
+});
+
+test('双通道（#91）：两个 clip 任务仍严格串行（后一个等前一个完成才开始）', async () => {
+  const order = [];
+  const makeClip = (attemptId) => ({
+    ...fakeJob({ markdown: '# T\n\n正文', images: [] }),
+    kind: 'clip', attemptId, imageMode: 'off',
+  });
+  const jobs = [makeClip('lane-c1'), makeClip('lane-c2')];
+  const queued = new Set(jobs.map((job) => job.attemptId));
+  let onBoth;
+  const both = new Promise((resolve) => { onBoth = resolve; });
+  const store = {
+    async list() { return jobs.filter((job) => queued.has(job.attemptId)); },
+    async claim(attemptId) { order.push(`claim:${attemptId}`); },
+    async heartbeat() {},
+    async beginCreate() {},
+    async recordDocument() {},
+    async get() { return { status: 'succeeded' }; },
+    async complete(attemptId) {
+      order.push(`complete:${attemptId}`);
+      queued.delete(attemptId);
+      if (queued.size === 0) onBoth();
+    },
+    async fail(_id, _w, result) { throw new Error(`不得失败: ${JSON.stringify(result)}`); },
+  };
+  const lark = { async run() { return { ok: true, data: { document: { document_id: 'doc1', url: 'https://doc1' } } }; } };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await both;
+
+  assert.deepEqual(order, ['claim:lane-c1', 'complete:lane-c1', 'claim:lane-c2', 'complete:lane-c2'], 'clip 通道串行');
+});
+
+// ——— {{@file}} 占位符（#79）：指令检出占位符且有 url 型 PDF 时，executor 在调 AI 前
+// 下载字节作为附件传给 generateDigest；无 PDF / 下载失败 / 超 32 MB 静默降级纯文本 + 警告 ———
+
+function digestFileSetup({ pdfSource = null, instruction = '结合附件总结 {{@file}}' } = {}) {
+  const rig = digestSetup({ markdown: '# T\n\n正文', digest: { enabled: true, instruction }, pdfSource });
+  const calls = { downloads: [], digest: null };
+  const downloadPdf = async (url) => {
+    calls.downloads.push(url);
+    const buffer = Buffer.from('%PDF-1.7 digest-attachment');
+    return { buffer, source: url, sizeBytes: buffer.length };
+  };
+  const generateDigest = async (args) => { calls.digest = args; return 'AI 要点'; };
+  return { ...rig, calls, downloadPdf, generateDigest };
+}
+
+test('{{@file}}：有 url 型 PDF → 下载后作为附件传给 generateDigest，指令原样透传（剥除在 generateDigest 内）', async () => {
+  const { store, lark, calls, downloadPdf, generateDigest } = digestFileSetup({
+    pdfSource: { type: 'url', url: 'https://example.com/paper.pdf', name: 'paper.pdf' },
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf }).kick();
+  await store.settled;
+
+  assert.deepEqual(calls.downloads, ['https://example.com/paper.pdf']);
+  assert.equal(calls.digest.instruction, '结合附件总结 {{@file}}', '占位符剥除在 generateDigest 内完成');
+  assert.equal(calls.digest.pdf.filename, 'T.pdf', '附件名与云盘 PDF 同一命名规则（标题模板渲染结果）');
+  assert.equal(Buffer.from(calls.digest.pdf.dataBase64, 'base64').toString(), '%PDF-1.7 digest-attachment');
+  assert.deepEqual(store.completed.warnings, [], '附件随请求发出，无降级警告');
+  const digestStage = store.completed.timeline.find((entry) => entry.name === 'digest');
+  assert.match(digestStage.detail, /^已附 PDF（T\.pdf，[\d.]+ MB）$/, '任务日志正向标记附件');
+});
+
+test('{{@file}}：指令不含占位符时即使携带 pdfSource 也不下载、不带附件（回归）', async () => {
+  const { store, lark, calls, downloadPdf, generateDigest } = digestFileSetup({
+    pdfSource: { type: 'url', url: 'https://example.com/paper.pdf', name: 'paper.pdf' },
+    instruction: '总结成三点',
+  });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf }).kick();
+  await store.settled;
+
+  assert.deepEqual(calls.downloads, [], '无占位符不下载 PDF');
+  assert.equal(calls.digest.pdf, undefined, '无占位符不带附件');
+  assert.deepEqual(store.completed.warnings, []);
+});
+
+test('{{@file}}：无可用 PDF → 纯文本摘要 + job 警告（不失败、不调下载）', async () => {
+  const { store, lark, calls, downloadPdf, generateDigest } = digestFileSetup();
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, 'job 不失败');
+  assert.equal(store.failed, null);
+  assert.deepEqual(calls.downloads, []);
+  assert.equal(calls.digest.pdf, undefined, '无附件按纯文本摘要');
+  assert.deepEqual(store.completed.warnings, ['摘要指令含 {{@file}} 但本次剪藏没有可用 PDF，已按纯文本生成摘要']);
+});
+
+test('{{@file}}：PDF 下载失败 → 纯文本摘要 + job 警告（不失败）', async () => {
+  const rig = digestFileSetup({ pdfSource: { type: 'url', url: 'https://example.com/paper.pdf' } });
+  const downloadPdf = async () => { throw Object.assign(new Error('PDF_HTTP_403'), { code: 'PDF_FETCH_FAILED', statusCode: 403 }); };
+  new ClipExecutor({ store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} }, generateDigest: rig.generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf }).kick();
+  await rig.store.settled;
+
+  assert.ok(rig.store.completed, 'job 不失败');
+  assert.equal(rig.calls.digest.pdf, undefined, '下载失败按纯文本摘要');
+  assert.equal(rig.store.completed.warnings.length, 1);
+  assert.match(rig.store.completed.warnings[0], /PDF 下载失败.*已按纯文本生成摘要/);
+});
+
+// ——— 下载成功率（#92）：定 IP 钉孔意味着重试总打同一个 CDN 边缘节点；瞬时网络错误
+// 重试时按 attempt 轮转 A 记录换节点。摘要附件路径此前裸调 downloadPdf 无重试，
+// 与 pdf job（3 次尝试）拉齐 ———
+
+test('{{@file}}：附件下载撞瞬时网络错误自动重试（带递增 attempt 轮转节点），成功仍带附件（#92）', async () => {
+  const rig = digestFileSetup({ pdfSource: { type: 'url', url: 'https://arxiv.org/pdf/2608.26263', name: 'a.pdf' } });
+  let attempts = 0;
+  const downloadPdf = async (url, options) => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    assert.equal(options?.attempt, 2, '重试带递增 attempt 供边缘节点轮转');
+    return { buffer: Buffer.from('%PDF-1.7 retried'), source: url, sizeBytes: 16 };
+  };
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); };
+  new ClipExecutor({ store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} }, generateDigest: rig.generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf, sleep }).kick();
+  await rig.store.settled;
+
+  assert.equal(attempts, 2, 'ECONNRESET 后重试一次即成功');
+  assert.deepEqual(sleeps, [1000], '首次退避约 1s');
+  assert.equal(Buffer.from(rig.calls.digest.pdf.dataBase64, 'base64').toString(), '%PDF-1.7 retried', '重试成功带附件');
+  assert.deepEqual(rig.store.completed.warnings, [], '重试成功无降级警告');
+  assert.ok(rig.store.completed.timeline.some((entry) => entry.kind === 'retry' && entry.name === 'pdf_download'), 'timeline 记重试');
+});
+
+test('{{@file}}：附件下载连续 3 次瞬时错误才降级纯文本（重试预算与 pdf job 一致，#92）', async () => {
+  const rig = digestFileSetup({ pdfSource: { type: 'url', url: 'https://example.com/p.pdf', name: 'p.pdf' } });
+  let attempts = 0;
+  const downloadPdf = async () => { attempts += 1; throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); };
+  new ClipExecutor({ store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} }, generateDigest: rig.generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf, sleep: async () => {} }).kick();
+  await rig.store.settled;
+
+  assert.equal(attempts, 3, '共 3 次尝试后才放弃');
+  assert.equal(rig.calls.digest.pdf, undefined, '预算耗尽降级纯文本');
+  assert.equal(rig.store.completed.warnings.length, 1);
+  assert.match(rig.store.completed.warnings[0], /PDF 下载失败.*已按纯文本生成摘要/);
+});
+
+test('pdf job：瞬时重试按递增 attempt 调 downloadPdf（供边缘节点轮转，#92）', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-rotate' });
+  const seen = [];
+  const downloadPdf = async (url, options) => {
+    seen.push(options?.attempt ?? 0);
+    if (seen.length < 3) throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    return { buffer: Buffer.from('%PDF-'), source: url, sizeBytes: 5 };
+  };
+  const lark = { async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; } };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf, sleep: async () => {} }).kick();
+  await store.settled;
+
+  assert.deepEqual(seen, [1, 2, 3], '3 次尝试带递增 attempt');
+  assert.equal(store.completed?.kind, 'pdf', '重试后成功');
+});
+
+// ——— PDF 引用补插（#93）：#91 并行后 pdf 常先于 clip 建档完成，pdf 侧按「clip 未建好」
+// 跳过；clip 建档完成后反向补插，与 pdf 侧共用 mark-before-insert 幂等（不双插）———
+
+// clip 侧补插 rig：clip 正常建档；store.get 的 pdf 分支与 markPdfRefInserted 可脚本化
+function backfillSetup({ pdfJob = null, clipOverrides = {} } = {}) {
+  const rig = digestSetup({ markdown: '# T\n\n正文' });
+  Object.assign(rig.store, clipOverrides);
+  const marks = [];
+  const inserted = [];
+  rig.store.get = async (_id, kind) => (kind === 'pdf' ? pdfJob : { status: 'succeeded' });
+  rig.store.markPdfRefInserted = async (attemptId, insertedFlag = true) => {
+    marks.push({ attemptId, inserted: insertedFlag });
+    return { claimed: insertedFlag === true && !rig.store._refInserted };
+  };
+  rig.lark.insertDocFileReference = async (args) => { rig.store._refInserted = true; inserted.push(args); };
+  return { ...rig, marks, inserted };
+}
+const PDF_DONE = {
+  status: 'succeeded', title: 'T', pdfSource: { type: 'url', url: 'https://arxiv.org/pdf/2608.26263', name: '2608.26263.pdf' },
+  document: { fileToken: 'ft-1', url: 'https://u/f' },
+};
+
+test('PDF 引用补插（#93）：clip 建档完成时 pdf 已先行成功 → clip 侧插入文档开头引用块', async () => {
+  const { store, lark, marks, inserted } = backfillSetup({ pdfJob: PDF_DONE });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+
+  assert.deepEqual(inserted, [{ documentId: 'doc1', fileToken: 'ft-1', fileUrl: 'https://u/f', name: 'T.pdf' }], '以 pdf 产物 + 同一命名规则补插');
+  assert.deepEqual(marks, [{ attemptId: 'attempt-pipe', inserted: true }], '先置位再插入');
+  assert.deepEqual(store.completed.warnings, []);
+  assert.ok(store.completed.timeline.some((entry) => entry.kind === 'stage' && entry.name === 'pdf_ref_insert'), 'timeline 记补插阶段');
+});
+
+test('PDF 引用补插（#93）：pdf 未成功/不存在/已插过 → 不插不警告（静默）', async () => {
+  const cases = [
+    ['pdf 仍在跑', { ...PDF_DONE, status: 'running', document: null }],
+    ['pdf 失败', { ...PDF_DONE, status: 'failed', document: null }],
+    ['无 pdf job（未开 PDF 存云盘）', null],
+  ];
+  for (const [label, pdfJob] of cases) {
+    const { store, lark, marks, inserted } = backfillSetup({ pdfJob });
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+    await store.settled;
+    assert.equal(inserted.length, 0, `${label}：不插入`);
+    assert.equal(marks.length, 0, `${label}：不置位`);
+    assert.deepEqual(store.completed.warnings, [], `${label}：不警告`);
+  }
+});
+
+test('PDF 引用补插（#93）：插入失败 → 清标记 + clip 警告，job 不失败', async () => {
+  const { store, lark, marks } = backfillSetup({ pdfJob: PDF_DONE });
+  lark.insertDocFileReference = async () => { throw new Error('docx api 999'); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+
+  assert.ok(store.completed, '插入失败不 fail job');
+  assert.equal(store.completed.warnings.length, 1);
+  assert.match(store.completed.warnings[0], /PDF 云盘引用插入失败/);
+  assert.deepEqual(marks, [
+    { attemptId: 'attempt-pipe', inserted: true },
+    { attemptId: 'attempt-pipe', inserted: false },
+  ], '先置位、失败后清标记（重试可补插）');
+});
+
+test('PDF 引用补插（#93）：与 pdf 侧竞态——mark 返回 claimed=false → 不双插', async () => {
+  const { store, lark, inserted } = backfillSetup({ pdfJob: PDF_DONE });
+  store.markPdfRefInserted = async (attemptId, insertedFlag = true) => ({ claimed: false });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+
+  assert.equal(inserted.length, 0, '置位被抢先则不插入');
+  assert.deepEqual(store.completed.warnings, [], '竞态跳过不记警告');
+});
+
+// ——— 摘要附件字节共享（#94）：url 型 pdf job 与 {{@file}} 摘要附件下载的是同一 URL，
+// pdf 通道下载成功后经 executor 内存表共享给摘要，免第二次下载；共享被拒/超时回退
+// 现有路径（自己下载带 #92 重试；401 语义直接进 #80 staging 等待）———
+
+// 双 job（clip+pdf 同 attemptId）rig：两条通道并行消费，pdf 状态机可脚本化
+function shareSetup() {
+  const attemptId = 'share-1';
+  const clipJob = {
+    ...fakeJob({ markdown: '# T\n\n正文', images: [] }),
+    kind: 'clip', attemptId, imageMode: 'off',
+    digest: { enabled: true, instruction: '结合附件总结 {{@file}}' },
+    pdfSource: { type: 'url', url: 'https://arxiv.org/pdf/2608.26263', name: '2608.26263.pdf' },
+  };
+  const pdfJob = {
+    kind: 'pdf', attemptId, title: 'T', sourceUrl: clipJob.snapshot.sourceUrl,
+    status: 'queued', pdfSource: { ...clipJob.pdfSource }, document: null,
+  };
+  const jobs = { clip: clipJob, pdf: pdfJob };
+  const workers = {};
+  const queued = new Set(['clip', 'pdf']);
+  let onClip;
+  let onBoth;
+  const clipSettled = new Promise((resolve) => { onClip = resolve; });
+  const bothSettled = new Promise((resolve) => { onBoth = resolve; });
+  const store = {
+    completed: {},
+    failed: {},
+    clipSettled,
+    bothSettled,
+    async list() { return [clipJob, pdfJob].filter((job) => queued.has(job.kind)); },
+    async claim(_id, workerId, kind = 'clip') { workers[kind] = workerId; if (kind === 'pdf') pdfJob.status = 'running'; },
+    async heartbeat() {},
+    async beginCreate() {},
+    async recordDocument() {},
+    async recordDigest() {},
+    async get(_id, kind) {
+      if (kind === 'pdf') return { ...pdfJob, workerId: workers.pdf };
+      return { ...clipJob, status: queued.has('clip') ? 'running' : 'succeeded', document: queued.has('clip') ? null : { documentId: 'doc1', url: 'https://doc1' } };
+    },
+    async requestBytes() { if (pdfJob.status !== 'awaiting_bytes') pdfJob.status = 'awaiting_bytes'; },
+    async awaitBytes() { pdfJob.status = 'awaiting_bytes'; queued.delete('pdf'); },
+    async markPdfRefInserted() { return { claimed: false }; },
+    async complete(_id, _w, result, kind = 'clip') {
+      store.completed[kind] = result;
+      queued.delete(kind);
+      if (kind === 'pdf') { pdfJob.status = 'succeeded'; pdfJob.document = result.document; }
+      if (kind === 'clip') onClip();
+      if (queued.size === 0) onBoth();
+    },
+    async fail(_id, _w, result, kind = 'clip') {
+      store.failed[kind] = result;
+      queued.delete(kind);
+      if (kind === 'pdf') pdfJob.status = 'failed';
+      if (kind === 'clip') onClip();
+      if (queued.size === 0) onBoth();
+    },
+  };
+  const lark = {
+    async run() { return { ok: true, data: { document: { document_id: 'doc1', url: 'https://doc1' } } }; },
+    async uploadDriveFile() { return { fileToken: 'ft-1', url: 'https://u/f' }; },
+    async insertDocFileReference() {},
+  };
+  const digestCalls = [];
+  const generateDigest = async (args) => { digestCalls.push(args); return 'AI 要点'; };
+  return { store, lark, digestCalls, generateDigest, pdfJob };
+}
+
+test('字节共享（#94）：pdf 通道下载成功后摘要零额外下载，直接复用共享字节', async () => {
+  const { store, lark, digestCalls, generateDigest } = shareSetup();
+  let downloads = 0;
+  const downloadPdf = async (url) => { downloads += 1; return { buffer: Buffer.from('%PDF-1.7 shared'), source: url, sizeBytes: 15 }; };
+  const executor = new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf, generateDigest, getAiConfig: async () => AI_CONFIG });
+  executor.kick();
+  await store.bothSettled;
+  await new Promise((resolve) => setImmediate(resolve)); // 让 #execute 的 finally（共享表清理）跑完
+
+  assert.equal(downloads, 1, '全文只下载一次（pdf 通道）');
+  assert.equal(Buffer.from(digestCalls[0].pdf.dataBase64, 'base64').toString(), '%PDF-1.7 shared', '摘要附件即共享字节');
+  assert.deepEqual(store.completed.clip.warnings, []);
+  assert.ok(store.completed.clip.timeline.some((entry) => entry.name === 'pdf_share'), 'timeline 记共享来源');
+  assert.equal(executor.pdfShares.size, 0, 'clip 终态后共享条目已清理');
+});
+
+test('字节共享（#94）：pdf 下载业务失败（非瞬时）→ 共享被拒，摘要回退自己下载', async () => {
+  const { store, lark, digestCalls, generateDigest } = shareSetup();
+  let downloads = 0;
+  const downloadPdf = async (url) => {
+    downloads += 1;
+    if (downloads === 1) throw Object.assign(new Error('PDF_HTTP_500'), { code: 'PDF_FETCH_FAILED', statusCode: 500 });
+    return { buffer: Buffer.from('%PDF-1.7 self'), source: url, sizeBytes: 13 };
+  };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf, generateDigest, getAiConfig: async () => AI_CONFIG }).kick();
+  await store.bothSettled;
+
+  assert.equal(downloads, 2, 'pdf 通道失败后摘要自己下载一次');
+  assert.equal(Buffer.from(digestCalls[0].pdf.dataBase64, 'base64').toString(), '%PDF-1.7 self');
+  assert.deepEqual(store.completed.clip.warnings, [], '摘要拿到附件，无降级警告');
+  assert.ok(store.failed.pdf, 'pdf job 自身仍按失败收尾');
+});
+
+test('字节共享（#94）：共享等待超时（pdf 通道卡死）→ 摘要自己下载', async () => {
+  const { store, lark, digestCalls, generateDigest } = shareSetup();
+  let downloads = 0;
+  const downloadPdf = async (url) => {
+    downloads += 1;
+    if (downloads === 1) return new Promise(() => {}); // pdf 通道永久挂起
+    return { buffer: Buffer.from('%PDF-1.7 fallback'), source: url, sizeBytes: 17 };
+  };
+  // pdfShareWaitMs: 0 = 共享等待预算即刻耗尽（超时臂是独立 unref 定时器，不走注入 sleep）
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf, generateDigest, getAiConfig: async () => AI_CONFIG, pdfShareWaitMs: 0 }).kick();
+  await store.clipSettled;
+
+  assert.equal(downloads, 2, '超时后摘要自己下载');
+  assert.equal(Buffer.from(digestCalls[0].pdf.dataBase64, 'base64').toString(), '%PDF-1.7 fallback');
+  assert.deepEqual(store.completed.clip.warnings, []);
+});
+
+test('字节共享（#94）：pdf 撞 401 转 awaiting_bytes → 共享以凭据语义拒绝，摘要直接进 #80 staging 路径（不重复撞 401）', async () => {
+  await withStaging(async (staging) => {
+    const { store, lark, digestCalls, generateDigest, pdfJob } = shareSetup();
+    let downloads = 0;
+    const downloadPdf = async () => { downloads += 1; throw Object.assign(new Error('PDF_HTTP_401'), { code: 'PDF_FETCH_FAILED', statusCode: 401 }); };
+    const declared = {
+      type: 'bytes', url: pdfJob.pdfSource.url, name: pdfJob.pdfSource.name,
+      sizeBytes: STAGED_PDF.length, totalChunks: 1, sha256: STAGED_SHA256,
+    };
+    let polls = 0;
+    const sleep = async () => {
+      polls += 1;
+      // 扩展喂齐 + server 整验通过 → markBytesReady
+      await staging.putChunk('share-1', 0, STAGED_PDF);
+      pdfJob.status = 'queued';
+      pdfJob.pdfSource = declared;
+    };
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf, generateDigest, getAiConfig: async () => AI_CONFIG, staging, sleep }).kick();
+    await store.clipSettled;
+
+    assert.equal(downloads, 1, '摘要不重复撞 401（只有 pdf 通道那一次）');
+    assert.equal(Buffer.from(digestCalls[0].pdf.dataBase64, 'base64').toString(), STAGED_PDF.toString(), '附件来自 staging 字节');
+    assert.deepEqual(store.completed.clip.warnings, []);
+  });
+});
+
+test('{{@file}}：PDF 超过 32 MB 附件上限 → 去文件按纯文本摘要 + job 警告（不失败）', async () => {
+  const rig = digestFileSetup({ pdfSource: { type: 'url', url: 'https://example.com/big.pdf' } });
+  const downloadPdf = async (url) => ({ buffer: Buffer.alloc(AI_FILE_MAX_BYTES + 1, 0x25), source: url, sizeBytes: AI_FILE_MAX_BYTES + 1 });
+  new ClipExecutor({ store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} }, generateDigest: rig.generateDigest, getAiConfig: async () => AI_CONFIG, downloadPdf }).kick();
+  await rig.store.settled;
+
+  assert.ok(rig.store.completed, 'job 不失败');
+  assert.equal(rig.calls.digest.pdf, undefined, '超限去附件');
+  assert.deepEqual(rig.store.completed.warnings, ['PDF 超过 AI 附件上限（32 MB），已按纯文本生成摘要']);
+});
+
+// ——— {{@file}} 凭据回退（#80）：digest 自行下载撞 401/403 → 把排队中的 url 型 pdf job 转
+// awaiting_bytes，有界轮询等扩展喂齐 staging（server 整验通过 → markBytesReady 回 queued），
+// 复用同一份字节作为 AI 附件（只读不 discard，云盘上传仍由 pdf job 消费 staging）———
+
+const STAGED_PDF = Buffer.from('%PDF-1.7 staged-via-credentials');
+const STAGED_SHA256 = createHash('sha256').update(STAGED_PDF).digest('hex');
+
+// 带状态机 pdf job 的假 store：pdfJob 由测试脚本在推进（sleep 注入点翻状态）；
+// heartbeat/requestBytes 是 #80 新增的 store 依赖
+function digestStagingSetup({ pdfJobStatus = 'queued' } = {}) {
+  const job = fakeJob({ markdown: '# T\n\n正文', images: [] });
+  job.imageMode = 'off';
+  job.digest = { enabled: true, instruction: '结合附件总结 {{@file}}' };
+  job.pdfSource = { type: 'url', url: 'https://example.com/paywalled.pdf', name: 'paywalled.pdf' };
+  let drained = false;
+  let onSettled;
+  const settled = new Promise((resolve) => { onSettled = resolve; });
+  const store = {
+    completed: null,
+    failed: null,
+    settled,
+    pdfJob: { kind: 'pdf', attemptId: job.attemptId, status: pdfJobStatus, pdfSource: { ...job.pdfSource } },
+    heartbeats: 0,
+    requestedBytes: 0,
+    async list() { return drained ? [] : [job]; },
+    async claim() {},
+    async beginCreate() {},
+    async recordDocument() {},
+    async recordDigest() {},
+    async heartbeat() { store.heartbeats += 1; },
+    async requestBytes() {
+      store.requestedBytes += 1;
+      if (store.pdfJob.status === 'awaiting_bytes') return;
+      if (store.pdfJob.status !== 'queued' || store.pdfJob.pdfSource?.type !== 'url') {
+        throw new Error(`Cannot request bytes for pdf job in ${store.pdfJob.status} state`);
+      }
+      store.pdfJob.status = 'awaiting_bytes';
+    },
+    async get(_id, kind) { return kind === 'pdf' ? { ...store.pdfJob } : { status: 'succeeded' }; },
+    async complete(_id, _worker, result) { store.completed = result; drained = true; onSettled(); },
+    async fail(_id, _worker, result) { store.failed = result; drained = true; onSettled(); },
+  };
+  const lark = {
+    async run() { return { ok: true, data: { document: { document_id: 'doc1', url: 'https://doc1' } } }; },
+  };
+  const downloadPdf = async () => {
+    throw Object.assign(new Error('PDF_HTTP_401'), { code: 'PDF_FETCH_FAILED', statusCode: 401 });
+  };
+  const digestCalls = [];
+  const generateDigest = async (args) => { digestCalls.push(args); return 'AI 要点'; };
+  return { store, lark, downloadPdf, generateDigest, digestCalls, job };
+}
+
+async function withStaging(run) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-digest-staging-'));
+  try {
+    await run(new PdfChunkStaging({ dir: path.join(directory, 'staging') }), directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test('{{@file}} 凭据回退（#91 并行）：pdf job 正在 running（自身下载也会撞 401 转 awaiting_bytes）→ 不立即降级，等喂齐后复用字节', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup({ pdfJobStatus: 'running' });
+    const declared = {
+      type: 'bytes', url: 'https://example.com/paywalled.pdf', name: 'paywalled.pdf',
+      sizeBytes: STAGED_PDF.length, totalChunks: 1, sha256: STAGED_SHA256,
+    };
+    let polls = 0;
+    const sleep = async () => {
+      polls += 1;
+      // pdf 通道并行下载撞 401 → 自身转 awaiting_bytes
+      if (polls === 1) rig.store.pdfJob = { ...rig.store.pdfJob, status: 'awaiting_bytes' };
+      if (polls === 2) {
+        // 扩展喂齐 + server 整验通过 → markBytesReady
+        await staging.putChunk(rig.job.attemptId, 0, STAGED_PDF);
+        rig.store.pdfJob = { ...rig.store.pdfJob, status: 'queued', pdfSource: declared };
+      }
+    };
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.equal(rig.store.requestedBytes, 1, '仍先尝试 requestBytes（running 被拒）');
+    assert.equal(rig.digestCalls.length, 1);
+    assert.ok(rig.digestCalls[0].pdf, '等到字节后带附件，不降级纯文本');
+    assert.deepEqual(rig.store.completed.warnings, []);
+  });
+});
+
+test('{{@file}} 凭据回退：401 后等 staging 整验通过，复用同一份字节作附件；clip 只读不消费 staging', async () => {
+  await withStaging(async (staging, directory) => {
+    const rig = digestStagingSetup();
+    const declared = {
+      type: 'bytes', url: 'https://example.com/paywalled.pdf', name: 'paywalled.pdf',
+      sizeBytes: STAGED_PDF.length, totalChunks: 1, sha256: STAGED_SHA256,
+    };
+    let polls = 0;
+    const sleep = async () => {
+      polls += 1;
+      if (polls === 2) {
+        // 扩展喂齐 + server 整验通过 → markBytesReady：pdf job 回 queued（bytes 声明粘滞）
+        await staging.putChunk(rig.job.attemptId, 0, STAGED_PDF);
+        rig.store.pdfJob = { ...rig.store.pdfJob, status: 'queued', pdfSource: declared };
+      }
+    };
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.equal(rig.store.requestedBytes, 1, 'clip 侧触发 pdf job 转 awaiting_bytes');
+    assert.ok(rig.store.heartbeats >= 1, '等待期间 heartbeat 保 lease');
+    assert.equal(rig.digestCalls.length, 1);
+    assert.equal(Buffer.from(rig.digestCalls[0].pdf.dataBase64, 'base64').toString(), STAGED_PDF.toString(), '附件即 staging 同一份字节');
+    assert.equal(rig.digestCalls[0].pdf.filename, 'T.pdf');
+    assert.deepEqual(rig.store.completed.warnings, [], '整验通过无降级警告');
+    assert.equal(rig.store.pdfJob.status, 'queued', 'clip 不消费 pdf job（云盘上传仍由它执行）');
+    const leftovers = (await readdir(path.join(directory, 'staging'))).filter((entry) => entry.startsWith(rig.job.attemptId));
+    assert.ok(leftovers.includes(`${rig.job.attemptId}.part`), 'clip 只读 staging，discard 留给 pdf job 收尾');
+  });
+});
+
+test('{{@file}} 凭据回退：等待超时 → 纯文本摘要 + 超时警告，job 不失败', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup();
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep: async () => {}, digestPdfWaitMs: 3_000, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.ok(rig.store.completed, 'job 不失败');
+    assert.equal(rig.digestCalls[0].pdf, undefined, '超时去附件');
+    assert.deepEqual(rig.store.completed.warnings, ['等待 PDF 字节回传超时，已按纯文本生成摘要']);
+    assert.equal(rig.store.pdfJob.status, 'awaiting_bytes', '超时后 pdf job 维持 awaiting（扩展迟喂仍走原流程）');
+  });
+});
+
+test('{{@file}} 凭据回退：等待期间 heartbeat 异常 → 降级纯文本摘要 + 警告，异常不逃逸成 job 失败', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup();
+    rig.store.heartbeat = async () => { throw new Error('lease lost'); };
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep: async () => {}, digestPdfWaitMs: 3_000, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.ok(rig.store.completed, 'job 不失败');
+    assert.equal(rig.store.failed, null);
+    assert.equal(rig.digestCalls[0].pdf, undefined, '降级去附件');
+    assert.deepEqual(rig.store.completed.warnings, ['等待 PDF 字节期间任务租约异常，已按纯文本生成摘要']);
+  });
+});
+
+test('{{@file}} 凭据回退：等待期间 pdf job 终态（cancelled）→ 不再等，纯文本摘要 + 警告', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup();
+    const sleep = async () => { rig.store.pdfJob = { ...rig.store.pdfJob, status: 'cancelled' }; };
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.ok(rig.store.completed, 'job 不失败');
+    assert.equal(rig.digestCalls[0].pdf, undefined);
+    assert.deepEqual(rig.store.completed.warnings, ['PDF 任务已结束（cancelled），无法取得 PDF 字节，已按纯文本生成摘要']);
+  });
+});
+
+test('{{@file}} 凭据回退：pdf job 已是终态（failed）→ requestBytes 拒绝，立即降级不等待', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup({ pdfJobStatus: 'failed' });
+    let sleeps = 0;
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep: async () => { sleeps += 1; },
+    }).kick();
+    await rig.store.settled;
+
+    assert.equal(rig.store.requestedBytes, 1, '尝试过触发');
+    assert.equal(sleeps, 0, '终态不进入轮询等待');
+    assert.equal(rig.digestCalls[0].pdf, undefined);
+    assert.deepEqual(rig.store.completed.warnings, ['PDF 下载需要登录凭据，但 PDF 任务当前状态无法接收字节回传，已按纯文本生成摘要']);
+  });
+});
+
+test('{{@file}} 凭据回退：bytes 声明超 32 MB → 提前放弃（不等喂齐），纯文本摘要 + 超限警告', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup();
+    const sleep = async () => {
+      rig.store.pdfJob = {
+        ...rig.store.pdfJob,
+        pdfSource: {
+          type: 'bytes', url: 'https://example.com/paywalled.pdf', name: 'big.pdf',
+          sizeBytes: AI_FILE_MAX_BYTES + 1, totalChunks: 9, sha256: 'f'.repeat(64),
+        },
+      };
+    };
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.ok(rig.store.completed, 'job 不失败');
+    assert.equal(rig.digestCalls[0].pdf, undefined);
+    assert.deepEqual(rig.store.completed.warnings, ['PDF 超过 AI 附件上限（32 MB），已按纯文本生成摘要']);
+  });
 });

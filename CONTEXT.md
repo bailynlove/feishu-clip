@@ -49,8 +49,12 @@ _Avoid_: 格式串、占位文本
 _Avoid_: 网页导读、内容总结报告
 
 **AI provider 预设（AI Provider Preset）**:
-Bridge 端 `ai.json` 里一套命名的 AI API 配置（apiType / baseUrl / model / apiKey + 高级设置 headers / maxOutputTokens）；「默认」由旧单配置迁移而来，可编辑不可删除/改名；模板预设按名选用（`digest.provider`），空 = 默认 provider，悬空引用按摘要失败降级。
+Bridge 端 `ai.json` 里一套命名的 AI API 配置（apiType / baseUrl / model / apiKey + 高级设置 headers / maxOutputTokens / timeoutMs，超时默认 180 秒，reasoning 模型思考也耗时）；「默认」由旧单配置迁移而来，可编辑不可删除/改名；模板预设按名选用（`digest.provider`），空 = 默认 provider，悬空引用按摘要失败降级。
 _Avoid_: 模型配置、API 档案
+
+**PDF 附件占位符（{{@file}}）**:
+摘要指令（预设级/全局）中的占位符；Bridge 检出后把本次剪藏 PDF 以 base64 附件随摘要请求一并发给 AI（三种 API 类型各自附件形状），无 PDF、预设未开「PDF 存云盘」或超 32MB 时降级为纯文本摘要并记 job 警告，不阻断剪藏。
+_Avoid_: 模板变量、正文占位符
 
 **悬浮内容（Hover Content）**:
 labuladong 代码行内的灯泡注解面板：`span.code-extend-tooltip` 内 `svg.code-extend-icon`（灯泡图标）的兄弟 `span.code-extend-content`，默认隐藏、悬停灯泡才展示。判定硬收窄为此精确触发器关联——其他站点的类似悬停注解、一般隐藏容器一律不算悬浮内容（按普通内容渲染或随容器丢弃）。剪藏时在触发位置留 `悬浮内容{i}` 标记，文字内容作为注释段落 `悬浮内容{i}: 内容` 排到所在块之后（列表项内的提升到整个列表之后），面板内的图片锚定在同一位置、锚点前带 `悬浮内容{i}：` 编号标签段。含 iframe 的隐藏容器不作悬浮打标。
@@ -77,7 +81,7 @@ _Avoid_: 嵌入帧、外部网页块
 _Avoid_: 网页里有 PDF 链接、浏览器下载记录
 
 **PDF 上传任务（PDF Upload Job）**:
-与剪藏 job 共享同一剪藏尝试 `attemptId`、以 `kind: 'pdf'` 区分的独立 job；状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 转入 awaiting_bytes 等待扩展喂字节。
+与剪藏 job 共享同一剪藏尝试 `attemptId`、以 `kind: 'pdf'` 区分的独立 job；状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 转入 awaiting_bytes 等待扩展喂字节。上传成功后把该 PDF 以「@」引用（mention_doc，quote container 内）插到本次剪藏文档开头（#88）；幂等靠剪藏 job 的 `pdfRefInserted` 标记（mark-before-insert：先置位再插入，插入失败清除标记），插入失败只记 pdf job 警告、不改终态；clip 文档尚未建好时跳过并记警告，clip 侧建档后不自动补插（协议空隙，pdf 重试可补）。
 _Avoid_: 附件同步、文献库条目
 
 **云盘目录（Drive Folder）**:

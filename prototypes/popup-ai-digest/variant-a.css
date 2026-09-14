@@ -1,0 +1,7 @@
+/* PROTOTYPE — 变体 A：开关行下方内联展开区，左侧竖线标识从属于开关行 */
+.variant-a .ai-block{border-top:1px dashed #eef1f6;padding-top:2px}
+.variant-a .ai-inline{display:flex;flex-direction:column;gap:8px;margin:-2px 0 2px 12px;padding-left:12px;border-left:2px solid var(--brand-line)}
+.variant-a .ai-select{border:1.5px solid #dfe4ec;border-radius:10px;padding:8px 10px;font-size:12.5px;font-family:inherit;color:#182030;background:#fff;width:100%}
+.variant-a .ai-select:focus{outline:none;border-color:var(--brand-2)}
+.variant-a .ai-empty{margin:0;font-size:12px;color:#9aa3b2}
+.variant-a .ai-instruction{min-height:48px}

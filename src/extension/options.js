@@ -5,7 +5,7 @@ import { createDrivePicker } from './drive-picker.js';
 import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireDrivePicker } from './picker-view.js';
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
-  validateTriggers, parseTriggers, insertVariable, TEMPLATE_VARIABLES,
+  validateTriggers, parseTriggers, insertVariable, variableRowNames, digestFileHintNeeded,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
@@ -263,6 +263,7 @@ function syncEditor() {
   $('#f-digest-instruction-row').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-provider-row').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-instruction').value = digest?.instruction ?? '';
+  syncDigestFileHint();
   renderDigestProviderOptions();
   $('#f-title').value = preset.titleTemplate ?? '';
   $('#f-body').value = preset.bodyTemplate ?? '';
@@ -469,10 +470,17 @@ $('#f-digest').addEventListener('click', () => {
   }));
   syncEditor();
 });
+// {{@file}} 行内提示（#81）：指令含 {{@file}} 但预设未开「PDF 存云盘」时显示；只提示不阻止保存
+function syncDigestFileHint() {
+  const pdfEnabled = resolvePdfDrive(editingPreset())?.enabled === true;
+  $('#f-digest-file-hint').classList.toggle('hidden', !digestFileHintNeeded($('#f-digest-instruction').value, pdfEnabled));
+}
+
 $('#f-digest-instruction').addEventListener('input', () => {
   applyMutation(updatePreset(state, editingId, {
     digest: { enabled: true, instruction: $('#f-digest-instruction').value, provider: resolveDigest(editingPreset())?.provider ?? '' },
   }), { quiet: true });
+  syncDigestFileHint();
 });
 
 // provider 选用（#78）：下拉值即 provider 名（'' = 默认 provider），随预设整体写回
@@ -503,10 +511,11 @@ function renderDigestProviderOptions() {
   $('#f-digest-provider-hint').classList.toggle('hidden', aiProvidersReady);
 }
 
-// 变量快捷插入：在光标处插入 {{xxx}}，并沿用字段自身的保存路径
+// 变量快捷插入：在光标处插入 {{xxx}}，并沿用字段自身的保存路径；
+// 按钮名单默认 TEMPLATE_VARIABLES，行上 data-vars 显式指定时优先（#81 摘要指令框只列 @file）
 for (const row of document.querySelectorAll('.ps-vars')) {
   const field = $(`#${row.dataset.field}`);
-  for (const name of TEMPLATE_VARIABLES) {
+  for (const name of variableRowNames(row.dataset.vars)) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'ps-var';
@@ -595,6 +604,7 @@ function aiFormDraft() {
     apiKey: $('#ai-api-key').value,
     headersText: $('#ai-headers').value,
     maxOutputTokensText: $('#ai-max-output-tokens').value,
+    timeoutText: $('#ai-timeout').value,
   };
 }
 
@@ -660,6 +670,7 @@ function fillAiForm() {
   $('#ai-api-key').value = '';
   $('#ai-headers').value = aiHeadersToText(provider?.headers);
   $('#ai-max-output-tokens').value = provider?.maxOutputTokens ? String(provider.maxOutputTokens) : '';
+  $('#ai-timeout').value = provider?.timeoutMs ? String(Math.round(provider.timeoutMs / 1000)) : '';
   $('#ai-delete').classList.toggle('hidden', !provider || provider.name === DEFAULT_AI_PROVIDER_NAME);
   syncAiBaseUrlPlaceholder();
   syncAiKeyPlaceholder();

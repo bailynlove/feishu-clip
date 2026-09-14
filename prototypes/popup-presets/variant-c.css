@@ -1,0 +1,32 @@
+/* PROTOTYPE — Variant C：底部动作面板布局。hero 紧凑、预览占满、底部固定动作栏。 */
+.pc-root { height: 560px; background: #fff; color: #1a2233; font-size: 14px; position: relative; display: flex; flex-direction: column; }
+.pc-root > * { flex-shrink: 0; }
+.pc-root > .pc-preview { flex-shrink: 1; }
+.pc-hero { background: var(--brand); color: var(--brand-ink); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.pc-hero-row { display: flex; align-items: center; gap: 6px; }
+.pc-hero-row .ps-title-wrap { flex: 1; min-width: 0; }
+.pc-hero-row .ps-title-input { font-size: 13.5px; padding: 6px 9px; }
+
+/* 预览占满中段 */
+.pc-preview { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; }
+
+.pc-above { padding: 6px 14px 4px; display: flex; flex-direction: column; gap: 5px; }
+
+/* 底部固定动作栏：预设下拉 + 主按钮 + ⋮ */
+.pc-bar { position: relative; display: flex; align-items: stretch; gap: 7px; padding: 10px 14px 12px; border-top: 1px solid #eef1f6; background: #fff; box-shadow: 0 -6px 16px rgba(20,30,50,.06); }
+.pc-preset-btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; border: 1.5px solid var(--brand-line); background: var(--brand-soft); border-radius: 14px; padding: 6px 12px; cursor: pointer; font-family: inherit; color: var(--brand-ink); }
+.pc-preset-name { font-size: 12.5px; font-weight: 700; }
+.pc-preset-caret { font-size: 9px; color: var(--brand-deep); }
+.pc-main { flex: 1; border: 0; border-radius: 18px; padding: 13px 10px; background: linear-gradient(rgba(255,255,255,.75), rgba(255,255,255,.08) 55%), var(--brand-2); color: var(--brand-ink); font-size: 13.5px; font-weight: 800; cursor: pointer; font-family: inherit; box-shadow: inset 0 2px 4px rgba(255,255,255,.85), inset 0 -4px 8px rgba(8,80,100,.14), 0 8px 20px rgba(95,212,236,.55); transition: transform .12s, box-shadow .12s; white-space: nowrap; }
+.pc-main:active { transform: translateY(3px) scale(.97); box-shadow: inset 0 2px 3px rgba(255,255,255,.5), inset 0 -2px 4px rgba(8,80,100,.1), 0 2px 6px rgba(95,212,236,.4); }
+.pc-main:disabled { background: #aab5c8; color: #fff; box-shadow: none; }
+.pc-more { width: 42px; border: 1.5px solid #e2e7ee; background: #f7f9fc; border-radius: 14px; font-size: 16px; cursor: pointer; color: #1a2233; }
+
+/* 从动作栏向上弹出的菜单 */
+.pc-menu { position: absolute; bottom: calc(100% + 8px); z-index: 11; background: #fff; border-radius: 14px; box-shadow: 0 10px 34px rgba(20,30,50,.28); padding: 6px; display: flex; flex-direction: column; }
+.pc-menu-preset { left: 0; min-width: 240px; }
+.pc-menu-more { right: 0; width: 300px; }
+.pc-menu-tpl { margin-left: auto; font-size: 10px; color: #9aa3b2; font-family: ui-monospace, monospace; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-menu-sep { height: 1px; background: #eef1f6; margin: 6px 4px; }
+.pc-menu-label { font-size: 10.5px; font-weight: 700; color: #9aa3b2; padding: 4px 12px 6px; letter-spacing: .04em; }
+.pc-menu-cell { padding: 2px 6px; }

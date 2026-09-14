@@ -473,6 +473,55 @@ test('pdf job 取消走最小状态集：queued/running → cancelled', async ()
   });
 });
 
+// ——— PDF 云盘引用回填（#88）：clip job 记 pdfRefInserted 幂等标记，pdf job 重试/重跑不重复插入 ———
+
+test('pdfRefInserted（#88）：clip job 缺省 false；markPdfRefInserted 置位/清除且幂等；claimed 标明本调用是否完成置位；存量 job 读取补 false', async () => {
+  await withStore(async ({ store, filePath }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a' });
+    assert.equal((await store.get('attempt-1', 'clip')).pdfRefInserted, false, '新建 clip job 缺省未插引用');
+
+    // mark-before-insert（#88 review）：先置位再插入，claimed=true 标明本调用完成了
+    // false→true 的跃迁（租约重排竞态下只有一个执行体能拿到 true）
+    const marked = await store.markPdfRefInserted('attempt-1');
+    assert.equal(marked.job.pdfRefInserted, true);
+    assert.equal(marked.claimed, true, '首次置位 claimed=true');
+    const again = await store.markPdfRefInserted('attempt-1');
+    assert.equal(again.job.pdfRefInserted, true, '重复标记幂等');
+    assert.equal(again.claimed, false, '已被置位时 claimed=false（另一执行体据此跳过不双插）');
+    assert.equal((await store.get('attempt-1', 'clip')).pdfRefInserted, true, '标记随 jobs.json 落盘');
+
+    // 反向置位：插入失败后清除标记，重试可补插；清除后可再次置位
+    const cleared = await store.markPdfRefInserted('attempt-1', false);
+    assert.equal(cleared.job.pdfRefInserted, false);
+    assert.equal(cleared.claimed, false, '清除不是置位，claimed=false');
+    assert.equal((await store.get('attempt-1', 'clip')).pdfRefInserted, false, '清除随 jobs.json 落盘');
+    const remark = await store.markPdfRefInserted('attempt-1');
+    assert.equal(remark.claimed, true, '清除后可再次置位');
+
+    await assert.rejects(() => store.markPdfRefInserted('attempt-unknown'), /Unknown attemptId/);
+
+    // 存量 job 文件没有该字段：读取侧补 false
+    const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+    delete persisted.jobs[0].pdfRefInserted;
+    await writeFile(filePath, JSON.stringify(persisted));
+    const reloaded = new PersistentJobStore({ filePath });
+    assert.equal((await reloaded.get('attempt-1', 'clip')).pdfRefInserted, false);
+  });
+});
+
+test('pdf job complete 可携带警告（#88 引用插入失败）：warnings 落库，状态仍 succeeded', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    await store.claim('attempt-1', 'worker-a', 'pdf');
+    const done = await store.complete('attempt-1', 'worker-a', {
+      document: { fileToken: 'ft1', url: 'https://example.feishu.cn/file/ft1' },
+      warnings: ['PDF 云盘引用插入失败：docx api 999'],
+    }, 'pdf');
+    assert.equal(done.status, 'succeeded', '引用插入失败不改变 pdf job 的成功终态');
+    assert.deepEqual(done.warnings, ['PDF 云盘引用插入失败：docx api 999']);
+  });
+});
+
 test('pdf job 记录目标目录 folderToken（#66）：缺省 null（根目录），重试以最新提交为准', async () => {
   await withStore(async ({ store }) => {
     const legacy = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
@@ -706,5 +755,61 @@ test('recordDigest 缓存摘要结果：worker 守卫仿 recordDocument（但不
     assert.equal(persisted.jobs[0].digestText, '摘要内容');
     const reloaded = new PersistentJobStore({ filePath });
     assert.equal((await reloaded.get('attempt-1', 'clip')).digestText, '摘要内容');
+  });
+});
+
+// ——— clip job 携带 pdfSource（#79）：digest 阶段的 {{@file}} 附件用；重复提交幂等，存量补 null ———
+
+test('clip job 落库带 pdfSource：重复提交幂等保留首值，存量 job 读取补 null', async () => {
+  await withStore(async ({ store, filePath }) => {
+    const pdfSource = { type: 'url', url: 'https://example.test/paper.pdf', name: 'paper.pdf' };
+    const submitted = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', pdfSource });
+    assert.equal(submitted.created, true);
+    assert.deepEqual(submitted.job.pdfSource, pdfSource, 'clip job 落库带 pdfSource');
+
+    // 重复提交幂等：同 (attemptId, clip) 键返回既有 job，不带 pdfSource 的重复提交不清空首值
+    const again = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article' });
+    assert.equal(again.created, false);
+    assert.deepEqual(again.job.pdfSource, pdfSource, '幂等命中保留首次落库的 pdfSource');
+
+    const plain = await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/other' });
+    assert.equal(plain.job.pdfSource, null, '缺省落 null');
+
+    // 存量 job 文件没有 pdfSource 字段，读取侧补 null（与 digest/kind 迁移同一约定）
+    const data = JSON.parse(await readFile(filePath, 'utf8'));
+    for (const job of data.jobs) delete job.pdfSource;
+    await writeFile(filePath, JSON.stringify(data));
+    assert.equal((await store.get('attempt-1', 'clip')).pdfSource, null);
+  });
+});
+
+// ——— requestBytes（#80）：clip digest 撞 401/403 时，pdf job 还排在队列里（提交序 clip 在前、
+// executor 串行消费），由 clip 侧把排队中的 url 型 pdf job 直接转 awaiting_bytes 让扩展喂字节 ———
+
+test('requestBytes：排队中的 url 型 pdf job 转 awaiting_bytes；已 awaiting 幂等；非 queued/bytes 型拒绝', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article' });
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', kind: 'pdf', pdfSource: PDF_SOURCE });
+
+    const requested = await store.requestBytes('attempt-1');
+    assert.equal(requested.status, 'awaiting_bytes', 'queued → awaiting_bytes');
+    assert.equal(requested.pdfSource.type, 'url', 'url 型声明原样保留（bytes 升级仍走扩展声明）');
+    assert.equal((await store.get('attempt-1', 'pdf')).status, 'awaiting_bytes', '落盘可查');
+
+    const again = await store.requestBytes('attempt-1');
+    assert.equal(again.status, 'awaiting_bytes', '已 awaiting 幂等空转');
+
+    // bytes 型提交直接落 awaiting_bytes：requestBytes 同样幂等
+    const bytes = { type: 'bytes', url: 'https://example.test/b.pdf', name: 'b.pdf', sizeBytes: 4 * 1024 * 1024, totalChunks: 1, sha256: 'a'.repeat(64) };
+    await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/b.pdf', kind: 'pdf', pdfSource: bytes });
+    assert.equal((await store.requestBytes('attempt-2')).status, 'awaiting_bytes', 'bytes 型已在 awaiting，幂等');
+
+    // 终态拒绝：succeeded 的 pdf job 不能再转 awaiting
+    await store.submit({ attemptId: 'attempt-3', sourceUrl: 'https://example.test/c.pdf', kind: 'pdf', pdfSource: { type: 'url', url: 'https://example.test/c.pdf' } });
+    await store.claim('attempt-3', 'worker-a', 'pdf');
+    await store.complete('attempt-3', 'worker-a', { document: { fileToken: 'ft1', url: 'https://example.test/ft1' } }, 'pdf');
+    await assert.rejects(() => store.requestBytes('attempt-3'), /Cannot request bytes/);
+
+    await assert.rejects(() => store.requestBytes('attempt-unknown'), /Unknown attemptId/);
   });
 });

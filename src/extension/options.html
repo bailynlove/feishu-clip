@@ -43,9 +43,12 @@
     <p class="ps-desc">每行一条 <code>Name: value</code>。某些网关（如 opencode-go）要求额外请求头才能路由。</p>
     <label class="ps-field"><span class="ps-label">最大输出 tokens（选填）</span><input id="ai-max-output-tokens" class="ps-input mono" inputmode="numeric" autocomplete="off" placeholder="2048"></label>
     <p class="ps-desc">推理模型（gpt-5 系 / o 系等）推理过程也占用输出额度，出现 max_output_tokens 类报错时调大。</p>
+    <label class="ps-field"><span class="ps-label">超时（秒，选填）</span><input id="ai-timeout" class="ps-input mono" inputmode="numeric" autocomplete="off" placeholder="180"></label>
+    <p class="ps-desc">单次摘要请求的最长等待时间（5–1800 秒）。慢速推理模型思考耗时较长，出现超时警告时调大。</p>
   </details>
   <label class="ps-field"><span class="ps-label">全局摘要指令</span><textarea id="ai-instruction" class="ps-input mono" rows="4"></textarea></label>
-  <p class="ps-desc">留空使用内置默认指令；预设级指令优先于全局指令。</p>
+  <div class="ps-vars" data-field="ai-instruction" data-vars="@file"></div>
+  <p class="ps-desc">留空使用内置默认指令；预设级指令优先于全局指令。{{@file}}：检出 PDF 时随请求一并发给 AI；无 PDF 时降级为纯文本摘要。</p>
   </details>
 </section>
 
@@ -127,7 +130,7 @@
         <span class="ps-switch"></span>
       </button>
       <label class="ps-field hidden" id="f-digest-provider-row"><span class="ps-label">AI provider</span><select id="f-digest-provider" class="ps-input"></select><span class="ps-desc hidden" id="f-digest-provider-hint">未读取到 provider 列表，仅可选「默认」</span></label>
-      <label class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea></label>
+      <div class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea><div class="ps-vars" data-field="f-digest-instruction" data-vars="@file"></div><span class="ps-desc">{{@file}}：检出 PDF 时随请求一并发给 AI；无 PDF 时降级为纯文本摘要。</span><span class="ps-desc hidden" id="f-digest-file-hint">该预设未开「PDF 存云盘」，{{@file}} 没有 PDF 可附，摘要将降级为纯文本。</span></div>
     </div>
 
     <label class="ps-field"><span class="ps-label">标题模板</span><input id="f-title" class="ps-input mono" autocomplete="off" placeholder="{{title}}"></label>

@@ -122,8 +122,29 @@ test('sections 1 (配对) and 4 (开发者模式) stay plain, no collapse wrappe
 // AI provider 预设管理（#77）：AI 摘要区从单表单升级为 tabs + 名称/删除的提供者管理骨架；
 // 原有字段 id 全部保留（options.js 复用），全局摘要指令不动
 test('AI 摘要 section has provider tabs, name field, delete button; config fields unchanged', () => {
-  for (const id of ['ai-provider-tabs', 'ai-name', 'ai-delete', 'ai-api-type', 'ai-base-url', 'ai-model', 'ai-api-key', 'ai-save', 'ai-test', 'ai-instruction', 'ai-headers', 'ai-max-output-tokens']) {
+  for (const id of ['ai-provider-tabs', 'ai-name', 'ai-delete', 'ai-api-type', 'ai-base-url', 'ai-model', 'ai-api-key', 'ai-save', 'ai-test', 'ai-instruction', 'ai-headers', 'ai-max-output-tokens', 'ai-timeout']) {
     assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
   }
   assert.match(html, /<div class="ps-tabs" id="ai-provider-tabs"><\/div>/, 'provider tabs 容器初始为空（由 options.js 渲染）');
+});
+
+// {{@file}} 快捷插入（#81）：两个摘要指令框（全局 #ai-instruction / 预设级 #f-digest-instruction）
+// 各有专属变量行，data-vars="@file"——只列附件占位符，不混用标题/正文模板变量（指令里不会被替换）；
+// 按钮由 options.js 复用 insertVariable 路径渲染，点击在光标处插入
+test('both digest instruction fields have a {{@file}} quick-insert row and explanation (#81)', () => {
+  for (const field of ['ai-instruction', 'f-digest-instruction']) {
+    const row = html.match(new RegExp(`class="ps-vars" data-field="${field}" data-vars="([^"]*)"`));
+    assert.ok(row, `#${field} 应有变量快捷插入行（.ps-vars）`);
+    assert.equal(row[1], '@file', `#${field} 的变量行只列 @file`);
+  }
+  assert.ok(html.includes('检出 PDF 时随请求一并发给 AI'), '应说明 {{@file}} 语义');
+  assert.ok(html.includes('无 PDF 时降级为纯文本摘要'), '应说明无 PDF 时降级');
+});
+
+// {{@file}} 行内提示（#81）：预设级指令含 {{@file}} 但预设未开「PDF 存云盘」时在指令框旁提示
+// （显隐由 options.js 按 digestFileHintNeeded 控制），初始隐藏
+test('preset instruction has an initially-hidden {{@file}}-without-pdfDrive hint (#81)', () => {
+  assert.ok(classAttr('f-digest-file-hint').includes('hidden'), '#f-digest-file-hint 初始应隐藏');
+  const hint = html.match(/<[^>]*id="f-digest-file-hint"[^>]*>([\s\S]*?)<\/[^>]+>/);
+  assert.ok(hint[1].includes('PDF 存云盘'), '提示应指向「PDF 存云盘」开关');
 });
