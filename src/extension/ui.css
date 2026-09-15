@@ -101,6 +101,10 @@
 .options .pc-tab-op.danger{color:#b33038}
 .options .pc-tab-op[data-disabled]{opacity:.35;cursor:default;pointer-events:none}
 .options .pc-form{border-top:1px solid #eef1f6;margin-top:12px;padding-top:12px}
+/* 预设编辑器三小节（#100）：基本信息常驻；PDF 保存 / AI 摘要小节的设置行由各自开关切换
+   hidden（折叠只隐去设置行，不清空配置），小节标题与开关常驻 */
+.options .pc-sub + .pc-sub{margin-top:12px;padding-top:12px;border-top:1px solid #eef1f6}
+.options .pc-sub-title{margin:0 0 8px;font-size:13px;font-weight:700;color:#1a2233}
 .options .pc-form .ps-field{margin-bottom:9px;gap:4px}
 .options .pc-form .ps-label{font-size:11.5px}
 .options .pc-form .ps-input{padding:7px 10px;font-size:12.5px;border-radius:8px}
@@ -109,6 +113,9 @@
 .options .pc-form .ps-var{padding:2px 7px;font-size:10.5px}
 .options .pc-form .ps-target{padding:7px 12px;font-size:12px}
 .options .pc-form .ps-switch-row{margin-bottom:4px;padding:2px}
+/* 开关文字归入正文档：原 13.5px 比字段标签还大，统一为小节标题(13px)之下的正文字号 */
+.options .pc-form .ps-switch-label{font-size:12.5px}
+.options .pc-form .ps-switch-sub{font-size:10.5px}
 .options .pc-form .ps-seg-opt{padding:7px;font-size:11.5px;border-radius:9px}
 
 /* 开发者模式任务日志：状态点沿用语义色（成功薄荷绿/警告黄/失败红/进行中天空蓝），

@@ -11,7 +11,7 @@ import {
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
   COLLAPSIBLE_SECTIONS, DEFAULT_AI_PROVIDER_NAME, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, resolveAiProviderSelection, setSectionCollapsed,
 } from './options-state.js';
-import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, readPdfDriveConfig, resolveImageMode, resolvePdfDrive } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -245,9 +245,9 @@ function syncEditor() {
     option.classList.toggle('on', option.dataset.value === imageMode);
   }
   $('#f-image-mode-hint').textContent = imageModeHint(imageMode);
-  // PDF 存云盘开关（#65）：读取时迁移——缺字段/非法 pdfDrive 一律显示为关。
-  // 目录行（#66）：开关开启才显示；folderToken 为 null 即云盘根目录，folderName 冗余存展示名
-  const pdfDrive = resolvePdfDrive(preset);
+  // PDF 存云盘开关（#65）：读取原始配置回填——开关只折叠不清空（#100），关闭态也读得出
+  // 已选目录；目录行（#66）开关开启才显示；folderToken 为 null 即云盘根目录，folderName 冗余存展示名
+  const pdfDrive = readPdfDriveConfig(preset);
   const pdfEnabled = pdfDrive?.enabled === true;
   $('#f-pdf-drive').classList.toggle('on', pdfEnabled);
   $('#f-pdf-drive').setAttribute('aria-pressed', String(pdfEnabled));
@@ -459,12 +459,13 @@ for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
     syncEditor();
   });
 }
-// PDF 存云盘开关（#65）：开启写完整聚合结构（folderToken null = 云盘根目录，目录选择见 #66
-// 的目录行/picker），关闭归一为 null；随预设整体经 SAVE_PRESETS 写回
+// PDF 存云盘开关（#65）：开关 = 折叠/展开设置区，与 AI 摘要开关同语义（#100）——切换只翻转
+// enabled 标志，已选目录 folderToken/folderName 保留；folderToken null = 云盘根目录（目录选择
+// 见 #66 的目录行/picker）；随预设整体经 SAVE_PRESETS 写回
 $('#f-pdf-drive').addEventListener('click', () => {
-  const enabled = !(resolvePdfDrive(editingPreset())?.enabled === true);
+  const current = readPdfDriveConfig(editingPreset());
   applyMutation(updatePreset(state, editingId, {
-    pdfDrive: enabled ? { enabled: true, ...createDriveFolder() } : null,
+    pdfDrive: { enabled: !(current?.enabled === true), ...createDriveFolder(current ?? {}) },
   }));
   syncEditor();
 });

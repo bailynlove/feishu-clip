@@ -173,3 +173,64 @@ test('AI 高级设置含 reasoning 三态下拉（默认/开/关）（#96）', (
   const advanced = html.match(/<details class="ps-advanced">([\s\S]*?)<\/details>/);
   assert.ok(advanced[1].includes('id="ai-reasoning"'), 'reasoning 下拉在高级设置折叠区内');
 });
+
+// ——— 预设编辑器三小节（#100）：基本信息 / PDF 保存 / AI 摘要；PDF 保存与 AI 摘要由各自开关
+// 控制小节折叠（打开才展示对应设置），字体层级 区大标题 > 小节标题 > 正文/控件 ———
+
+function subSection(title) {
+  const match = html.match(new RegExp(`<section class="pc-sub">\\s*<h3 class="pc-sub-title">${title}</h3>([\\s\\S]*?)</section>`));
+  assert.ok(match, `应有「${title}」小节（section.pc-sub > h3.pc-sub-title）`);
+  return match[1];
+}
+
+test('preset editor is split into three titled subsections in fixed order (#100)', () => {
+  const titles = ['基本信息', 'PDF 保存', 'AI 摘要'];
+  let lastIndex = -1;
+  for (const title of titles) {
+    const index = html.indexOf(`<h3 class="pc-sub-title">${title}</h3>`);
+    assert.ok(index > lastIndex, `小节「${title}」应存在且按顺序出现`);
+    lastIndex = index;
+  }
+});
+
+test('基本信息小节含名称/保存目标/图片模式/标题模板/正文模板/默认动作/触发规则 (#100)', () => {
+  const basic = subSection('基本信息');
+  for (const id of ['f-name', 'f-target', 'picker-panel', 'f-image-mode', 'f-title', 'f-body', 'f-action', 'f-triggers']) {
+    assert.ok(basic.includes(`id="${id}"`), `基本信息小节应含 #${id}`);
+  }
+});
+
+test('PDF 保存小节：开关 + 目录行 + picker 面板，目录行初始隐藏（开关折叠语义）(#100)', () => {
+  const pdf = subSection('PDF 保存');
+  for (const id of ['f-pdf-drive', 'f-pdf-folder', 'drive-picker-panel']) {
+    assert.ok(pdf.includes(`id="${id}"`), `PDF 保存小节应含 #${id}`);
+  }
+  assert.ok(!pdf.includes('id="f-digest"'), 'AI 摘要不属于本小节');
+});
+
+test('AI 摘要小节：开关 + provider/mode/子文档标题/指令行，初始隐藏随开关展开 (#100)', () => {
+  const ai = subSection('AI 摘要');
+  for (const id of ['f-digest', 'f-digest-provider-row', 'f-digest-mode-row', 'f-digest-doctitle-row', 'f-digest-instruction-row']) {
+    assert.ok(ai.includes(`id="${id}"`), `AI 摘要小节应含 #${id}`);
+  }
+  assert.ok(!ai.includes('id="f-triggers"'), '触发规则不属于本小节');
+});
+
+const css = await readFile(new URL('../src/extension/ui.css', import.meta.url), 'utf8');
+
+function fontSizeOf(selector) {
+  const match = css.match(new RegExp(`\\.options ${selector.replace(/\./g, '\\.')}\\{[^}]*?font-size:([\\d.]+)px`));
+  assert.ok(match, `ui.css 应有 .options ${selector} 的 font-size 规则`);
+  return Number(match[1]);
+}
+
+test('字体层级统一：区大标题 > 小节标题 > 正文控件；开关文字归入正文档 (#100)', () => {
+  const h2 = fontSizeOf('.ps-card h2');
+  const sub = fontSizeOf('.pc-sub-title');
+  const label = fontSizeOf('.pc-form .ps-label');
+  const input = fontSizeOf('.pc-form .ps-input');
+  const switchLabel = fontSizeOf('.pc-form .ps-switch-label');
+  assert.ok(h2 > sub, `区大标题(${h2}) 应大于小节标题(${sub})`);
+  assert.ok(sub > label, `小节标题(${sub}) 应大于字段标签(${label})`);
+  assert.equal(switchLabel, input, `开关文字(${switchLabel}) 应与输入控件字号(${input})同档，不再偏大`);
+});

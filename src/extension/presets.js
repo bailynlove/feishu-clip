@@ -11,7 +11,8 @@ export function createDefaultPreset(overrides = {}) {
     bodyTemplate: '',
     action: 'feishu',
     triggers: [],
-    // PDF 存云盘（#65）：null | { enabled, folderToken, folderName }；folderToken 为 null 即云盘根目录
+    // PDF 存云盘（#65）：null | { enabled, folderToken, folderName }；folderToken 为 null 即云盘根目录；
+    // enabled:false = 关闭但保留目录配置（设置页开关只折叠不清空，#100）
     pdfDrive: null,
     // AI 摘要（#75）：null | { enabled, instruction, provider, mode, docTitleTemplate }；
     // enabled:false = 关闭但保留配置（设置页开关只折叠设置区，不清空内容）；instruction 空串 = 用全局指令
@@ -43,12 +44,19 @@ export function createDriveFolder({ folderToken = null, folderName = null } = {}
   };
 }
 
-// PDF 存云盘聚合字段（#62/#65）：读取时迁移——缺字段/非法值一律归一为 null；
+// PDF 存云盘聚合字段（#62/#65）：读取时迁移——缺字段/非对象一律归一为 null（= 从未配置）。
+// enabled:false 保留目录配置原样读出（设置页开关只折叠不清空，#100，本函数即编辑器读取路径）；
 // enabled:true + folderToken:null = 存云盘根目录（合法态）。folderName 冗余存展示名（picker 见 #66）
-export function resolvePdfDrive(preset) {
+export function readPdfDriveConfig(preset) {
   const value = preset?.pdfDrive;
-  if (!value || typeof value !== 'object' || value.enabled !== true) return null;
-  return { enabled: true, ...createDriveFolder(value) };
+  if (!value || typeof value !== 'object') return null;
+  return { enabled: value.enabled === true, ...createDriveFolder(value) };
+}
+
+// 运行时判定（要不要存云盘）：未开启一律 null
+export function resolvePdfDrive(preset) {
+  const config = readPdfDriveConfig(preset);
+  return config?.enabled === true ? config : null;
 }
 
 // AI 摘要预设字段（#75）：读取时迁移——缺字段/非对象一律归一为 null（= 从未配置）；

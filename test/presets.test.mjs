@@ -107,7 +107,7 @@ test('resolveImageMode prefers imageMode over the legacy boolean and ignores inv
 
 // ——— PDF 存云盘预设字段（#62/#65）：读取时迁移，非法值一律归一为 null ———
 
-import { resolvePdfDrive } from '../src/extension/presets.js';
+import { readPdfDriveConfig, resolvePdfDrive } from '../src/extension/presets.js';
 
 test('createDefaultPreset 的 pdfDrive 缺省为 null（关闭态）', () => {
   assert.equal(createDefaultPreset().pdfDrive, null);
@@ -146,6 +146,29 @@ test('resolvePdfDrive：完整结构透传 folderToken 与 folderName（picker �
     folderToken: 'fldcnABC',
     folderName: '论文',
   });
+});
+
+// ——— readPdfDriveConfig（#100）：设置页编辑器读取路径——开关只折叠不清空，关闭态保留目录配置 ———
+
+test('readPdfDriveConfig：从未配置（缺字段/null/非对象）返回 null', () => {
+  for (const preset of [{}, { pdfDrive: null }, { pdfDrive: 'on' }, null, undefined]) {
+    assert.equal(readPdfDriveConfig(preset), null, JSON.stringify(preset));
+  }
+});
+
+test('readPdfDriveConfig：关闭态保留已选目录（enabled:false 不归 null）', () => {
+  const stored = { enabled: false, folderToken: 'fldcnABC', folderName: '论文' };
+  assert.deepEqual(readPdfDriveConfig({ pdfDrive: stored }), stored, '目录配置原样读出');
+  assert.equal(resolvePdfDrive({ pdfDrive: stored }), null, '运行时仍读作关闭（不存云盘）');
+});
+
+test('readPdfDriveConfig：字段归一与 resolvePdfDrive 同口径', () => {
+  assert.deepEqual(readPdfDriveConfig({ pdfDrive: { enabled: true } }), {
+    enabled: true, folderToken: null, folderName: null,
+  }, '缺省目录归一为云盘根目录');
+  assert.deepEqual(readPdfDriveConfig({ pdfDrive: { enabled: 'yes', folderToken: 42 } }), {
+    enabled: false, folderToken: null, folderName: null,
+  }, '非布尔 enabled 读作关；非法 folderToken 归一 null');
 });
 
 // ——— AI 摘要预设字段（#75）：读取时迁移，非法值一律归一为 null ———
