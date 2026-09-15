@@ -2,6 +2,7 @@ import dns from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import tls from 'node:tls';
 
 export const IMAGE_LIMITS = Object.freeze({
   maxImages: 30,
@@ -18,6 +19,26 @@ export const ALLOWED_IMAGE_TYPES = new Map([
   ['image/gif', 'gif'],
   ['image/webp', 'webp'],
 ]);
+
+export const RESOURCE_FAILURE_TYPE = Object.freeze({
+  TRANSPORT: 'transport',
+  HTTP: 'http',
+  CONTENT: 'content',
+  SIZE: 'size',
+  SSRF: 'ssrf',
+});
+
+function resourceError(message, code, failureType, details = {}) {
+  return Object.assign(new Error(message), { code, failureType, ...details });
+}
+
+function classifyError(error, failureType) {
+  if (error && typeof error === 'object') {
+    error.failureType ??= failureType;
+    return error;
+  }
+  return resourceError(String(error), 'RESOURCE_FETCH_FAILED', failureType);
+}
 
 function ipv4Number(address) {
   return address.split('.').reduce((value, part) => (value << 8) + Number(part), 0) >>> 0;
@@ -51,12 +72,17 @@ export function isPublicIp(address) {
 
 export async function resolvePublicHost(hostname, lookup = dns.lookup, code = 'IMAGE_SSRF_REJECTED', attempt = 0) {
   if (net.isIP(hostname)) {
-    if (!isPublicIp(hostname)) throw Object.assign(new Error(code), { code });
+    if (!isPublicIp(hostname)) throw resourceError(code, code, RESOURCE_FAILURE_TYPE.SSRF);
     return { address: hostname, family: net.isIP(hostname) };
   }
-  const records = await lookup(hostname, { all: true, verbatim: true });
+  let records;
+  try {
+    records = await lookup(hostname, { all: true, verbatim: true });
+  } catch (error) {
+    throw classifyError(error, RESOURCE_FAILURE_TYPE.TRANSPORT);
+  }
   if (!records.length || records.some((record) => !isPublicIp(record.address))) {
-    throw Object.assign(new Error(code), { code });
+    throw resourceError(code, code, RESOURCE_FAILURE_TYPE.SSRF);
   }
   // 边缘节点轮转（#92）：钉孔固定单一 IP，重试打同一个被 RST 注入的 CDN 边缘会全部白费；
   // attempt 取模让每次重试换下一个 A 记录（与浏览器/curl 的 try-next-address 行为对齐）
@@ -119,11 +145,11 @@ export function validateImageBytes(buffer, mimeType, limits = IMAGE_LIMITS) {
   const declared = String(mimeType || '').split(';')[0].trim().toLowerCase();
   const sniffed = sniffType(buffer);
   const normalized = sniffed ?? declared;
-  if (!ALLOWED_IMAGE_TYPES.has(normalized)) throw Object.assign(new Error('IMAGE_TYPE_REJECTED'), { code: 'IMAGE_TYPE_REJECTED' });
-  if (!buffer.length || buffer.length > limits.maxImageBytes) throw Object.assign(new Error('IMAGE_SIZE_REJECTED'), { code: 'IMAGE_SIZE_REJECTED' });
+  if (!ALLOWED_IMAGE_TYPES.has(normalized)) throw resourceError('IMAGE_TYPE_REJECTED', 'IMAGE_TYPE_REJECTED', RESOURCE_FAILURE_TYPE.CONTENT);
+  if (!buffer.length || buffer.length > limits.maxImageBytes) throw resourceError('IMAGE_SIZE_REJECTED', 'IMAGE_SIZE_REJECTED', RESOURCE_FAILURE_TYPE.SIZE);
   const size = dimensions(buffer, normalized);
   if (size && (Math.max(...size) > limits.maxDimension || size[0] * size[1] > limits.maxPixels)) {
-    throw Object.assign(new Error('IMAGE_DIMENSIONS_REJECTED'), { code: 'IMAGE_DIMENSIONS_REJECTED' });
+    throw resourceError('IMAGE_DIMENSIONS_REJECTED', 'IMAGE_DIMENSIONS_REJECTED', RESOURCE_FAILURE_TYPE.SIZE);
   }
   return { mimeType: normalized, extension: ALLOWED_IMAGE_TYPES.get(normalized), width: size?.[0] || null, height: size?.[1] || null };
 }
@@ -156,16 +182,79 @@ function acquireHostSlot(hostname) {
 // 带 SSRF 钉孔（pinned lookup）的单次 GET：Content-Length 预检 + 流式字节累计双重超限快速失败。
 // label 决定错误码前缀（IMAGE_*/PDF_*）；record 由 resolvePublicHost 给出，逐跳重解析。
 // 图片与 PDF 两条下载路径都收口在这里，按主机信号量因此自动覆盖两条路径（重定向每跳重进、按各跳 host 排队）
-export function requestPublicBytes(url, record, { accept, maxBytes, label, timeouts = {} }) {
+function authority(address, port) {
+  return `${net.isIPv6(address) ? `[${address}]` : address}:${port}`;
+}
+
+class PinnedHttpsProxyAgent extends https.Agent {
+  constructor({ proxyPort, address, targetPort, servername, connectMs }) {
+    super({ keepAlive: false });
+    Object.assign(this, { proxyPort, address, targetPort, servername, connectMs });
+  }
+
+  createConnection(options, callback) {
+    let settled = false;
+    let secure;
+    const timeoutError = () => resourceError('PROXY_CONNECT_TIMEOUT', 'RESOURCE_FETCH_FAILED', RESOURCE_FAILURE_TYPE.TRANSPORT);
+    const timer = setTimeout(() => {
+      const error = timeoutError();
+      secure?.destroy(error);
+      tunnel.destroy(error);
+      done(error);
+    }, this.connectMs);
+    timer.unref();
+    const done = (error, socket) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(error, socket);
+    };
+    const tunnel = http.request({
+      hostname: '127.0.0.1', port: this.proxyPort, method: 'CONNECT',
+      path: authority(this.address, this.targetPort),
+      headers: { Host: authority(this.address, this.targetPort) },
+    });
+    tunnel.once('connect', (response, socket, head) => {
+      if (response.statusCode !== 200) {
+        socket.destroy();
+        done(new Error(`PROXY_CONNECT_HTTP_${response.statusCode}`));
+        return;
+      }
+      if (head.length) socket.unshift(head);
+      secure = tls.connect({ ...options, socket, servername: this.servername });
+      secure.once('secureConnect', () => done(null, secure));
+      secure.once('error', done);
+    });
+    tunnel.once('error', done);
+    tunnel.end();
+    return undefined;
+  }
+}
+
+export function requestPublicBytes(url, record, { accept, maxBytes, label, timeouts = {}, proxyPort = null }) {
   const { connectMs = 5_000, responseMs = 10_000, totalMs = 20_000 } = timeouts;
-  const client = url.protocol === 'https:' ? https : http;
+  let client = url.protocol === 'https:' ? https : http;
+  let target = { protocol: url.protocol, hostname: url.hostname, port: url.port || undefined, path: `${url.pathname}${url.search}` };
+  const host = url.port ? `${url.hostname}:${url.port}` : url.hostname;
+  let agent;
+  if (proxyPort && url.protocol === 'http:') {
+    client = http;
+    const port = Number(url.port || 80);
+    target = {
+      hostname: '127.0.0.1', port: proxyPort,
+      path: `http://${authority(record.address, port)}${url.pathname}${url.search}`,
+    };
+  } else if (proxyPort) {
+    agent = new PinnedHttpsProxyAgent({ proxyPort, address: record.address, targetPort: Number(url.port || 443), servername: url.hostname, connectMs });
+  }
   return acquireHostSlot(url.hostname).then((release) => new Promise((resolve, reject) => {
-    const request = client.request(url, {
+    const request = client.request({ ...target,
       method: 'GET',
-      headers: { Accept: accept, 'User-Agent': 'FeishuClip/0.1' },
+      headers: { Accept: accept, Host: host, 'User-Agent': 'FeishuClip/0.1' },
       lookup: pinnedLookup(record),
       servername: url.hostname,
       timeout: connectMs,
+      agent,
     }, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
@@ -175,43 +264,43 @@ export function requestPublicBytes(url, record, { accept, maxBytes, label, timeo
       if (response.statusCode !== 200) {
         response.resume();
         // statusCode 透传给调用方：pdf 下载撞 401/403 要转凭据回退（awaiting_bytes，#68）而非失败
-        reject(Object.assign(new Error(`${label}_HTTP_${response.statusCode}`), { code: `${label}_FETCH_FAILED`, statusCode: response.statusCode }));
+        reject(resourceError(`${label}_HTTP_${response.statusCode}`, `${label}_FETCH_FAILED`, RESOURCE_FAILURE_TYPE.HTTP, { statusCode: response.statusCode }));
         return;
       }
       const advertised = Number(response.headers['content-length'] || 0);
       if (advertised > maxBytes) {
         response.destroy();
-        reject(Object.assign(new Error(`${label}_SIZE_REJECTED`), { code: `${label}_SIZE_REJECTED` }));
+        reject(resourceError(`${label}_SIZE_REJECTED`, `${label}_SIZE_REJECTED`, RESOURCE_FAILURE_TYPE.SIZE));
         return;
       }
       const chunks = [];
       let bytes = 0;
-      response.setTimeout(responseMs, () => response.destroy(new Error(`${label}_RESPONSE_TIMEOUT`)));
+      response.setTimeout(responseMs, () => response.destroy(resourceError(`${label}_RESPONSE_TIMEOUT`, `${label}_FETCH_FAILED`, RESOURCE_FAILURE_TYPE.TRANSPORT)));
       response.on('data', (chunk) => {
         bytes += chunk.length;
-        if (bytes > maxBytes) response.destroy(Object.assign(new Error(`${label}_SIZE_REJECTED`), { code: `${label}_SIZE_REJECTED` }));
+        if (bytes > maxBytes) response.destroy(resourceError(`${label}_SIZE_REJECTED`, `${label}_SIZE_REJECTED`, RESOURCE_FAILURE_TYPE.SIZE));
         else chunks.push(chunk);
       });
       response.on('end', () => resolve({ buffer: Buffer.concat(chunks), mimeType: response.headers['content-type'] }));
-      response.on('error', reject);
+      response.on('error', (error) => reject(classifyError(error, RESOURCE_FAILURE_TYPE.TRANSPORT)));
     });
-    request.on('timeout', () => request.destroy(Object.assign(new Error(`${label}_CONNECT_TIMEOUT`), { code: `${label}_FETCH_FAILED` })));
-    request.on('error', reject);
-    request.setTimeout(totalMs, () => request.destroy(Object.assign(new Error(`${label}_TOTAL_TIMEOUT`), { code: `${label}_FETCH_FAILED` })));
+    request.on('timeout', () => request.destroy(resourceError(`${label}_CONNECT_TIMEOUT`, `${label}_FETCH_FAILED`, RESOURCE_FAILURE_TYPE.TRANSPORT)));
+    request.on('error', (error) => reject(classifyError(error, RESOURCE_FAILURE_TYPE.TRANSPORT)));
+    request.setTimeout(totalMs, () => request.destroy(resourceError(`${label}_TOTAL_TIMEOUT`, `${label}_FETCH_FAILED`, RESOURCE_FAILURE_TYPE.TRANSPORT)));
     request.end();
   }).finally(release));
 }
 
-export async function downloadPublicImage(source, { limits = IMAGE_LIMITS, lookup = dns.lookup, attempt = 0 } = {}) {
+export async function downloadPublicImage(source, { limits = IMAGE_LIMITS, lookup = dns.lookup, attempt = 0, proxyPort = null } = {}) {
   let url = new URL(source);
   for (let redirects = 0; redirects <= limits.maxRedirects; redirects += 1) {
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error('IMAGE_URL_REJECTED'), { code: 'IMAGE_URL_REJECTED' });
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw resourceError('IMAGE_URL_REJECTED', 'IMAGE_URL_REJECTED', RESOURCE_FAILURE_TYPE.SSRF);
     const record = await resolvePublicHost(url.hostname, lookup, 'IMAGE_SSRF_REJECTED', attempt);
-    const result = await requestPublicBytes(url, record, { accept: 'image/jpeg,image/png,image/gif,image/webp', maxBytes: limits.maxImageBytes, label: 'IMAGE' });
+    const result = await requestPublicBytes(url, record, { accept: 'image/jpeg,image/png,image/gif,image/webp', maxBytes: limits.maxImageBytes, label: 'IMAGE', proxyPort });
     if (result.redirect) { url = result.redirect; continue; }
     return { ...result, source: url.href, metadata: validateImageBytes(result.buffer, result.mimeType, limits) };
   }
-  throw Object.assign(new Error('IMAGE_REDIRECT_LIMIT'), { code: 'IMAGE_FETCH_FAILED' });
+  throw resourceError('IMAGE_REDIRECT_LIMIT', 'IMAGE_FETCH_FAILED', RESOURCE_FAILURE_TYPE.HTTP);
 }
 
 // PDF 下载（#65）：与图片管线同一套 SSRF/逐跳校验，差异只在 Accept、上限与超时档位。
@@ -228,24 +317,25 @@ const PDF_MAGIC = Buffer.from('%PDF-', 'latin1');
 // 快速失败，不把垃圾当 PDF 传进云盘
 export function assertPdfBytes(buffer) {
   if (!buffer.subarray(0, 1024).includes(PDF_MAGIC)) {
-    throw Object.assign(new Error('PDF_TYPE_REJECTED'), { code: 'PDF_TYPE_REJECTED' });
+    throw resourceError('PDF_TYPE_REJECTED', 'PDF_TYPE_REJECTED', RESOURCE_FAILURE_TYPE.CONTENT);
   }
 }
 
-export async function downloadPublicPdf(source, { limits = PDF_LIMITS, lookup = dns.lookup, attempt = 0 } = {}) {
+export async function downloadPublicPdf(source, { limits = PDF_LIMITS, lookup = dns.lookup, attempt = 0, proxyPort = null } = {}) {
   let url = new URL(source);
   for (let redirects = 0; redirects <= limits.maxRedirects; redirects += 1) {
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error('PDF_URL_REJECTED'), { code: 'PDF_URL_REJECTED' });
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw resourceError('PDF_URL_REJECTED', 'PDF_URL_REJECTED', RESOURCE_FAILURE_TYPE.SSRF);
     const record = await resolvePublicHost(url.hostname, lookup, 'PDF_SSRF_REJECTED', attempt);
     const result = await requestPublicBytes(url, record, {
       accept: 'application/pdf',
       maxBytes: limits.maxBytes,
       label: 'PDF',
       timeouts: { connectMs: 15_000, responseMs: 30_000, totalMs: 120_000 },
+      proxyPort,
     });
     if (result.redirect) { url = result.redirect; continue; }
     assertPdfBytes(result.buffer);
     return { buffer: result.buffer, source: url.href, sizeBytes: result.buffer.length };
   }
-  throw Object.assign(new Error('PDF_REDIRECT_LIMIT'), { code: 'PDF_FETCH_FAILED' });
+  throw resourceError('PDF_REDIRECT_LIMIT', 'PDF_FETCH_FAILED', RESOURCE_FAILURE_TYPE.HTTP);
 }

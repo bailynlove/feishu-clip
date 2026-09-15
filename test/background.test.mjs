@@ -34,6 +34,7 @@ let pdfHeadStub = 'application/pdf'; // 兜底 HEAD 的 content-type；null = HE
 let lastAiProviderBody = null; // SAVE_AI_PROVIDER 转发给 bridge 的 POST /v1/ai/providers 请求体
 let lastAiDeleteBody = null; // DELETE_AI_PROVIDER 转发给 bridge 的 POST /v1/ai/providers/delete 请求体
 let lastAiTestBody = null; // TEST_AI 转发给 bridge 的 POST /v1/ai/test 请求体
+let lastProxyBody = null;
 // ——— 凭据回传（#68）FEED_PDF_BYTES 用例的桩状态 ———
 const PDF_SOURCE_URL = 'https://pub.example.com/paywalled.pdf';
 let pdfSourceServer = null; // 非 null 时源站 URL 返回流式 Response；{ body } 或 { failStatus }
@@ -100,6 +101,7 @@ globalThis.fetch = async (url, options) => {
   if (url.endsWith('/v1/ai/providers') && options?.method === 'POST') lastAiProviderBody = JSON.parse(options.body);
   if (url.endsWith('/v1/ai/providers/delete') && options?.method === 'POST') lastAiDeleteBody = JSON.parse(options.body);
   if (url.endsWith('/v1/ai/test') && options?.method === 'POST') lastAiTestBody = JSON.parse(options.body);
+  if (url.endsWith('/v1/settings/proxy') && options?.method === 'POST') lastProxyBody = JSON.parse(options.body);
   return {
     ok: true,
     json: async () => {
@@ -113,6 +115,7 @@ globalThis.fetch = async (url, options) => {
         return { ok: true, providers: [{ name: '默认', apiType: 'responses', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5-mini', hasKey: true }] };
       }
       if (url.endsWith('/v1/ai/test')) return { ok: true, latencyMs: 320, reply: 'ok' };
+      if (url.endsWith('/v1/settings/proxy')) return { ok: true, proxyPort: lastProxyBody?.proxyPort ?? 7897 };
       return { ok: true, job: { attemptId: 'new-attempt' } };
     },
   };
@@ -447,6 +450,12 @@ test('GET_SETTINGS 返回 aiDigestInstruction（全局摘要指令，供设置�
   } finally {
     delete storage.aiDigestInstruction;
   }
+});
+
+test('本地代理设置通过 background 转发给 Bridge', async () => {
+  assert.equal((await send({ type: 'GET_PROXY_SETTINGS' })).proxyPort, 7897);
+  assert.equal((await send({ type: 'SAVE_PROXY_SETTINGS', proxyPort: 8080 })).proxyPort, 8080);
+  assert.deepEqual(lastProxyBody, { proxyPort: 8080 });
 });
 
 test('CLIP digestEnabled：{{digest}} 以字面量穿过正文渲染，digest 随任务上报 bridge', async () => {

@@ -363,30 +363,38 @@ test('aiHeadersToText serializes saved headers back to textarea lines', () => {
 
 import {
   COLLAPSIBLE_SECTIONS,
+  normalizeProxyPortInput,
   normalizeCollapsedSections,
   setSectionCollapsed,
 } from '../src/extension/options-state.js';
 
-test('COLLAPSIBLE_SECTIONS registers exactly the AI 摘要 and 预设管理 sections', () => {
+test('COLLAPSIBLE_SECTIONS registers AI、预设与默认折叠的其他设置', () => {
   assert.deepEqual(COLLAPSIBLE_SECTIONS, [
     { id: 'ai-section-collapse', key: 'aiDigest' },
     { id: 'presets-section-collapse', key: 'presets' },
+    { id: 'other-section-collapse', key: 'other', defaultCollapsed: true },
   ]);
 });
 
-test('normalizeCollapsedSections defaults to expanded and coerces garbage', () => {
-  assert.deepEqual(normalizeCollapsedSections(undefined), { aiDigest: false, presets: false }, '首次打开（无历史状态）默认展开');
-  assert.deepEqual(normalizeCollapsedSections({ aiDigest: true }), { aiDigest: true, presets: false }, '缺键补默认');
-  assert.deepEqual(normalizeCollapsedSections({ aiDigest: 'yes', presets: 1 }), { aiDigest: false, presets: false }, '非布尔值归一为展开');
-  assert.deepEqual(normalizeCollapsedSections('junk'), { aiDigest: false, presets: false }, '非对象归一为展开');
+test('normalizeCollapsedSections defaults other settings to collapsed', () => {
+  assert.deepEqual(normalizeCollapsedSections(undefined), { aiDigest: false, presets: false, other: true });
+  assert.deepEqual(normalizeCollapsedSections({ aiDigest: true }), { aiDigest: true, presets: false, other: true });
+  assert.deepEqual(normalizeCollapsedSections({ aiDigest: 'yes', presets: 1, other: false }), { aiDigest: false, presets: false, other: false });
+  assert.deepEqual(normalizeCollapsedSections('junk'), { aiDigest: false, presets: false, other: true });
 });
 
 test('setSectionCollapsed toggles one key immutably', () => {
-  const before = { aiDigest: false, presets: false };
+  const before = { aiDigest: false, presets: false, other: true };
   const after = setSectionCollapsed(before, 'presets', true);
-  assert.deepEqual(after, { aiDigest: false, presets: true });
-  assert.deepEqual(before, { aiDigest: false, presets: false }, '不改动入参');
+  assert.deepEqual(after, { aiDigest: false, presets: true, other: true });
+  assert.deepEqual(before, { aiDigest: false, presets: false, other: true }, '不改动入参');
   assert.deepEqual(setSectionCollapsed(after, 'presets', false), before, '再展开回到默认');
+});
+
+test('normalizeProxyPortInput accepts blank or a TCP port and rejects malformed values', () => {
+  assert.equal(normalizeProxyPortInput(''), null);
+  assert.equal(normalizeProxyPortInput(' 7897 '), 7897);
+  for (const value of ['0', '65536', '1.5', 'abc', '-1']) assert.throws(() => normalizeProxyPortInput(value), /1–65535/);
 });
 
 // ——— AI provider 预设管理（#77）：列表选中解析 + 保存请求体带 name/renameFrom ———

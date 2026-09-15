@@ -126,7 +126,7 @@ test('parseImageDimensions returns null for garbage or truncated input', () => {
 // ——— PDF 下载策略（#65）：与图片同一套 SSRF/逐跳校验，差异只在 Accept/上限/超时 ———
 
 import http from 'node:http';
-import { assertPdfBytes, downloadPublicPdf, requestPublicBytes } from '../src/bridge/image-policy.mjs';
+import { assertPdfBytes, downloadPublicImage, downloadPublicPdf, requestPublicBytes } from '../src/bridge/image-policy.mjs';
 
 const LOCAL_RECORD = { address: '127.0.0.1', family: 4 };
 
@@ -180,6 +180,21 @@ test('requestPublicBytes: 正常响应带 buffer 与 content-type', async () => 
   });
 });
 
+test('requestPublicBytes: 响应超时携带 transport 错误类型', async () => {
+  await withHttpServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/pdf' });
+    response.flushHeaders();
+  }, async (base) => {
+    await assert.rejects(
+      () => requestPublicBytes(new URL(`${base}/slow.pdf`), LOCAL_RECORD, {
+        accept: 'application/pdf', maxBytes: 1024, label: 'PDF',
+        timeouts: { responseMs: 10, totalMs: 200 },
+      }),
+      (error) => /PDF_.*TIMEOUT/.test(error.message) && error.failureType === 'transport',
+    );
+  });
+});
+
 test('downloadPublicPdf 拒绝解析到私网地址的主机（PDF_SSRF_REJECTED）', async () => {
   const privateLookup = async () => [{ address: '10.0.0.8', family: 4 }];
   await assert.rejects(
@@ -203,6 +218,90 @@ test('assertPdfBytes: %PDF- 魔数须在文件头 1024 字节内', () => {
   assert.doesNotThrow(() => assertPdfBytes(Buffer.concat([Buffer.alloc(100), Buffer.from('%PDF-1.4', 'latin1')])), '规范允许魔数前有少量前导字节');
   assert.throws(() => assertPdfBytes(Buffer.from('<html><body>404</body></html>', 'latin1')), /PDF_TYPE_REJECTED/, 'HTML 错误页不得当 PDF');
   assert.throws(() => assertPdfBytes(Buffer.concat([Buffer.alloc(2000), Buffer.from('%PDF-', 'latin1')])), /PDF_TYPE_REJECTED/, '魔数超出 1024 字节窗口同样拒绝');
+});
+
+test('PDF 下载错误类型稳定区分 HTTP、内容、大小与 SSRF（#105）', async () => {
+  await assert.rejects(
+    () => resolvePublicHost('private.example', async () => [{ address: '10.0.0.8', family: 4 }], 'PDF_SSRF_REJECTED'),
+    (error) => error.code === 'PDF_SSRF_REJECTED' && error.failureType === 'ssrf',
+  );
+  assert.throws(
+    () => assertPdfBytes(Buffer.from('<html>not pdf</html>')),
+    (error) => error.code === 'PDF_TYPE_REJECTED' && error.failureType === 'content',
+  );
+  await withHttpServer((_request, response) => {
+    response.writeHead(404);
+    response.end();
+  }, async (base) => {
+    await assert.rejects(
+      () => requestPublicBytes(new URL(`${base}/missing.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      (error) => error.statusCode === 404 && error.failureType === 'http',
+    );
+  });
+  await withHttpServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': 2048 });
+    response.end('%PDF-');
+  }, async (base) => {
+    await assert.rejects(
+      () => requestPublicBytes(new URL(`${base}/big.pdf`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      (error) => error.code === 'PDF_SIZE_REJECTED' && error.failureType === 'size',
+    );
+  });
+});
+
+test('downloadPublicPdf 通过用户配置的本地 HTTP 代理下载，并继续执行 PDF 校验（#106）', async () => {
+  let requestedUrl = null;
+  await withHttpServer((request, response) => {
+    requestedUrl = request.url;
+    response.writeHead(200, { 'Content-Type': 'application/pdf' });
+    response.end('%PDF-1.7 proxied');
+  }, async (proxyBase) => {
+    const result = await downloadPublicPdf('http://papers.example/report.pdf', {
+      lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+      proxyPort: Number(new URL(proxyBase).port),
+    });
+    assert.equal(result.buffer.toString('latin1'), '%PDF-1.7 proxied');
+    assert.equal(result.source, 'http://papers.example/report.pdf');
+  });
+  assert.equal(requestedUrl, 'http://8.8.8.8:80/report.pdf', '本地代理连接经过安全校验并钉住的 IP');
+});
+
+test('downloadPublicImage 复用本地代理并继续执行图片校验（#106）', async () => {
+  const png = Buffer.alloc(24);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(0x0d0a1a0a, 4);
+  png.writeUInt32BE(2, 16);
+  png.writeUInt32BE(3, 20);
+  await withHttpServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'image/png' });
+    response.end(png);
+  }, async (proxyBase) => {
+    const result = await downloadPublicImage('http://images.example/picture.png', {
+      lookup: async () => [{ address: '1.1.1.1', family: 4 }],
+      proxyPort: Number(new URL(proxyBase).port),
+    });
+    assert.deepEqual(result.metadata, { mimeType: 'image/png', extension: 'png', width: 2, height: 3 });
+  });
+});
+
+test('HTTPS 代理 CONNECT 后 TLS 握手停滞会按 transport 超时，而非永久挂起（#106）', async () => {
+  const sockets = new Set();
+  const proxy = http.createServer();
+  proxy.on('connection', (socket) => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  proxy.on('connect', (_request, socket) => socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'));
+  await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  try {
+    await assert.rejects(
+      () => requestPublicBytes(new URL('https://papers.example/report.pdf'), { address: '8.8.8.8', family: 4 }, {
+        accept: 'application/pdf', maxBytes: 1024, label: 'PDF', proxyPort: proxy.address().port,
+        timeouts: { connectMs: 30, responseMs: 50, totalMs: 100 },
+      }),
+      (error) => error.failureType === 'transport' && /PROXY_CONNECT_TIMEOUT/.test(error.message),
+    );
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => proxy.close(resolve));
+  }
 });
 
 // ——— 按主机串行化信号量（#70）：同 host FIFO 单通道，不同 host 并行 ———

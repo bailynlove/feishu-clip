@@ -13,6 +13,7 @@ import {
   COLLAPSIBLE_SECTIONS, DEFAULT_AI_PROVIDER_NAME, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, resolveAiProviderSelection, setSectionCollapsed,
 } from './options-state.js';
 import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, readPdfDriveConfig, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createProxySettingsController } from './options-proxy.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -873,6 +874,9 @@ $('#ai-instruction').addEventListener('input', async () => {
   await chrome.storage.local.set({ aiDigestInstruction: $('#ai-instruction').value });
 });
 
+const proxySettings = createProxySettingsController({ input: $('#proxy-port'), result: $('#proxy-result'), send: message });
+$('#proxy-save').addEventListener('click', () => proxySettings.save());
+
 
 // ——— 开发者模式：开关直写 chrome.storage.local（options 页是 trusted context，无需经 background
 // 中转；与 SAVE_PRESETS 不同，这是单 key 不涉及归约校验）。任务日志经 LIST_JOBS 从 bridge 读取。 ———
@@ -988,6 +992,7 @@ async function init() {
   initBridge();
   initAiSection(settings.aiDigestInstruction);
   initCollapsibleSections(settings.optionsUiCollapsed);
+  await proxySettings.load();
   // 触发规则预设气泡（#101）：直读 chrome.storage.local；内置 paper 常驻不可删（#95），缺失即补
   triggerPresets = mergeBuiltInTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
   renderTriggerPresets();

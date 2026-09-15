@@ -62,10 +62,12 @@ export function aiErrorMessage(error) {
   return error?.message || 'AI 摘要生成失败';
 }
 
-// 凭据回退判定（#68）：url 型下载撞 401/403 不算失败，转 awaiting_bytes 等扩展分块回传。
-// statusCode 由 image-policy 在 HTTP 非 200 错误上携带
-function needsCredentialFallback(error) {
-  return error?.code === 'PDF_FETCH_FAILED' && (error.statusCode === 401 || error.statusCode === 403);
+// 浏览器回退判定（#68/#105）：url 型下载撞 401/403，或 Bridge 网络路径不可达时，
+// 转 awaiting_bytes 让扩展使用浏览器网络环境抓取并分块回传。
+function needsBrowserFallback(error) {
+  return error?.failureType === 'transport'
+    || (error?.code === 'PDF_FETCH_FAILED' && (error.statusCode === 401 || error.statusCode === 403))
+    || isTransientNetworkError(error);
 }
 
 // pdf 下载瞬时网络错误判定：只认裸系统错误码（对端 reset / 超时 / 拒连 / DNS 抖动）。
@@ -74,6 +76,7 @@ function needsCredentialFallback(error) {
 const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN']);
 
 function isTransientNetworkError(error) {
+  if (error?.failureType === 'transport') return true;
   if (typeof error?.code === 'string' && error.code.startsWith('PDF_')) return false;
   if (TRANSIENT_NETWORK_CODES.has(error?.code)) return true;
   return /socket hang up/i.test(error?.message || '');
@@ -176,14 +179,14 @@ function parseCreatedNode(envelope) {
   return { documentId, url };
 }
 
-async function imageBytes(image) {
+async function imageBytes(image, downloadImage) {
   if (image.bytesBase64) {
     const buffer = Buffer.from(image.bytesBase64, 'base64');
     return { buffer, source: image.source || null, metadata: validateImageBytes(buffer, image.mimeType) };
   }
   const source = safeHttpUrl(image.source);
   if (!source) throw Object.assign(new Error('图片地址不安全或浏览器未提供字节'), { code: 'IMAGE_SOURCE_UNAVAILABLE' });
-  return downloadPublicImage(source);
+  return downloadImage(source);
 }
 
 // snapshot 里 extractor 记录的 naturalWidth/Height：只有 1-100000 的整数才可信，
@@ -228,12 +231,13 @@ function isServerTimeout(error) {
 }
 
 export class ClipExecutor {
-  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, staging = null, sleep = defaultSleep, generateDigest = requestDigest, getAiConfig = async () => null, digestPdfWaitMs = DIGEST_PDF_WAIT_MS, heartbeatMs = HEARTBEAT_MS, pdfShareWaitMs = PDF_SHARE_WAIT_MS }) {
+  constructor({ store, lark, logger = console, downloadPdf = downloadPublicPdf, downloadImage = downloadPublicImage, staging = null, sleep = defaultSleep, generateDigest = requestDigest, getAiConfig = async () => null, digestPdfWaitMs = DIGEST_PDF_WAIT_MS, heartbeatMs = HEARTBEAT_MS, pdfShareWaitMs = PDF_SHARE_WAIT_MS }) {
     this.store = store;
     this.lark = lark;
     this.logger = logger;
     // pdf 下载函数可注入（测试 stub；生产默认走 image-policy 的 SSRF 校验下载）
     this.downloadPdf = downloadPdf;
+    this.downloadImage = downloadImage;
     // AI 摘要（#75）：generateDigest/getAiConfig 可注入（测试 fake，仿 downloadPdf）；
     // 生产默认接 ai-digest.mjs，配置由 server 传入的 ai.json store 读取。
     // getAiConfig(name)（#78）：name 非空按名取 provider，null 走默认 provider
@@ -390,6 +394,7 @@ export class ClipExecutor {
     const isBytes = job.pdfSource?.type === 'bytes';
     const startedAt = Date.now();
     const timeline = [];
+    let browserFallbackError = null;
     const timing = () => ({ timeline, totalMs: Date.now() - startedAt });
     try {
       const name = pdfFileName({ title: job.title, url: job.pdfSource.url, fallback: job.pdfSource.name });
@@ -402,10 +407,16 @@ export class ClipExecutor {
         const downloadAt = Date.now();
         // 瞬时网络错误（ECONNRESET 类）自动重试：arXiv 等站点限制同 IP 并发连接，
         // clip 图片与 pdf 同主机并发下载会被对端 reset；业务失败（PDF_*）不重试
-        const fetched = await withTransientRetry((attempt) => this.downloadPdf(job.pdfSource.url, { attempt }), {
-          sleep: this.sleep,
-          onRetry: (error, attempt) => timeline.push({ kind: 'retry', name: 'pdf_download', detail: `${error?.code || error?.message}，第 ${attempt} 次重试` }),
-        });
+        let fetched;
+        try {
+          fetched = await withTransientRetry((attempt) => this.downloadPdf(job.pdfSource.url, { attempt }), {
+            sleep: this.sleep,
+            onRetry: (error, attempt) => timeline.push({ kind: 'retry', name: 'pdf_download', detail: `${error?.code || error?.message}，第 ${attempt} 次重试` }),
+          });
+        } catch (error) {
+          if (needsBrowserFallback(error)) browserFallbackError = error;
+          throw error;
+        }
         timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
         await writeFile(path.join(scratch, name), fetched.buffer);
         // 字节共享（#94）：同次 clip 的摘要阶段可能在等这份字节，下载成功即共享，
@@ -443,15 +454,15 @@ export class ClipExecutor {
       } else {
         const current = await this.store.get(job.attemptId, JOB_KIND.PDF);
         if (current?.status === JOB_STATUS.RUNNING && current.workerId === workerId) {
-          if (!isBytes && needsCredentialFallback(error)) {
-            // 401/403（付费墙等）：不 fail，转 awaiting_bytes，弹窗轮询看到后经 SW 喂字节（#68）
+          if (!isBytes && browserFallbackError === error) {
+            // 401/403 或 Bridge 网络不可达：不 fail，转 awaiting_bytes，弹窗轮询看到后经 SW 喂字节
             await this.store.awaitBytes(job.attemptId, workerId);
             // 共享以凭据语义拒绝（#94）：摘要侧直接进 #80 staging 等待，不重复撞 401
             const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
             if (clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) {
               this.#pdfShareEntry(job.attemptId).reject(Object.assign(new Error('PDF 需登录凭据'), { code: PDF_SHARE_CREDENTIALS }));
             }
-            this.logger.log?.('pdf download requires credentials, awaiting extension bytes', { attemptId: job.attemptId, statusCode: error.statusCode });
+            this.logger.log?.('pdf download requires browser fallback, awaiting extension bytes', { attemptId: job.attemptId, failureType: error.failureType, statusCode: error.statusCode });
           } else {
             await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF);
             // 共享拒绝（#94）：摘要侧收到后回退自己下载
@@ -730,7 +741,7 @@ export class ClipExecutor {
             } catch (error) {
               // 凭据回退（#80）：401/403 时转 staging 等待路径，复用扩展喂给 pdf job 的
               // 同一份字节；其余下载失败维持 #79 降级语义
-              if (needsCredentialFallback(error) && this.staging) {
+              if (needsBrowserFallback(error) && this.staging) {
                 const staged = await this.#awaitStagedPdf(job, workerId);
                 if (staged.buffer) {
                   pdf = toPdfAttachment(staged.buffer);
@@ -1191,7 +1202,7 @@ export class ClipExecutor {
               const downloadAt = Date.now();
               try {
                 if (Date.now() >= deadline) throw new Error('图片阶段超过 180 秒');
-                const fetched = await imageBytes(image);
+                const fetched = await imageBytes(image, this.downloadImage);
                 totalBytes += fetched.buffer.length;
                 if (totalBytes > IMAGE_LIMITS.maxTotalBytes) throw new Error('图片总量超过 40 MiB');
                 const filePath = path.join(scratch, `image-${index + 1}.${fetched.metadata.extension}`);

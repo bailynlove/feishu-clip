@@ -68,6 +68,15 @@ export function launchAgentPlist({ nodePath, larkCliPath }) {
 </dict></plist>`;
 }
 
+export function bridgeConfig({ version, larkCliPath, stateDirectory, configDirectory, pairingFile }) {
+  return {
+    version, host: '127.0.0.1', port: 38479, larkCliPath,
+    jobFile: path.join(stateDirectory, 'jobs.json'), pairingFile,
+    aiConfigFile: path.join(configDirectory, 'ai.json'),
+    settingsFile: path.join(configDirectory, 'settings.json'),
+  };
+}
+
 function install() {
   ensureTargets();
   const larkCliPath = commandPath('lark-cli');
@@ -81,12 +90,7 @@ function install() {
   cpSync(path.join(repoRoot, 'src', 'extension'), extensionDir, { recursive: true });
   const pairing = pairingState();
   writeAtomic(pairingPath, `${JSON.stringify(pairing.state, null, 2)}\n`, 0o600);
-  writeAtomic(configPath, `${JSON.stringify({
-    version: packageJson.version, host: '127.0.0.1', port: 38479, larkCliPath,
-    jobFile: path.join(stateDir, 'jobs.json'), pairingFile: pairingPath,
-    // AI 摘要配置（#75）：ai.json 与 pairing.json 同目录，缺此字段则 AI 端点全部 400
-    aiConfigFile: path.join(configDir, 'ai.json'),
-  }, null, 2)}\n`, 0o600);
+  writeAtomic(configPath, `${JSON.stringify(bridgeConfig({ version: packageJson.version, larkCliPath, stateDirectory: stateDir, configDirectory: configDir, pairingFile: pairingPath }), null, 2)}\n`, 0o600);
   writeAtomic(plistPath, launchAgentPlist({ nodePath, larkCliPath }), 0o600);
   execFileSync('/usr/bin/plutil', ['-lint', plistPath], { stdio: 'pipe' });
   bootstrap();

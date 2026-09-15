@@ -225,6 +225,8 @@ async function handle(message) {
       // optionsUiCollapsed 供设置页分区折叠状态回填（#76）
       return localGet(['activeAttempt', 'presets', 'defaultPresetId', 'developerMode', 'aiDigestInstruction', 'optionsUiCollapsed']);
     }
+    case 'GET_PROXY_SETTINGS': return bridge('/v1/settings/proxy');
+    case 'SAVE_PROXY_SETTINGS': return bridge('/v1/settings/proxy', { method: 'POST', body: { proxyPort: message.proxyPort } });
     // AI provider 预设（#77）：四个端点纯代理到 bridge；API key 只存 bridge 的 ai.json，
     // 扩展侧任何环节不落地（SAVE 留空的 apiKey 由 options.js 组装请求体时省略）
     case 'LIST_AI_PROVIDERS': return bridge('/v1/ai/providers');

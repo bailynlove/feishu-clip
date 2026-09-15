@@ -133,6 +133,62 @@ test('GET /v1/jobs lists recent jobs with timing fields and without snapshots; c
   }
 });
 
+test('本地代理设置 API：校验、保存、清空并跨 Bridge 重启持久化（#106）', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-proxy-'));
+  const pairingFile = path.join(directory, 'pairing.json');
+  const settingsFile = path.join(directory, 'settings.json');
+  const code = 'proxy-pairing-code';
+  await writeFile(pairingFile, JSON.stringify({ active: null, pending: { digest: createHash('sha256').update(code).digest('hex'), expiresAt: Date.now() + 60_000, attempts: 0 } }));
+  const config = { version: 'test', host: '127.0.0.1', port: 0, larkCliPath: '/fake', pairingFile, settingsFile, jobFile: path.join(directory, 'jobs.json') };
+  const fakeLark = { authStatus: async () => ({ ready: true }), run: async () => ({ ok: true, data: {} }) };
+  const downloadCalls = [];
+  const downloadPdf = async (source, options) => { downloadCalls.push({ kind: 'pdf', source, options }); return { buffer: Buffer.from('%PDF-1.7'), source, sizeBytes: 8 }; };
+  const downloadImage = async (source, options) => { downloadCalls.push({ kind: 'image', source, options }); return { buffer: Buffer.alloc(0), source }; };
+
+  let credential;
+  const runBridge = async (verify) => {
+    const { server, executor } = await createBridge({ config, lark: fakeLark, logger: { error() {}, log() {} }, downloadPdf, downloadImage });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const call = (url, options = {}) => fetch(`${base}${url}`, { ...options, headers: { Origin: origin, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(credential ? { Authorization: `Bearer ${credential}` } : {}), ...options.headers } });
+    try {
+      if (!credential) {
+        const paired = await (await call('/v1/pair', { method: 'POST', body: JSON.stringify({ code }) })).json();
+        credential = paired.credential;
+      }
+      await verify(call, executor);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  };
+
+  try {
+    await runBridge(async (call, executor) => {
+      assert.deepEqual(await (await call('/v1/settings/proxy')).json(), { ok: true, proxyPort: null });
+      for (const proxyPort of [0, -1, 65536, 1.5, '7897', 'abc']) {
+        const response = await call('/v1/settings/proxy', { method: 'POST', body: JSON.stringify({ proxyPort }) });
+        assert.equal(response.status, 400, `proxyPort=${JSON.stringify(proxyPort)} 应拒绝`);
+        assert.equal((await response.json()).code, 'PROXY_PORT_INVALID');
+      }
+      assert.deepEqual(await (await call('/v1/settings/proxy', { method: 'POST', body: JSON.stringify({ proxyPort: 7897 }) })).json(), { ok: true, proxyPort: 7897 });
+      assert.deepEqual(await (await call('/v1/settings/proxy')).json(), { ok: true, proxyPort: 7897 });
+      await executor.downloadPdf('https://example.com/paper.pdf', { attempt: 2 });
+      await executor.downloadImage('https://example.com/image.png');
+      assert.deepEqual(downloadCalls.slice(-2).map(({ kind, options }) => ({ kind, proxyPort: options.proxyPort })), [
+        { kind: 'pdf', proxyPort: 7897 }, { kind: 'image', proxyPort: 7897 },
+      ], '保存后 PDF 与图片下载立即读取新端口');
+    });
+
+    await runBridge(async (call) => {
+      assert.deepEqual(await (await call('/v1/settings/proxy')).json(), { ok: true, proxyPort: 7897 }, 'Bridge 重启后仍读到已存端口');
+      assert.deepEqual(await (await call('/v1/settings/proxy', { method: 'POST', body: JSON.stringify({ proxyPort: null }) })).json(), { ok: true, proxyPort: null });
+      assert.deepEqual(await (await call('/v1/settings/proxy')).json(), { ok: true, proxyPort: null });
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 // 摘要进度（#86）：executor 内存表合入 GET job 视图——仅 clip job 带 digestProgress，
 // 同 attempt 的 pdf job 与非 digest job 不带；条目清理（终态）后字段消失。
 // 这里直接种内存条目单测合并点；条目的真实生命周期（建立/逐 delta 更新/终态清理）见 executor 测试

@@ -6,10 +6,11 @@ import { pathToFileURL } from 'node:url';
 import { LarkClient } from './lark.mjs';
 import { PairingStore } from './pairing.mjs';
 import { IMAGE_MODES, JOB_KIND, JOB_STATUS, PDF_CHUNK_BYTES, PersistentJobStore, normalizePdfSource } from './job-store.mjs';
-import { PDF_LIMITS } from './image-policy.mjs';
+import { downloadPublicImage, downloadPublicPdf, PDF_LIMITS } from './image-policy.mjs';
 import { PdfChunkStaging } from './pdf-chunks.mjs';
 import { ClipExecutor, aiErrorMessage } from './executor.mjs';
 import { AiConfigStore, DEFAULT_PROVIDER_NAME, generateDigest, mergeAiTestConfig, normalizeAiConfigInput, normalizeProviderName, sanitizeProvider } from './ai-digest.mjs';
+import { BridgeSettingsStore } from './settings.mjs';
 
 const JSON_LIMIT = 52 * 1024 * 1024;
 
@@ -113,15 +114,20 @@ function larkQueryError(error, resource = '知识库') {
   return { status: 502, code: 'LARK_REQUEST_FAILED', message: '飞书查询失败，请稍后重试' };
 }
 
-export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console, downloadPdf, aiConfigStore }) {
+export async function createBridge({ config, lark = new LarkClient({ cliPath: config.larkCliPath }), logger = console, downloadPdf = downloadPublicPdf, downloadImage = downloadPublicImage, aiConfigStore, settingsStore }) {
   const pairing = new PairingStore(config.pairingFile);
   const store = new PersistentJobStore({ filePath: config.jobFile, jobTtlMs: config.jobTtlMs, awaitingBytesTtlMs: config.awaitingBytesTtlMs ?? 10 * 60 * 1_000 });
   // AI 摘要配置（#75）：ai.json store 可注入（测试可替）；bridge.json 缺 aiConfigFile 时
   // 端点按未配置处理（GET 返回 config:null，POST/test 400 AI_NOT_CONFIGURED）
   const aiStore = aiConfigStore ?? (config.aiConfigFile ? new AiConfigStore(config.aiConfigFile) : null);
+  const bridgeSettings = settingsStore ?? (config.settingsFile ? new BridgeSettingsStore(config.settingsFile) : null);
+  const withProxySettings = (download) => async (source, options = {}) => {
+    const { proxyPort } = bridgeSettings ? await bridgeSettings.read() : { proxyPort: null };
+    return download(source, { ...options, proxyPort });
+  };
   // 分块暂存（#68）：staging 目录在 job 文件旁，executor 与分块端点共用同一实例
   const staging = new PdfChunkStaging({ dir: path.join(path.dirname(config.jobFile), 'staging') });
-  const executor = new ClipExecutor({ store, lark, logger, staging, ...(downloadPdf ? { downloadPdf } : {}), getAiConfig: aiStore ? (name) => (name ? aiStore.readProvider(name) : aiStore.readDefault()) : async () => null });
+  const executor = new ClipExecutor({ store, lark, logger, staging, downloadPdf: withProxySettings(downloadPdf), downloadImage: withProxySettings(downloadImage), getAiConfig: aiStore ? (name) => (name ? aiStore.readProvider(name) : aiStore.readDefault()) : async () => null });
   // 摘要进度（#86）：executor 内存表合入 GET job 视图。只挂 clip job（进度由 clip 通道产生）；
   // 无进行中摘要（非 digest job / 已终态）不带 digestProgress 字段。
   // subdoc 模式（#98）阶段开始先落 {phase:'waiting',tokens:0} 条目（等共享 PDF 字节等的占位相位），
@@ -189,6 +195,23 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         try { larkAuth = await lark.authStatus(); }
         catch (error) { larkAuth = { ready: false, error: error.code || error.message }; }
         return send(response, 200, { ok: true, version: config.version, pid: process.pid, address: config.host, larkAuth }, origin);
+      }
+
+      if (request.method === 'GET' && request.url === '/v1/settings/proxy') {
+        const settings = bridgeSettings ? await bridgeSettings.read() : { proxyPort: null };
+        return send(response, 200, { ok: true, proxyPort: settings.proxyPort }, origin);
+      }
+
+      if (request.method === 'POST' && request.url === '/v1/settings/proxy') {
+        if (!bridgeSettings) return send(response, 400, { ok: false, code: 'SETTINGS_NOT_CONFIGURED', message: 'Bridge 未配置 settingsFile' }, origin);
+        const body = await readJson(request);
+        try {
+          const settings = await bridgeSettings.saveProxyPort(body?.proxyPort);
+          return send(response, 200, { ok: true, proxyPort: settings.proxyPort }, origin);
+        } catch (error) {
+          if (error instanceof TypeError) return send(response, 400, { ok: false, code: error.code || 'PROXY_PORT_INVALID', message: error.message }, origin);
+          throw error;
+        }
       }
 
       if (request.method === 'POST' && request.url === '/v1/destinations/validate') {

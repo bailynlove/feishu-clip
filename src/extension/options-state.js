@@ -32,22 +32,33 @@ export function imageModeHint(mode) {
 
 // ——— 分区折叠（#76）：第 2 区「AI 摘要」/ 第 3 区「预设管理」可折叠，状态存
 // chrome.storage.local 单键 optionsUiCollapsed（{ aiDigest, presets }，true = 收起）。
-// 默认展开：缺键/非法值一律归一为 false（展开）——配对区与开发者模式区不参与折叠 ———
+// 「其他设置」默认收起；AI 摘要与预设管理默认展开。
 export const OPTIONS_COLLAPSE_KEY = 'optionsUiCollapsed';
 
 // details 元素 id → 存储字段；options.js 按此表接线 init 回填与 toggle 事件
 export const COLLAPSIBLE_SECTIONS = Object.freeze([
   { id: 'ai-section-collapse', key: 'aiDigest' },
   { id: 'presets-section-collapse', key: 'presets' },
+  { id: 'other-section-collapse', key: 'other', defaultCollapsed: true },
 ]);
 
 export function normalizeCollapsedSections(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
-  return Object.fromEntries(COLLAPSIBLE_SECTIONS.map(({ key }) => [key, source[key] === true]));
+  return Object.fromEntries(COLLAPSIBLE_SECTIONS.map(({ key, defaultCollapsed = false }) => [key, typeof source[key] === 'boolean' ? source[key] : defaultCollapsed]));
 }
 
 export function setSectionCollapsed(state, key, collapsed) {
   return { ...normalizeCollapsedSections(state), [key]: Boolean(collapsed) };
+}
+
+export function normalizeProxyPortInput(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const port = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new TypeError('本地代理端口必须是 1–65535 的整数，留空表示关闭');
+  }
+  return port;
 }
 
 function findIndex(state, id) {

@@ -28,7 +28,7 @@ test('picker-more/back/retry start hidden (renderPicker toggles them)', () => {
 // 开发者模式卡片（任务耗时日志）：开关初始关、日志区初始隐藏，由 options.js 按
 // chrome.storage.local 的 developerMode 开关（#75 起为第 4 节，前面插入「AI 摘要」）
 test('devmode card exists with toggle off and joblog hidden initially', () => {
-  assert.match(html, /<h2>4\. 开发者模式<\/h2>/, '应有「4. 开发者模式」卡片');
+  assert.match(html, /<h2>5\. 开发者模式<\/h2>/, '应有「5. 开发者模式」卡片');
   assert.ok(!classAttr('devmode-toggle').includes('on'), '#devmode-toggle 初始应为关');
   assert.ok(classAttr('joblog').includes('hidden'), '#joblog 初始应隐藏');
   assert.ok(html.includes('id="joblog-refresh"'), '应有刷新按钮');
@@ -82,7 +82,8 @@ test('preset editor has a PDF folder row and drive picker panel (#66)', () => {
 test('AI 摘要 section sits between pairing and presets with the config form skeleton', () => {
   assert.match(html, /<h2>2\. AI 摘要<\/h2>/, '应有「2. AI 摘要」卡片');
   assert.ok(html.indexOf('<h2>2. AI 摘要</h2>') < html.indexOf('<h2>3. 预设管理</h2>'), 'AI 摘要在预设管理之前');
-  assert.ok(html.indexOf('<h2>3. 预设管理</h2>') < html.indexOf('<h2>4. 开发者模式</h2>'), '预设管理在开发者模式之前');
+  assert.ok(html.indexOf('<h2>3. 预设管理</h2>') < html.indexOf('<h2>4. 其他设置</h2>'), '预设管理在其他设置之前');
+  assert.ok(html.indexOf('<h2>4. 其他设置</h2>') < html.indexOf('<h2>5. 开发者模式</h2>'), '其他设置在开发者模式之前');
   for (const id of ['ai-api-type', 'ai-base-url', 'ai-model', 'ai-api-key', 'ai-save', 'ai-test', 'ai-instruction']) {
     assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
   }
@@ -132,9 +133,11 @@ test('sections 2 (AI 摘要) and 3 (预设管理) are collapsible details, defau
   }
 });
 
-test('sections 1 (配对) and 4 (开发者模式) stay plain, no collapse wrapper', () => {
+test('other settings is collapsed by default and developer mode stays plain', () => {
   assert.match(html, /<section class="ps-card">\s*<h2>1\. 配对本地 Bridge<\/h2>/, '配对区标题不被 details 包裹');
-  assert.match(html, /<section class="ps-card">\s*<h2>4\. 开发者模式<\/h2>/, '开发者模式区标题不被 details 包裹');
+  assert.match(html, /<details class="ps-collapse" id="other-section-collapse">\s*<summary[^>]*><h2>4\. 其他设置<\/h2>/, '其他设置默认折叠');
+  for (const id of ['proxy-port', 'proxy-save', 'proxy-result']) assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
+  assert.match(html, /<section class="ps-card">\s*<h2>5\. 开发者模式<\/h2>/, '开发者模式区标题不被 details 包裹');
 });
 
 // AI provider 预设管理（#77）：AI 摘要区从单表单升级为 tabs + 名称/删除的提供者管理骨架；

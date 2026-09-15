@@ -85,9 +85,13 @@ _Avoid_: 嵌入帧、外部网页块
 _Avoid_: 网页里有 PDF 链接、浏览器下载记录
 
 **PDF 上传任务（PDF Upload Job）**:
-与剪藏 job 共享同一剪藏尝试 `attemptId`、以 `kind: 'pdf'` 区分的独立 job；状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 转入 awaiting_bytes 等待扩展喂字节。上传成功后把该 PDF 以「@」引用（mention_doc，quote container 内）插到本次剪藏文档开头（#88）；幂等靠剪藏 job 的 `pdfRefInserted` 标记（mark-before-insert：先置位再插入，插入失败清除标记），插入失败只记 pdf job 警告、不改终态；clip 文档尚未建好时跳过并记警告，clip 侧建档后不自动补插（协议空隙，pdf 重试可补）。
+与剪藏 job 共享同一剪藏尝试 `attemptId`、以 `kind: 'pdf'` 区分的独立 job；状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 或传输层网络错误时转入 awaiting_bytes 等待扩展喂字节，HTTP 内容、类型、大小和 SSRF 拒绝仍直接失败。上传成功后把该 PDF 以「@」引用（mention_doc，quote container 内）插到本次剪藏文档开头（#88）；幂等靠剪藏 job 的 `pdfRefInserted` 标记（mark-before-insert：先置位再插入，插入失败清除标记），插入失败只记 pdf job 警告、不改终态；clip 文档尚未建好时跳过并记警告，clip 侧建档后不自动补插（协议空隙，pdf 重试可补）。
 _Avoid_: 附件同步、文献库条目
 
 **云盘目录（Drive Folder）**:
 PDF 上传任务接收文件的位置：预设 `pdfDrive` 里的 Drive 文件夹 token + 冗余展示名；token 为空即云盘根目录。弹窗内改动仅本次生效、不回写预设。
 _Avoid_: 导出路径、同步目录
+
+**本地代理（Local Proxy）**:
+用户可在设置页「其他设置」中配置的回环 HTTP 代理端口，地址固定为 `127.0.0.1`。Bridge 仅在下载网页来源的 PDF 和图片时使用它；每次下载即时读取配置，并继续对来源 URL 和每一跳重定向执行公网地址校验。AI API、飞书 CLI 和扩展到 Bridge 的通信不走该代理。
+_Avoid_: 全局代理、系统代理、Bridge 代理

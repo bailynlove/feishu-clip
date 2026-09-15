@@ -193,7 +193,17 @@
 </section>
 
 <section class="ps-card">
-  <h2>4. 开发者模式</h2>
+  <details class="ps-collapse" id="other-section-collapse">
+  <summary class="ps-collapse-summary"><h2>4. 其他设置</h2></summary>
+  <label class="ps-field"><span class="ps-label">本地代理端口</span><input id="proxy-port" class="ps-input mono" inputmode="numeric" autocomplete="off" placeholder="如 7897"></label>
+  <p class="ps-desc">用于 Bridge 下载网页中的 PDF 和图片。仅填写端口，代理地址固定为 127.0.0.1；留空表示关闭。</p>
+  <button id="proxy-save" class="ps-btn primary" type="button">保存</button>
+  <div id="proxy-result" class="ps-note hidden"></div>
+  </details>
+</section>
+
+<section class="ps-card">
+  <h2>5. 开发者模式</h2>
   <button class="ps-switch-row" id="devmode-toggle" type="button" aria-pressed="false">
     <span class="ps-switch-text"><span class="ps-switch-label">开发者模式</span><span class="ps-switch-sub">记录并展示每次剪藏任务的耗时与日志</span></span>
     <span class="ps-switch"></span>

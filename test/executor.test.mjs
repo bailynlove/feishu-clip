@@ -978,6 +978,25 @@ test('pdf job：下载撞 401/403 不 fail，转 awaiting_bytes（其余 HTTP �
   assert.match(store.failed?.error, /PDF_HTTP_404/);
 });
 
+test('pdf job：Bridge 连接超时经有限重试后转 awaiting_bytes，由浏览器回传字节（#105）', async () => {
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-connect-timeout' });
+  const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
+  let calls = 0;
+  const downloadPdf = async () => {
+    calls += 1;
+    throw Object.assign(new Error('PDF_CONNECT_TIMEOUT'), { code: 'PDF_FETCH_FAILED', failureType: 'transport' });
+  };
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); };
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf, sleep }).kick();
+  await store.settled;
+
+  assert.equal(calls, 3, '网络传输错误仍执行既有有限重试');
+  assert.deepEqual(sleeps, [1000, 3000]);
+  assert.ok(store.awaitedBytes, '重试耗尽后进入浏览器字节回传');
+  assert.equal(store.failed, null);
+});
+
 // ——— 瞬时网络错误重试：ECONNRESET 类裸系统错误码自动重试（最多 2 次）；PDF_* 业务失败绝不重试 ———
 
 test('pdf job：下载撞瞬时网络错误（ECONNRESET）自动重试，第二次成功后 job succeeded', async () => {
@@ -1001,7 +1020,7 @@ test('pdf job：下载撞瞬时网络错误（ECONNRESET）自动重试，第二
   assert.ok(store.completed.timeline.some((entry) => entry.kind === 'retry' && entry.name === 'pdf_download'), 'timeline 记一笔重试');
 });
 
-test('pdf job：连续 3 次瞬时网络错误最终 failed（共 3 次尝试，退避约 1s/3s）', async () => {
+test('pdf job：连续 3 次旧式瞬时网络错误最终转 awaiting_bytes（共 3 次尝试，退避约 1s/3s）', async () => {
   const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-retry-exhausted' });
   const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
   let calls = 0;
@@ -1013,12 +1032,12 @@ test('pdf job：连续 3 次瞬时网络错误最终 failed（共 3 次尝试，
 
   assert.equal(calls, 3, '最多 2 次重试（共 3 次尝试）');
   assert.deepEqual(sleeps, [1000, 3000], '退避约 1s / 3s');
-  assert.equal(store.failed?.kind, 'pdf');
-  assert.equal(store.failed?.stage, 'pdf');
+  assert.ok(store.awaitedBytes, '兼容未携带 failureType 的系统网络错误');
+  assert.equal(store.failed, null);
   assert.equal(store.completed, null);
 });
 
-test('pdf job：带 PDF_* 业务码的错误绝不重试（401/403 仍走 awaiting_bytes 既有路径）', async () => {
+test('pdf job：HTTP 业务错误绝不重试（401/403 仍走 awaiting_bytes 既有路径）', async () => {
   const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-403-noretry' });
   const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
   let calls = 0;
