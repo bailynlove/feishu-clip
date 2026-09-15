@@ -93,8 +93,14 @@ const PDF_SHARE_WAIT_MS = 30_000;
 // 共享拒绝码（#94）：pdf 转凭据回退（awaiting_bytes）时以此拒绝共享，
 // 摘要侧映射成 401 形状直接进 #80 staging 等待，不重复撞一次 401
 const PDF_SHARE_CREDENTIALS = 'PDF_SHARE_CREDENTIALS';
-// 等待期间的放弃态：pdf 最小状态集里的四个终态（succeeded 时 staging 已随收尾 discard，同样取不到）
+// 等待期间的放弃态：pdf 最小状态集里的四个终态（succeeded 时先尝试读 staging 残留再放弃——
+// pdf 收尾会为非终态 clip 保留字节，见 #executePdf finally）
 const PDF_GIVE_UP_STATUSES = new Set([JOB_STATUS.SUCCEEDED, JOB_STATUS.FAILED, JOB_STATUS.CANCELLED, JOB_STATUS.EXPIRED]);
+// clip 终态全集：pdf 收尾据此决定是否保留 staging 字节给摘要阶段（succeeded_with_warnings 也是终态）
+const CLIP_TERMINAL_STATUSES = new Set([
+  JOB_STATUS.SUCCEEDED, JOB_STATUS.SUCCEEDED_WITH_WARNINGS, JOB_STATUS.FAILED,
+  JOB_STATUS.CANCELLED, JOB_STATUS.CANCELLED_WITH_DOCUMENT, JOB_STATUS.EXPIRED, JOB_STATUS.NEEDS_ATTENTION,
+]);
 
 // 引用回填（#88）：clip job 尚无 document 时区分「仍在建」与「失败终态」——
 // 仍在建（这些非终态）记警告使可见；失败终态属「不产生引用」静默跳过
@@ -459,8 +465,15 @@ export class ClipExecutor {
     } finally {
       lease.stop();
       await rm(scratch, { recursive: true, force: true });
-      // staging 随终态删除（#68）：bytes 路径无论成败，收尾后清掉 .part 与位图 sidecar
-      if (isBytes) await this.staging?.discard(job.attemptId).catch(() => {});
+      // staging 随终态删除（#68）：bytes 路径无论成败，收尾后清掉 .part 与位图 sidecar。
+      // 例外（#99 续）：同次 clip 仍非终态时保留——摘要阶段（{{@file}} 凭据回退 #80）可能
+      // 还没开始等字节；凭据回传快于 clip 建档时，摘要读到 pdf 已 succeeded，staging 已删
+      // 会误判「无法取得字节」走纯文本。遗留由 server sweep 按 mtime 兜底清理
+      if (isBytes) {
+        const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
+        const clipOpen = clip && !CLIP_TERMINAL_STATUSES.has(clip.status);
+        if (!clipOpen) await this.staging?.discard(job.attemptId).catch(() => {});
+      }
     }
   }
 
@@ -528,16 +541,38 @@ export class ClipExecutor {
   // 通过后 markBytesReady 把 pdf job 放回 queued（bytes 声明粘滞），这里据此读 staging 字节。
   // 双通道并行（#91）后 pdf job 可能已在 running（自身下载同样会撞 401/403 转 awaiting_bytes），
   // requestBytes 被拒时若其处于 running/awaiting_bytes 则照旧进轮询等待，不立即降级。
-  // clip 只读不 discard：staging 仍由 pdf job 后续消费上传云盘并收尾清理。
-  // 返回 { buffer } 或 { warning }：预算耗尽 / pdf job 终态 / 声明超 32 MB / 整验失败都放弃，
-  // 由调用方按 #79 降级语义记警告走纯文本。每轮 heartbeat 防 lease 过期被 sweep 重排
+  // clip 只读不 discard：staging 仍由 pdf job 后续消费上传云盘并收尾清理；例外是读到
+  // 时 pdf 已 succeeded（#99 续竞态：凭据回传快于 clip 建档）——字节已入云盘，读完顺手 discard。
+  // 返回 { buffer } 或 { warning }：预算耗尽 / pdf job 终态且 staging 已清 / 声明超 32 MB /
+  // 整验失败都放弃，由调用方按 #79 降级语义记警告走纯文本。每轮 heartbeat 防 lease 过期被 sweep 重排
   async #awaitStagedPdf(job, workerId) {
+    // pdf 已 succeeded（bytes 型）时字节可能仍在 staging——pdf 收尾会为本阶段保留（见
+    // #executePdf finally），读出来直接作附件；已随终态清理则返回 null 走既有降级
+    const readTerminalStaged = async (pdfJob) => {
+      if (pdfJob?.status !== JOB_STATUS.SUCCEEDED || pdfJob.pdfSource?.type !== 'bytes') return null;
+      try {
+        const filePath = await this.staging.verify(job.attemptId, pdfJob.pdfSource);
+        const buffer = await readFile(filePath);
+        // 字节已入云盘，staging 不再有人消费，顺手收尾（正常路径由 pdf job 终态清理）
+        await this.staging.discard(job.attemptId).catch(() => {});
+        return { buffer };
+      } catch {
+        return null;
+      }
+    };
     try {
       await this.store.requestBytes(job.attemptId);
     } catch {
       // 双通道并行（#91）后 pdf job 可能正在 running——它自身下载也会撞 401/403 并转
-      // awaiting_bytes（#68），等它转入可喂字节状态即可，不立即降级；其余状态照旧放弃
+      // awaiting_bytes（#68），等它转入可喂字节状态即可，不立即降级；其余状态照旧放弃。
+      // pdf 凭据回传快于 clip 建档时（#99 续）：摘要开始等字节前 pdf 已 succeeded，
+      // staging 字节还在——先读再判放弃
       const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF).catch(() => null);
+      const staged = await readTerminalStaged(pdfJob);
+      if (staged) return staged;
+      if (pdfJob?.status === JOB_STATUS.SUCCEEDED) {
+        return { warning: 'PDF 任务已结束（succeeded），无法取得 PDF 字节，已按纯文本生成摘要' };
+      }
       if (!pdfJob || (pdfJob.status !== JOB_STATUS.RUNNING && pdfJob.status !== JOB_STATUS.AWAITING_BYTES)) {
         return { warning: 'PDF 下载需要登录凭据，但 PDF 任务当前状态无法接收字节回传，已按纯文本生成摘要' };
       }
@@ -552,6 +587,8 @@ export class ClipExecutor {
       }
       const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF);
       if (!pdfJob || PDF_GIVE_UP_STATUSES.has(pdfJob.status)) {
+        const staged = await readTerminalStaged(pdfJob);
+        if (staged) return staged;
         return { warning: `PDF 任务已结束（${pdfJob?.status ?? 'missing'}），无法取得 PDF 字节，已按纯文本生成摘要` };
       }
       if (pdfJob.pdfSource?.type === 'bytes') {
@@ -824,7 +861,8 @@ export class ClipExecutor {
             '--title', digestTitle, '--format', 'json',
           ], { cwd: scratch });
           const created = parseCreatedNode(node);
-          const nodeToken = node.data?.node?.node_token;
+          // lark-cli +node-create 应答是扁平 node（data.node_token），旧版也曾包 data.node——两形都认
+          const nodeToken = node.data?.node?.node_token ?? node.data?.node_token;
           if (!nodeToken) throw new Error('LARK_CREATE_MISSING_NODE_TOKEN');
           digestDoc = { documentId: created.documentId, nodeToken, url: created.url };
         } catch (error) {
@@ -877,8 +915,8 @@ export class ClipExecutor {
                 '--obj-type', 'docx', '--title', safeTitle(job.snapshot.title), '--format', 'json',
               ], { cwd: scratch });
               document = parseCreatedNode(node);
-              // space 目标创建应答即带父文档 wiki 节点 token，直接作子文档挂载点
-              await setupDigestDoc(node.data?.node?.node_token ?? null, job.destination.spaceId ?? null);
+              // space 目标创建应答即带父文档 wiki 节点 token（扁平 data.node_token，旧版包 data.node），直接作子文档挂载点
+              await setupDigestDoc(node.data?.node?.node_token ?? node.data?.node_token ?? null, job.destination.spaceId ?? null);
             } else {
               const created = await run([
                 'docs', '+create', '--as', 'user', '--parent-token', job.destination.nodeToken,

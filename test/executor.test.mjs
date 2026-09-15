@@ -1204,6 +1204,37 @@ test('pdf job：bytes 型从 staging 取字节上传（不下载），终态清�
   }
 });
 
+test('pdf job：bytes 型终态时同次 clip 仍非终态 → staging 保留给摘要阶段（#99 续竞态）', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-exec-staging-keep-'));
+  const stagingDir = path.join(directory, 'staging');
+  const staging = new PdfChunkStaging({ dir: stagingDir });
+  const body = Buffer.from('%PDF-1.7 staged bytes', 'latin1');
+  const attemptId = 'pdf-bytes-clip-open';
+  await staging.putChunk(attemptId, 0, body);
+  try {
+    // clip 仍在跑（running）：摘要阶段可能还没开始等字节，staging 不能随 pdf 终态清掉
+    const store = pdfFakeStore(
+      {
+        ...PDF_JOB,
+        attemptId,
+        pdfSource: { type: 'bytes', url: PDF_JOB.pdfSource.url, name: '1706.03762.pdf', sizeBytes: body.length, totalChunks: 1, sha256: 'e'.repeat(64) },
+      },
+      { clipJob: { kind: 'clip', attemptId, status: 'running', document: null } },
+    );
+    const lark = { async uploadDriveFile() { return { fileToken: 'ft-b', url: 'https://u' }; } };
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf: async () => { throw new Error('bytes 型不得走 URL 下载'); }, staging }).kick();
+    await store.settled;
+    // complete 落盘先于 finally 的保留判定，等收尾跑完再断言
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(store.completed.kind, 'pdf');
+    const leftovers = (await readdir(stagingDir)).filter((entry) => entry.startsWith(attemptId));
+    assert.ok(leftovers.includes(`${attemptId}.part`), 'clip 非终态时 staging 字节保留');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 // ——— AI 摘要阶段（#75）：claim 之后、prepareMarkdown 之前；失败降级不 fail；digestText 缓存复用 ———
 
 import { readFile } from 'node:fs/promises';
@@ -2095,6 +2126,53 @@ test('{{@file}} 凭据回退：pdf job 已是终态（failed）→ requestBytes 
   });
 });
 
+test('{{@file}} 凭据回退（#99 续竞态）：凭据回传快于 clip 建档——pdf 已 succeeded，staging 字节仍读作附件，读完顺手清理', async () => {
+  await withStaging(async (staging, directory) => {
+    const rig = digestStagingSetup({ pdfJobStatus: 'succeeded' });
+    // pdf 通道已凭扩展回传字节完成上传：bytes 声明粘滞在 job 上，staging 被 pdf 收尾保留
+    const declared = {
+      type: 'bytes', url: 'https://example.com/paywalled.pdf', name: 'paywalled.pdf',
+      sizeBytes: STAGED_PDF.length, totalChunks: 1, sha256: STAGED_SHA256,
+    };
+    rig.store.pdfJob = { ...rig.store.pdfJob, status: 'succeeded', pdfSource: declared };
+    await staging.putChunk(rig.job.attemptId, 0, STAGED_PDF);
+    let sleeps = 0;
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep: async () => { sleeps += 1; }, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.equal(sleeps, 0, 'succeeded 不进轮询，直接读 staging');
+    assert.equal(rig.digestCalls.length, 1);
+    assert.equal(Buffer.from(rig.digestCalls[0].pdf.dataBase64, 'base64').toString(), STAGED_PDF.toString(), '附件即 pdf 通道回传的同一份字节');
+    assert.deepEqual(rig.store.completed.warnings, [], '不再误报「无法取得 PDF 字节」');
+    const leftovers = (await readdir(path.join(directory, 'staging'))).filter((entry) => entry.startsWith(rig.job.attemptId));
+    assert.deepEqual(leftovers, [], '字节已入云盘，读完顺手 discard');
+  });
+});
+
+test('{{@file}} 凭据回退（#99 续竞态）：pdf 已 succeeded 但 staging 已清（clip 先终态）→ 维持降级警告', async () => {
+  await withStaging(async (staging) => {
+    const rig = digestStagingSetup({ pdfJobStatus: 'succeeded' });
+    rig.store.pdfJob = {
+      ...rig.store.pdfJob, status: 'succeeded',
+      pdfSource: { type: 'bytes', url: 'https://example.com/paywalled.pdf', name: 'paywalled.pdf', sizeBytes: STAGED_PDF.length, totalChunks: 1, sha256: STAGED_SHA256 },
+    };
+    // 不写 staging——模拟 clip 先终态、pdf 收尾已正常清理的场景
+    new ClipExecutor({
+      store: rig.store, lark: rig.lark, logger: { warn() {}, error() {} },
+      downloadPdf: rig.downloadPdf, generateDigest: rig.generateDigest,
+      getAiConfig: async () => AI_CONFIG, staging, sleep: async () => {}, pdfShareWaitMs: 0,
+    }).kick();
+    await rig.store.settled;
+
+    assert.equal(rig.digestCalls[0].pdf, undefined);
+    assert.deepEqual(rig.store.completed.warnings, ['PDF 任务已结束（succeeded），无法取得 PDF 字节，已按纯文本生成摘要']);
+  });
+});
+
 test('{{@file}} 凭据回退：bytes 声明超 32 MB → 提前放弃（不等喂齐），纯文本摘要 + 超限警告', async () => {
   await withStaging(async (staging) => {
     const rig = digestStagingSetup();
@@ -2153,10 +2231,11 @@ function subdocSetup({
       if (head === 'wiki' && sub === '+node-create') {
         if (args.includes('--parent-node-token')) {
           events.push('create-digest');
-          return { ok: true, data: { node: { obj_token: 'doc-digest', node_token: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest' } } };
+          // 钉住真实应答形状（实证：lark-cli +node-create 返回扁平 node，不是 data.node 包裹）
+          return { ok: true, data: { obj_token: 'doc-digest', node_token: 'node-digest', url: 'https://example.feishu.cn/wiki/node-digest' } };
         }
         events.push('create-parent');
-        return { ok: true, data: { node: { obj_token: 'doc-parent', node_token: 'node-parent', url: 'https://example.feishu.cn/wiki/node-parent' } } };
+        return { ok: true, data: { obj_token: 'doc-parent', node_token: 'node-parent', url: 'https://example.feishu.cn/wiki/node-parent' } };
       }
       if (head === 'wiki' && sub === '+node-list') {
         events.push('list-children');
