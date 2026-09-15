@@ -356,10 +356,14 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
             return send(response, 400, { ok: false, code: 'PDF_FOLDER_INVALID', message: 'pdfFolderToken 不合法' }, origin);
           }
-          // sourceUrl 取 PDF 地址本身：弹窗按它做同页 job 恢复（isJobForPage）
+          // sourceUrl 取 PDF 地址本身：弹窗按它做同页 job 恢复（isJobForPage）。
+          // 例外（#99 续）：clip 流创建的 pdf job sourceUrl 是页面 URL——declare 升级
+          // （凭据回传补交 bytes 声明）必须沿用既有绑定，否则被 job-store 的
+          // attemptId↔sourceUrl 绑定校验误拒（MDPI 实测三次 declare 全部被打回）
+          const existingPdfJob = await store.get(body.attemptId, JOB_KIND.PDF).catch(() => null);
           const submitted = await store.submit({
             attemptId: body.attemptId,
-            sourceUrl: pdfSource.url,
+            sourceUrl: existingPdfJob?.sourceUrl ?? pdfSource.url,
             kind: JOB_KIND.PDF,
             pdfSource,
             title: typeof body.title === 'string' && body.title ? body.title : null,

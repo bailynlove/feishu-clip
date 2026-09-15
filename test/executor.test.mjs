@@ -2178,6 +2178,9 @@ function subdocSetup({
         const [, method, apiPath] = args;
         if (apiPath.includes('get_node')) {
           events.push('get-node');
+          // 钉住真实 API 形状（#99 续排查实证：POST 或 obj_token 参数名在真实飞书 API 上是 404）
+          const params = JSON.parse(args[args.indexOf('--params') + 1]);
+          if (method !== 'GET' || !params.token || params.obj_token) throw new Error('get_node 形状错误（真实 API 会 404）');
           if (!nodeLookup) throw new Error('get_node 失败');
           return { ok: true, data: { node: nodeLookup } };
         }

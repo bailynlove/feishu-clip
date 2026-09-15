@@ -809,10 +809,11 @@ export class ClipExecutor {
       // subdoc 建档序列（#98）：父文档建好后——建 Digest 子文档 → recordDigestDoc 落库 →
       // 占位行「AI 摘要生成中…」。拿不到 wiki 节点/空间或建子文档失败 → 退化 inline（正文
       // 尚未写入，补跑内联摘要阶段）；落库/占位失败仅警告继续（内存 digestDoc 够用）
-      const setupDigestDoc = async (wikiToken, spaceId) => {
+      const setupDigestDoc = async (wikiToken, spaceId, reason = null) => {
         if (!wikiToken || !spaceId) {
           effectiveSubdoc = false;
-          digestWarnings.push('无法取得剪藏文档的 wiki 节点信息，AI 摘要回退为内联摘要');
+          // 带上底层原因（如 get_node 404/权限）——泛化文案曾让真实失败原因完全不可见
+          digestWarnings.push(`无法取得剪藏文档的 wiki 节点信息${reason ? `（${String(reason).slice(0, 120)}）` : ''}，AI 摘要回退为内联摘要`);
           return;
         }
         parentWikiToken = wikiToken;
@@ -884,14 +885,16 @@ export class ClipExecutor {
                 '--title', safeTitle(job.snapshot.title), '--doc-format', 'markdown', '--format', 'json',
               ], { cwd: scratch, timeoutMs: 120_000 });
               document = parseDocument(created);
-              // node 目标：get_node 反查 wiki 节点（子文档挂载点 + 子页面列表 wiki_token + spaceId）
+              // node 目标：get_node 反查 wiki 节点（子文档挂载点 + 子页面列表 wiki_token + spaceId）。
+              // 注意 API 形状：GET + 查询参数 token（=obj_token）；POST 或 obj_token 参数名都是 404
               let nodeInfo = null;
+              let nodeError = null;
               try {
-                nodeInfo = await api('POST', '/open-apis/wiki/v2/spaces/get_node', [
-                  '--params', JSON.stringify({ obj_token: document.documentId, obj_type: 'docx' }),
+                nodeInfo = await api('GET', '/open-apis/wiki/v2/spaces/get_node', [
+                  '--params', JSON.stringify({ token: document.documentId, obj_type: 'docx' }),
                 ]);
-              } catch { nodeInfo = null; }
-              await setupDigestDoc(nodeInfo?.data?.node?.node_token ?? null, nodeInfo?.data?.node?.space_id ?? job.destination.spaceId ?? null);
+              } catch (error) { nodeError = error?.message || error; }
+              await setupDigestDoc(nodeInfo?.data?.node?.node_token ?? null, nodeInfo?.data?.node?.space_id ?? job.destination.spaceId ?? null, nodeError);
             }
             // 退化 inline：补跑内联摘要阶段（时序不同的降级，语义同 #75）
             if (!effectiveSubdoc && digestText === null) {
@@ -968,13 +971,15 @@ export class ClipExecutor {
         if (effectiveSubdoc && !digestDoc && digestText === null) {
           let parentToken = null;
           let spaceId = job.destination?.spaceId ?? null;
+          let nodeError = null;
           try {
-            const nodeInfo = await api('POST', '/open-apis/wiki/v2/spaces/get_node', [
-              '--params', JSON.stringify({ obj_token: document.documentId, obj_type: 'docx' }),
+            // get_node 形状：GET + token 参数（=obj_token），见建档分支同款调用注释
+            const nodeInfo = await api('GET', '/open-apis/wiki/v2/spaces/get_node', [
+              '--params', JSON.stringify({ token: document.documentId, obj_type: 'docx' }),
             ]);
             parentToken = nodeInfo?.data?.node?.node_token ?? null;
             spaceId = nodeInfo?.data?.node?.space_id ?? spaceId;
-          } catch { parentToken = null; }
+          } catch (error) { nodeError = error?.message || error; }
           let recovered = null;
           if (parentToken && spaceId) {
             try {
@@ -1000,7 +1005,7 @@ export class ClipExecutor {
             }
           } else {
             // 找回不到（子文档被删/首次未建成）：重建——正文里的旧链接可能指向孤儿，wiki 允许同名
-            await setupDigestDoc(parentToken, spaceId);
+            await setupDigestDoc(parentToken, spaceId, nodeError);
           }
         }
         prepared = composePrepared();

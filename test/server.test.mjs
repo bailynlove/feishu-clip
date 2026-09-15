@@ -638,6 +638,41 @@ test('凭据回退全链路：url 型 403 → awaiting_bytes → 声明升级 �
   }
 });
 
+// declare 升级对 clip 流 pdf job 的回归（#99 续）：clip 路径创建的 pdf job sourceUrl 是页面 URL，
+// 而 declare（pdf-only 提交路径）用 pdfSource.url 当 sourceUrl——两者不一致时升级被绑定校验
+// 误拒（MDPI 实测：扩展三次喂声明全部被 "already bound to another source URL" 打回，job 卡死）
+test('clip 流创建的 pdf job（sourceUrl=页面 URL）接受凭据回传 declare 升级', async () => {
+  const attemptId = '78787878-7878-4878-8878-787878787878';
+  const downloadPdf = async () => { throw Object.assign(new Error('PDF_HTTP_403'), { code: 'PDF_FETCH_FAILED', statusCode: 403 }); };
+  const { directory, server, call, waitFor } = await bootBridge({ downloadPdf });
+  try {
+    const pageUrl = 'https://www.mdpi.com/1424-8220/26/5/1518';
+    const pdfUrl = 'https://www.mdpi.com/1424-8220/26/5/1518/pdf?version=1';
+    const snapshot = { title: 'Paper', sourceUrl: pageUrl, capturedAt: new Date().toISOString(), markdown: '# 正文' };
+    const submitted = await call('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId, destination: { nodeToken: 'wikcn-parent' }, includeImages: false, snapshot, pdfSource: { type: 'url', url: pdfUrl, name: 'paper.pdf' } }),
+    });
+    assert.equal(submitted.status, 202);
+    const awaiting = await waitFor(attemptId, ['awaiting_bytes', 'failed']);
+    assert.equal(awaiting.status, 'awaiting_bytes');
+    assert.equal(awaiting.sourceUrl, pageUrl, 'clip 流 pdf job 的 sourceUrl 是页面 URL');
+
+    // 扩展 declare（pdf-only 路径，与 background.js doFeedPdfBytes 同形：body 无 snapshot）
+    const body = Buffer.from('%PDF-1.7\nfake', 'latin1');
+    const declaration = { type: 'bytes', url: pdfUrl, name: 'paper.pdf', sizeBytes: body.length, totalChunks: 1, sha256: createHash('sha256').update(body).digest('hex') };
+    const upgraded = await call('/v1/jobs', { method: 'POST', body: JSON.stringify({ attemptId, pdfSource: declaration }) });
+    const upgradedBody = await upgraded.json();
+    assert.equal(upgraded.status, 200, `declare 不得被 sourceUrl 绑定误拒：${upgradedBody.error?.message ?? ''}`);
+    assert.equal(upgradedBody.pdfJob.pdfSource.type, 'bytes', '声明升级生效');
+    assert.equal(upgradedBody.pdfJob.status, 'awaiting_bytes');
+    assert.equal(upgradedBody.pdfJob.sourceUrl, pageUrl, '既有 sourceUrl 绑定不被改写');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 // ——— AI 摘要配置端点（#75）———
 
 import { createServer as createHttpServer } from 'node:http';
