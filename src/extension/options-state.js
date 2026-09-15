@@ -389,3 +389,41 @@ export function aiTestResultView(result) {
   }
   return { tone: 'error', text: `连接失败：${AI_ERROR_LABELS[result?.code] ?? String(result?.message ?? '未知错误')}` };
 }
+
+// ——— 触发规则预设气泡（#101）：全局键 triggerPresets 存 [{ id, name, rule }]，不属于任何单套预设；
+// 点击气泡把 rule 追加进 triggers 输入框（一行一条）；只支持新增/删除，不做编辑 ———
+export const TRIGGER_PRESETS_KEY = 'triggerPresets';
+
+// 读取归一：非数组/缺 name/缺 rule 的条目丢弃；name/rule 去首尾空白；缺 id 补生成
+export function normalizeTriggerPresets(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && typeof item.name === 'string' && item.name.trim() && typeof item.rule === 'string' && item.rule.trim())
+    .map((item) => ({
+      id: typeof item.id === 'string' && item.id ? item.id : crypto.randomUUID(),
+      name: item.name.trim(),
+      rule: item.rule.trim(),
+    }));
+}
+
+// 新增：名称/规则去空白后都必须非空，重名拒绝；非法返回 null（调用侧提示）
+export function addTriggerPreset(list, { name, rule } = {}) {
+  const trimmedName = String(name ?? '').trim();
+  const trimmedRule = String(rule ?? '').trim();
+  if (!trimmedName || !trimmedRule) return null;
+  if (list.some((item) => item.name === trimmedName)) return null;
+  return [...list, { id: crypto.randomUUID(), name: trimmedName, rule: trimmedRule }];
+}
+
+export function removeTriggerPreset(list, id) {
+  return list.filter((item) => item.id !== id);
+}
+
+// 追加规则到 triggers 文本：一行一条；文本空白直用规则；文本尾随换行先去掉再补一个，不叠空行
+export function appendTriggerRule(text, rule) {
+  const trimmedRule = String(rule ?? '').trim();
+  const current = String(text ?? '');
+  if (!trimmedRule) return current;
+  if (!current.trim()) return trimmedRule;
+  return `${current.replace(/\s+$/, '')}\n${trimmedRule}`;
+}

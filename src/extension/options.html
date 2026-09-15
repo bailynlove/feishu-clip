@@ -119,6 +119,16 @@
         </div>
       </div>
 
+      <div class="ps-field"><span class="ps-label">规则预设</span>
+        <div class="trigger-presets" id="trigger-presets"></div>
+        <button class="trigger-save-btn" id="trigger-preset-save" type="button">＋ 保存为新预设</button>
+        <div class="trigger-save-form hidden" id="trigger-preset-form">
+          <input id="trigger-preset-name" class="ps-input" autocomplete="off" placeholder="预设名称（规则取当前输入框内容）">
+          <button id="trigger-preset-confirm" class="ps-btn" type="button">保存</button>
+          <button id="trigger-preset-cancel" class="link" type="button">取消</button>
+        </div>
+      </div>
+
       <label class="ps-field"><span class="ps-label">Triggers 规则（一行一条）</span><textarea id="f-triggers" class="ps-input mono" rows="3" placeholder="https://example.com/blog&#10;/^https:\/\/.*\.zhihu\.com\//i"></textarea></label>
       <div id="trigger-errors" class="trigger-errors hidden"></div>
     </section>

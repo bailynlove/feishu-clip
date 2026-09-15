@@ -443,3 +443,47 @@ test('aiDigestProviderOptions：默认首项 + 命名 provider，列表缺失时
   assert.deepEqual(aiDigestProviderOptions(undefined), [{ value: '', label: '默认' }], 'bridge 拿不到列表降级为仅默认');
   assert.deepEqual(aiDigestProviderOptions([]), [{ value: '', label: '默认' }]);
 });
+
+// ——— 触发规则预设气泡（#101）：全局键 triggerPresets，[{ id, name, rule }]；点击追加、另存、删除 ———
+
+import { TRIGGER_PRESETS_KEY, normalizeTriggerPresets, addTriggerPreset, removeTriggerPreset, appendTriggerRule } from '../src/extension/options-state.js';
+
+test('TRIGGER_PRESETS_KEY 是 chrome.storage.local 的全局键名', () => {
+  assert.equal(TRIGGER_PRESETS_KEY, 'triggerPresets');
+});
+
+test('normalizeTriggerPresets：非数组/非法条目归一为空，合法条目去空白保留', () => {
+  assert.deepEqual(normalizeTriggerPresets(undefined), []);
+  assert.deepEqual(normalizeTriggerPresets('x'), []);
+  assert.deepEqual(normalizeTriggerPresets([null, { name: 42, rule: 'r' }, { name: 'n' }, { name: ' ', rule: 'r' }, { name: 'n', rule: ' ' }]), []);
+  const [kept] = normalizeTriggerPresets([{ id: 'a', name: ' 论文站 ', rule: ' arxiv ' }]);
+  assert.deepEqual(kept, { id: 'a', name: '论文站', rule: 'arxiv' });
+  const [generated] = normalizeTriggerPresets([{ name: 'n', rule: 'r' }]);
+  assert.ok(typeof generated.id === 'string' && generated.id, '缺 id 补生成');
+});
+
+test('addTriggerPreset：名称/规则去空白后追加；空名/空规则/重名拒绝（返回 null）', () => {
+  const list = addTriggerPreset([], { name: ' 论文 ', rule: ' https://arxiv.org/ ' });
+  assert.equal(list.length, 1);
+  assert.equal(list[0].name, '论文');
+  assert.equal(list[0].rule, 'https://arxiv.org/');
+  assert.ok(list[0].id, '生成 id');
+  assert.equal(addTriggerPreset([], { name: '', rule: 'r' }), null, '空名拒绝');
+  assert.equal(addTriggerPreset([], { name: 'n', rule: '  ' }), null, '空规则拒绝');
+  assert.equal(addTriggerPreset(list, { name: '论文', rule: 'other' }), null, '重名拒绝');
+  assert.equal(addTriggerPreset(list, { name: '另一个', rule: 'r2' }).length, 2, '正常追加');
+});
+
+test('removeTriggerPreset：按 id 删除，未知 id 原样返回', () => {
+  const list = [{ id: 'a', name: 'n1', rule: 'r1' }, { id: 'b', name: 'n2', rule: 'r2' }];
+  assert.deepEqual(removeTriggerPreset(list, 'a'), [{ id: 'b', name: 'n2', rule: 'r2' }]);
+  assert.deepEqual(removeTriggerPreset(list, 'zzz'), list);
+});
+
+test('appendTriggerRule：一行一条追加；空文本直用规则；规则空白不动文本', () => {
+  assert.equal(appendTriggerRule('', 'https://arxiv.org/'), 'https://arxiv.org/');
+  assert.equal(appendTriggerRule('  ', 'https://arxiv.org/'), 'https://arxiv.org/');
+  assert.equal(appendTriggerRule('a\nb', 'c'), 'a\nb\nc');
+  assert.equal(appendTriggerRule('a\n', 'c'), 'a\nc', '尾随换行不叠加空行');
+  assert.equal(appendTriggerRule('a', '  '), 'a', '空白规则不动');
+});

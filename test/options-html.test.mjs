@@ -253,3 +253,19 @@ test('字体层级统一：区大标题 > 小节标题 > 正文控件；开关�
   assert.ok(form, '应能截取 pc-form 区域');
   assert.ok(!form[1].includes('ps-switch-label'), 'pc-form 内不应再有偏大的开关文字（已并入小节标题/描述）');
 });
+
+// ——— 触发规则预设气泡（#101）：气泡在输入框上方；名称+规则两字段；保存为新预设按钮 + 内联名称表单 ———
+
+test('触发规则预设气泡区位于 triggers 输入框上方，含保存按钮与内联名称表单 (#101)', () => {
+  const bar = html.indexOf('id="trigger-presets"');
+  const field = html.indexOf('id="f-triggers"');
+  assert.ok(bar > -1 && field > -1 && bar < field, '气泡区 #trigger-presets 应在 #f-triggers 上方');
+  assert.ok(html.includes('id="trigger-preset-save"'), '应有「保存为新预设」按钮');
+  const formMatch = html.match(/<div[^>]*id="trigger-preset-form"[^>]*class="([^"]*)"[^>]*>([\s\S]*?)<\/div>/)
+    ?? html.match(/<div[^>]*class="([^"]*)"[^>]*id="trigger-preset-form"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(formMatch, '应有内联名称表单 #trigger-preset-form');
+  assert.ok(formMatch[1].includes('hidden'), '名称表单初始隐藏');
+  assert.ok(formMatch[2].includes('id="trigger-preset-name"'), '表单含名称输入框');
+  assert.ok(formMatch[2].includes('id="trigger-preset-confirm"'), '表单含确认按钮');
+  assert.ok(formMatch[2].includes('id="trigger-preset-cancel"'), '表单含取消按钮');
+});

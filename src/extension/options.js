@@ -6,6 +6,7 @@ import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireD
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, variableRowNames, digestFileHintNeeded,
+  TRIGGER_PRESETS_KEY, normalizeTriggerPresets, addTriggerPreset, removeTriggerPreset, appendTriggerRule,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
@@ -420,8 +421,8 @@ function showTriggerErrors(errors) {
   $('#f-triggers').classList.add('invalid');
 }
 
-$('#f-triggers').addEventListener('input', () => {
-  const text = $('#f-triggers').value;
+// 触发文本的统一入口：校验 → 非法存草稿并阻止保存 / 合法清草稿并落预设（气泡追加与手输共用）
+function applyTriggersText(text) {
   const errors = validateTriggers(text);
   if (errors.length > 0) {
     triggerDrafts.set(editingId, text);
@@ -432,6 +433,74 @@ $('#f-triggers').addEventListener('input', () => {
   triggerDrafts.delete(editingId);
   clearTriggerErrors();
   applyMutation(updatePreset(state, editingId, { triggers: parseTriggers(text) }), { quiet: true });
+}
+
+$('#f-triggers').addEventListener('input', () => applyTriggersText($('#f-triggers').value));
+
+// ——— 触发规则预设气泡（#101）：全局键 triggerPresets 直读直写 chrome.storage.local
+// （读取未搭 GET_SETTINGS 便车；写入与 aiDigestInstruction 同为 options 页直写）；
+// 内存 triggerPresets 是唯一事实源，变更后整体写回 ———
+let triggerPresets = [];
+
+function renderTriggerPresets() {
+  const box = $('#trigger-presets');
+  box.textContent = '';
+  if (triggerPresets.length === 0) {
+    const hint = document.createElement('span');
+    hint.className = 'trigger-empty';
+    hint.textContent = '暂无预设，点击气泡可把规则追加到下方输入框';
+    box.append(hint);
+    return;
+  }
+  for (const preset of triggerPresets) {
+    const chip = document.createElement('span');
+    chip.className = 'trigger-chip';
+    const appendBtn = document.createElement('button');
+    appendBtn.className = 'trigger-chip-add';
+    appendBtn.type = 'button';
+    appendBtn.textContent = preset.name;
+    appendBtn.title = preset.rule;
+    appendBtn.addEventListener('click', () => {
+      $('#f-triggers').value = appendTriggerRule($('#f-triggers').value, preset.rule);
+      applyTriggersText($('#f-triggers').value);
+    });
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'trigger-chip-x';
+    removeBtn.type = 'button';
+    removeBtn.textContent = '×';
+    removeBtn.setAttribute('aria-label', `删除预设 ${preset.name}`);
+    removeBtn.addEventListener('click', async () => {
+      triggerPresets = removeTriggerPreset(triggerPresets, preset.id);
+      await chrome.storage.local.set({ [TRIGGER_PRESETS_KEY]: triggerPresets });
+      renderTriggerPresets();
+    });
+    chip.append(appendBtn, removeBtn);
+    box.append(chip);
+  }
+}
+
+// 保存为新预设：规则取当前 triggers 输入框内容（可多行——一个预设可携带一组规则，点击追加时
+// 一行一条落进输入框，为 #95 的站点清单预设铺路）；名称/规则空或重名拒绝（addTriggerPreset 返回 null）
+$('#trigger-preset-save').addEventListener('click', () => {
+  $('#trigger-preset-form').classList.remove('hidden');
+  $('#trigger-preset-name').focus();
+});
+$('#trigger-preset-cancel').addEventListener('click', () => {
+  $('#trigger-preset-form').classList.add('hidden');
+  $('#trigger-preset-name').value = '';
+});
+$('#trigger-preset-confirm').addEventListener('click', async () => {
+  const next = addTriggerPreset(triggerPresets, { name: $('#trigger-preset-name').value, rule: $('#f-triggers').value });
+  if (!next) {
+    toast('保存失败：名称与规则都不能为空，且名称不能重复。', 'error');
+    return;
+  }
+  triggerPresets = next;
+  await chrome.storage.local.set({ [TRIGGER_PRESETS_KEY]: triggerPresets });
+  $('#trigger-preset-form').classList.add('hidden');
+  $('#trigger-preset-name').value = '';
+  renderTriggerPresets();
+  toast('已保存为规则预设。', 'success');
 });
 
 // ——— 表单字段：改动即保存 ———
@@ -915,6 +984,9 @@ async function init() {
   initBridge();
   initAiSection(settings.aiDigestInstruction);
   initCollapsibleSections(settings.optionsUiCollapsed);
+  // 触发规则预设气泡（#101）：直读 chrome.storage.local，归一后渲染
+  triggerPresets = normalizeTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
+  renderTriggerPresets();
   // 开关为开时展开日志区并自动加载一次（缺省 false 不加载）
   setDeveloperMode(settings.developerMode === true);
 }
