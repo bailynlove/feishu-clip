@@ -209,9 +209,11 @@ export class PersistentJobStore {
         }
         // pdf 失败重试（#65 弹窗「重试 PDF」）：终态 failed 的 pdf job 被同键重新提交时
         // 复位重排队，幂等复用同一 job 记录；clip 侧维持原语义（终态重发不复活）。
+        // expired 同属可重试终态（#99 续）：凭据回传超时提示用户「重开弹窗重试」，
+        // 若不复位则重试幂等空转、popup 永远停在超时文案。
         // 重试可能换了目录（用户在弹窗重选），folderToken 以本次提交为准。
         // bytes 型重试（#68）：以新声明为准并回落 awaiting_bytes，等扩展重新喂字节
-        if (kind === JOB_KIND.PDF && existing.status === JOB_STATUS.FAILED) {
+        if (kind === JOB_KIND.PDF && (existing.status === JOB_STATUS.FAILED || existing.status === JOB_STATUS.EXPIRED)) {
           existing.status = kindStrategy(kind).initialStatus(normalizedPdfSource);
           existing.pdfSource = normalizedPdfSource;
           existing.error = null;

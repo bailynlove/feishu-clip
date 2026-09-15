@@ -579,6 +579,38 @@ test('failed 的 pdf job 同键重提交复位重排队（弹窗「重试 PDF」
   });
 });
 
+test('expired 的 pdf job 同键重提交同样复位重排队（凭据回传超时后点「重试 PDF」）', async () => {
+  let now = 1_000;
+  await withStore(async ({ store }) => {
+    // 真实事故路径（#99 续）：url 型下载撞 403 → awaiting_bytes 等凭据 → 独立短 TTL 到点 expired。
+    // 用户按错误提示「重开弹窗重试」点「重试 PDF」，同键重提交必须复位重排，
+    // 否则幂等空转、popup 永远停在超时文案
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    await store.claim('attempt-1', 'worker-a', 'pdf');
+    await store.awaitBytes('attempt-1', 'worker-a');
+    now += 5_001;
+    const recovered = await store.recoverExpired();
+    assert.deepEqual(recovered.expired, ['attempt-1']);
+    assert.equal((await store.get('attempt-1', 'pdf')).status, 'expired');
+
+    const retried = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a', kind: 'pdf', pdfSource: PDF_SOURCE });
+    assert.equal(retried.retried, true, 'expired pdf 重提交应标记复位重排');
+    assert.equal(retried.job.status, 'queued', 'url 型复位回队列由 executor 重下');
+    assert.equal(retried.job.error, null);
+    assert.equal(retried.job.retryCount, 1);
+    assert.equal((await store.list()).length, 1, '复用同一 job 记录，不新增');
+
+    // bytes 型对照：expired 后以新声明重提交 → 回落 awaiting_bytes 等扩展重新喂字节
+    await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    now += 5_001;
+    await store.recoverExpired();
+    assert.equal((await store.get('attempt-2', 'pdf')).status, 'expired');
+    const bytesRetried = await store.submit({ attemptId: 'attempt-2', sourceUrl: 'https://example.test/b', kind: 'pdf', pdfSource: BYTES_SOURCE });
+    assert.equal(bytesRetried.retried, true);
+    assert.equal(bytesRetried.job.status, 'awaiting_bytes');
+  }, { now: () => now, jobTtlMs: 60_000, awaitingBytesTtlMs: 5_000 });
+});
+
 test('存量无 kind 字段的 job 读取时按 clip 迁移', async () => {
   await withStore(async ({ store, filePath }) => {
     await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/a' });
