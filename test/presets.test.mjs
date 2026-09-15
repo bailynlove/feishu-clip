@@ -150,7 +150,7 @@ test('resolvePdfDrive：完整结构透传 folderToken 与 folderName（picker �
 
 // ——— AI 摘要预设字段（#75）：读取时迁移，非法值一律归一为 null ———
 
-import { DEFAULT_DIGEST_INSTRUCTION, resolveDigest, resolveDigestInstruction } from '../src/extension/presets.js';
+import { DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, resolveDigest, resolveDigestInstruction } from '../src/extension/presets.js';
 
 test('createDefaultPreset 的 digest 缺省为 null（关闭态）', () => {
   assert.equal(createDefaultPreset().digest, null);
@@ -216,4 +216,27 @@ test('resolveDigestInstruction：预设级 > 全局 > 内置默认；空串/非�
   assert.equal(resolveDigestInstruction(undefined, '全局指令'), '全局指令');
   assert.equal(resolveDigestInstruction('  ', null), DEFAULT_DIGEST_INSTRUCTION, '空白全局都未设置回落内置默认');
   assert.equal(resolveDigestInstruction(null, undefined), DEFAULT_DIGEST_INSTRUCTION);
+});
+
+// ——— readDigestConfig：设置页编辑器读取路径——开关只折叠不清空，关闭态也要读得出已存配置 ———
+
+test('readDigestConfig：从未配置（缺字段/null/非对象）返回 null', () => {
+  for (const preset of [{}, { digest: null }, { digest: 'on' }, null, undefined]) {
+    assert.equal(readDigestConfig(preset), null, JSON.stringify(preset));
+  }
+});
+
+test('readDigestConfig：关闭态保留已存配置（enabled:false 不归 null）', () => {
+  const stored = { enabled: false, instruction: '我的指令 {{@file}}', provider: 'glm', mode: 'inline', docTitleTemplate: '摘要 · {{date}}' };
+  assert.deepEqual(readDigestConfig({ digest: stored }), stored, '全字段原样读出');
+  assert.equal(resolveDigest({ digest: stored }), null, '运行时仍读作关闭（不跑摘要）');
+});
+
+test('readDigestConfig：字段归一与 resolveDigest 同口径，docTitleTemplate 保留原始空串', () => {
+  assert.deepEqual(readDigestConfig({ digest: { enabled: true } }), {
+    enabled: true, instruction: '', provider: '', mode: 'subdoc', docTitleTemplate: '',
+  }, '缺省字段归一；docTitleTemplate 不回落默认（编辑器靠 placeholder 展示）');
+  assert.equal(readDigestConfig({ digest: { enabled: true, provider: ' xx ' } }).provider, 'xx', 'provider 去空白');
+  assert.equal(readDigestConfig({ digest: { enabled: true, mode: 'weird' } }).mode, 'subdoc', '非法 mode 归一 subdoc');
+  assert.equal(readDigestConfig({ digest: { enabled: 'yes' } }).enabled, false, '非布尔 enabled 读作关');
 });

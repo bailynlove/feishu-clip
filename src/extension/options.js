@@ -11,7 +11,7 @@ import {
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
   COLLAPSIBLE_SECTIONS, DEFAULT_AI_PROVIDER_NAME, OPTIONS_COLLAPSE_KEY, normalizeCollapsedSections, resolveAiProviderSelection, setSectionCollapsed,
 } from './options-state.js';
-import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, resolveImageMode, resolvePdfDrive } from './presets.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -254,10 +254,11 @@ function syncEditor() {
   $('#f-pdf-folder').classList.toggle('hidden', !pdfEnabled);
   $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
   if (!pdfEnabled) closeDrivePicker();
-  // AI 摘要（#75）：读取时迁移——缺字段/非法 digest 一律显示为关；开启时才显示预设级指令框
-  // 与 provider 选用行（#78；选项随 bridge 列表重建，悬空引用补「已删除」幽灵项）。
+  // AI 摘要（#75）：开关 = 折叠/展开设置区，关闭不清空内容——回填走 readDigestConfig
+  // （关闭态也读得出已存指令/provider/mode），运行时判定才走 resolveDigest。
+  // provider 选用行（#78；选项随 bridge 列表重建，悬空引用补「已删除」幽灵项）。
   // 呈现方式分段（#98）：开启才显示；子文档标题模板行仅 subdoc 显示
-  const digest = resolveDigest(preset);
+  const digest = readDigestConfig(preset);
   const digestEnabled = digest?.enabled === true;
   $('#f-digest').classList.toggle('on', digestEnabled);
   $('#f-digest').setAttribute('aria-pressed', String(digestEnabled));
@@ -468,27 +469,25 @@ $('#f-pdf-drive').addEventListener('click', () => {
   syncEditor();
 });
 
-// AI 摘要预设开关（#75）：开启写完整 digest 结构（instruction 空串 = 用全局指令；mode/
-// docTitleTemplate 缺省 subdoc/Digest，#98），关闭归一为 null；随预设整体经 SAVE_PRESETS 写回
+// AI 摘要预设开关（#75）：开关 = 折叠/展开设置区，与弹窗的临时摘要开关同语义——切换只翻转
+// enabled 标志，instruction/provider/mode/docTitleTemplate 全部保留，不再归一为 null；
+// 随预设整体经 SAVE_PRESETS 写回
 $('#f-digest').addEventListener('click', () => {
-  const current = resolveDigest(editingPreset());
-  const enabled = !(current?.enabled === true);
+  const current = readDigestConfig(editingPreset());
   applyMutation(updatePreset(state, editingId, {
-    digest: enabled
-      ? {
-          enabled: true,
-          instruction: current?.instruction ?? '',
-          provider: current?.provider ?? '',
-          mode: current?.mode ?? 'subdoc',
-          docTitleTemplate: current?.docTitleTemplate ?? DEFAULT_DIGEST_DOC_TITLE,
-        }
-      : null,
+    digest: {
+      enabled: !(current?.enabled === true),
+      instruction: current?.instruction ?? '',
+      provider: current?.provider ?? '',
+      mode: current?.mode ?? 'subdoc',
+      docTitleTemplate: current?.docTitleTemplate ?? DEFAULT_DIGEST_DOC_TITLE,
+    },
   }));
   syncEditor();
 });
-// digest 单字段更新（#98）：从当前预设解析值展开覆盖单字段，保住 mode/docTitleTemplate 等兄弟字段
+// digest 单字段更新（#98）：从当前预设已存配置展开覆盖单字段，保住 mode/docTitleTemplate 等兄弟字段
 function patchDigest(patch) {
-  const current = resolveDigest(editingPreset());
+  const current = readDigestConfig(editingPreset());
   applyMutation(updatePreset(state, editingId, {
     digest: {
       enabled: true,
@@ -532,7 +531,7 @@ $('#f-digest-doctitle').addEventListener('input', () => {
 // provider 时补一个「（已删除）」幽灵项，避免选择被静默改写
 function renderDigestProviderOptions() {
   const select = $('#f-digest-provider');
-  const current = resolveDigest(editingPreset())?.provider ?? '';
+  const current = readDigestConfig(editingPreset())?.provider ?? '';
   const options = aiDigestProviderOptions(aiProviders);
   if (current && !options.some((option) => option.value === current)) {
     options.push({ value: current, label: `${current}（已删除）` });

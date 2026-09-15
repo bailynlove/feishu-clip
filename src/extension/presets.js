@@ -13,7 +13,8 @@ export function createDefaultPreset(overrides = {}) {
     triggers: [],
     // PDF 存云盘（#65）：null | { enabled, folderToken, folderName }；folderToken 为 null 即云盘根目录
     pdfDrive: null,
-    // AI 摘要（#75）：null | { enabled: true, instruction }；instruction 空串 = 用全局指令
+    // AI 摘要（#75）：null | { enabled, instruction, provider, mode, docTitleTemplate }；
+    // enabled:false = 关闭但保留配置（设置页开关只折叠设置区，不清空内容）；instruction 空串 = 用全局指令
     digest: null,
     ...overrides,
   };
@@ -50,22 +51,31 @@ export function resolvePdfDrive(preset) {
   return { enabled: true, ...createDriveFolder(value) };
 }
 
-// AI 摘要预设字段（#75）：读取时迁移——缺字段/非法值一律归一为 null；
-// enabled:true + instruction:'' = 开启但用全局指令（空串语义在 resolveDigestInstruction 解析）；
+// AI 摘要预设字段（#75）：读取时迁移——缺字段/非对象一律归一为 null（= 从未配置）；
+// enabled:false 保留其余字段原样读出（设置页开关只折叠设置区不清空内容，本函数即编辑器读取路径）；
+// instruction 空串 = 开启但用全局指令（空串语义在 resolveDigestInstruction 解析）；
 // provider（#78）：选用的 AI provider 名，空串/缺省 = 默认 provider；
-// mode（#98）：'inline' 建档前内联 / 'subdoc' 建档后写入 Digest 子文档，缺省读作 subdoc（含存量预设）
-export function resolveDigest(preset) {
+// mode（#98）：'inline' 建档前内联 / 'subdoc' 建档后写入 Digest 子文档，缺省读作 subdoc（含存量预设）；
+// docTitleTemplate 保留原始空串（编辑器靠 placeholder 展示默认；运行时回落在 resolveDigest）
+export function readDigestConfig(preset) {
   const value = preset?.digest;
-  if (!value || typeof value !== 'object' || value.enabled !== true) return null;
+  if (!value || typeof value !== 'object') return null;
   return {
-    enabled: true,
+    enabled: value.enabled === true,
     instruction: typeof value.instruction === 'string' ? value.instruction : '',
     provider: typeof value.provider === 'string' ? value.provider.trim() : '',
     mode: value.mode === 'inline' ? 'inline' : 'subdoc',
-    docTitleTemplate:
-      typeof value.docTitleTemplate === 'string' && value.docTitleTemplate.trim()
-        ? value.docTitleTemplate
-        : DEFAULT_DIGEST_DOC_TITLE,
+    docTitleTemplate: typeof value.docTitleTemplate === 'string' ? value.docTitleTemplate : '',
+  };
+}
+
+// 运行时判定（要不要跑摘要）：未开启一律 null；开启时 docTitleTemplate 空白回落默认 Digest
+export function resolveDigest(preset) {
+  const config = readDigestConfig(preset);
+  if (config?.enabled !== true) return null;
+  return {
+    ...config,
+    docTitleTemplate: config.docTitleTemplate.trim() ? config.docTitleTemplate : DEFAULT_DIGEST_DOC_TITLE,
   };
 }
 
