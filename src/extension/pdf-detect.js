@@ -11,6 +11,17 @@
         const match = page.pathname.match(/^\/abs\/([^/]+)/);
         if (match && match[1]) return { url: `${page.origin}/pdf/${match[1]}`, name: `${match[1]}.pdf` };
       }
+      // Hugging Face blob 查看器（#95）：/[datasets/]<org>/<repo>/blob/<ref>/<path>.pdf →
+      // /resolve/ 直链（302 到 CDN，response-content-type=application/pdf）；名字取路径末段解码
+      if (page.hostname === 'huggingface.co') {
+        const match = page.pathname.match(/^\/(datasets\/)?([^/]+\/[^/]+)\/blob\/([^/]+)\/(.+?\.pdf)$/i);
+        if (match) {
+          const [, datasets = '', repo, ref, filePath] = match;
+          let name = filePath.split('/').pop() || null;
+          try { name = name ? decodeURIComponent(name) : null; } catch { /* 保留未解码原名 */ }
+          return { url: `${page.origin}/${datasets}${repo}/resolve/${ref}/${filePath}`, name };
+        }
+      }
       if (citationPdfUrl) {
         const pdf = new URL(citationPdfUrl, page);
         if (pdf.protocol === 'http:' || pdf.protocol === 'https:') {

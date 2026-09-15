@@ -521,6 +521,17 @@
           const match = page.pathname.match(/^\/abs\/([^/]+)/);
           if (match && match[1]) return { url: `${page.origin}/pdf/${match[1]}`, name: `${match[1]}.pdf` };
         }
+        // Hugging Face blob 查看器（#95）：/[datasets/]<org>/<repo>/blob/<ref>/<path>.pdf →
+        // /resolve/ 直链（302 到 CDN，response-content-type=application/pdf）；名字取路径末段解码
+        if (page.hostname === 'huggingface.co') {
+          const match = page.pathname.match(/^\/(datasets\/)?([^/]+\/[^/]+)\/blob\/([^/]+)\/(.+?\.pdf)$/i);
+          if (match) {
+            const [, datasets = '', repo, ref, filePath] = match;
+            let name = filePath.split('/').pop() || null;
+            try { name = name ? decodeURIComponent(name) : null; } catch { /* 保留未解码原名 */ }
+            return { url: `${page.origin}/${datasets}${repo}/resolve/${ref}/${filePath}`, name };
+          }
+        }
         if (citationPdfUrl) {
           const pdf = new URL(citationPdfUrl, page);
           if (pdf.protocol === 'http:' || pdf.protocol === 'https:') {
@@ -541,6 +552,20 @@
         const isArxiv = page.hostname === 'arxiv.org' || page.hostname.endsWith('.arxiv.org');
         return isArxiv && /^\/abs\/[^/]+/.test(page.pathname);
       } catch { return false; }
+    }
+
+    // Hugging Face blob 页标题（#95）：document.title 是「file.pdf · org/repo at ref」，
+    // 论文语义在文件名——取路径末段去 .pdf 后缀的词干（与 detectMainPdf 的 HF 规则同形，各自维护）
+    function hfBlobTitle(pageUrl) {
+      try {
+        const page = new URL(pageUrl);
+        if (page.hostname !== 'huggingface.co') return null;
+        const match = page.pathname.match(/^\/(datasets\/)?[^/]+\/[^/]+\/blob\/[^/]+\/(.+?\.pdf)$/i);
+        if (!match) return null;
+        let stem = match[2].split('/').pop().replace(/\.pdf$/i, '');
+        try { stem = decodeURIComponent(stem); } catch { /* 保留未解码原名 */ }
+        return stem || null;
+      } catch { return null; }
     }
 
     // frameset 页面（90 年代老站常见）：主文档 document.body 为空/null，正文在同源子 frame 里
@@ -575,6 +600,7 @@
     // 识别失败不阻塞主流程：pdf 为 null 时弹窗不显示「PDF 存云盘」相关入口
     const citationPdf = document.querySelector('meta[name="citation_pdf_url"]')?.getAttribute('content') ?? null;
     const pdf = detectMainPdf(location.href, citationPdf);
-    return { title: document.title.trim() || '网页剪藏', sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes, pdf };
+    const title = hfBlobTitle(location.href) || document.title.trim() || '网页剪藏';
+    return { title, sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes, pdf };
   } catch (error) { return { error: error.message }; }
 })()

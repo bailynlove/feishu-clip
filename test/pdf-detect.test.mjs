@@ -68,6 +68,23 @@ test('未识别（无站点规则无 meta）返回 pdf:null；非 http(s) meta �
   }
 });
 
+test('Hugging Face blob 页识别主 PDF（#95）：blob → resolve 直链，名字取路径末段解码', async () => {
+  const result = await runDetect({ pageUrl: 'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf', head: { ok: true, contentLength: '3665665' } });
+  assert.equal(result.pdf.url, 'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/resolve/main/DeepSeek_V41_Tech_Report.pdf');
+  assert.equal(result.pdf.name, 'DeepSeek_V41_Tech_Report.pdf');
+  assert.equal(result.pdf.sizeBytes, 3665665);
+});
+
+test('Hugging Face：datasets 与嵌套目录同形命中；非 .pdf 的 blob / tree 页不误报', async () => {
+  const ds = await runDetect({ pageUrl: 'https://huggingface.co/datasets/org/repo/blob/main/sub/dir/paper%20final.pdf' });
+  assert.equal(ds.pdf.url, 'https://huggingface.co/datasets/org/repo/resolve/main/sub/dir/paper%20final.pdf');
+  assert.equal(ds.pdf.name, 'paper final.pdf', '文件名按 URL 末段解码');
+  const md = await runDetect({ pageUrl: 'https://huggingface.co/org/repo/blob/main/README.md' });
+  assert.equal(md.pdf, null, '非 .pdf 文件不识别');
+  const tree = await runDetect({ pageUrl: 'https://huggingface.co/org/repo/tree/main' });
+  assert.equal(tree.pdf, null, '目录页不识别');
+});
+
 test('页面异常（location 等不可用）也安全返回 pdf:null', async () => {
   const context = vm.createContext({ document: null, location: null, URL, fetch: async () => { throw new Error('nope'); } });
   const result = await vm.runInContext(detectCode, context);

@@ -1052,3 +1052,11 @@ test('普通页面无 meta：pdf 为 null，不影响正文提取', async () => 
   assert.equal(result.pdf, null);
   assert.ok(result.markdown.includes('足够长的正文内容'));
 });
+
+test('Hugging Face blob 页（#95）：识别 resolve 直链 PDF，标题取文件名词干', async () => {
+  const result = await runExtractor(pdfDoc(), 'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf');
+  assert.equal(result.error, undefined);
+  assert.equal(result.pdf.url, 'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/resolve/main/DeepSeek_V41_Tech_Report.pdf');
+  assert.equal(result.pdf.name, 'DeepSeek_V41_Tech_Report.pdf');
+  assert.equal(result.title, 'DeepSeek_V41_Tech_Report', 'blob 页标题是「file.pdf · org/repo at ref」，论文语义在文件名词干');
+});
