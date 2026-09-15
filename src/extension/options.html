@@ -124,51 +124,59 @@
     </section>
 
     <section class="pc-sub">
-      <h3 class="pc-sub-title">PDF 保存</h3>
-      <button class="ps-switch-row" id="f-pdf-drive" type="button" aria-pressed="false">
-        <span class="ps-switch-text"><span class="ps-switch-label">识别到论文主 PDF 时顺带存入云盘</span><span class="ps-switch-sub">arXiv 等论文页的主 PDF 将上传到所选云盘目录；弹窗可按次临时覆盖</span></span>
-        <span class="ps-switch"></span>
-      </button>
-      <button class="ps-target hidden" id="f-pdf-folder" type="button">
-        <span id="f-pdf-folder-icon">🗂</span><span class="ps-target-text" id="f-pdf-folder-text">云盘根目录（我的空间）</span><span class="ps-target-edit">更改 ›</span>
-      </button>
-      <div id="drive-picker-panel" class="hidden">
-        <div id="drive-picker">
-          <nav id="dp-crumbs" class="crumbs hidden"></nav>
-          <div id="dp-status" class="picker-status"></div>
-          <ul id="dp-list" class="picker-list"></ul>
-          <button id="dp-more" class="link hidden" type="button">加载更多</button>
-          <div class="picker-actions">
-            <button id="dp-back" class="link hidden" type="button">返回上级</button>
-            <button id="dp-retry" class="link hidden" type="button">重试</button>
-            <button id="dp-save" class="ps-btn primary picker-confirm" type="button" disabled>设为该预设的 PDF 目录</button>
+      <div class="pc-sub-head">
+        <h3 class="pc-sub-title">PDF 保存</h3>
+        <button class="ps-switch-row pc-sub-switch" id="f-pdf-drive" type="button" aria-pressed="false" aria-label="PDF 保存开关">
+          <span class="ps-switch"></span>
+        </button>
+      </div>
+      <p class="ps-desc">识别到论文主 PDF 时顺带存入云盘：arXiv 等论文页的主 PDF 将上传到所选云盘目录；弹窗可按次临时覆盖。</p>
+      <div class="pc-sub-body hidden" id="f-pdf-drive-body">
+        <button class="ps-target" id="f-pdf-folder" type="button">
+          <span id="f-pdf-folder-icon">🗂</span><span class="ps-target-text" id="f-pdf-folder-text">云盘根目录（我的空间）</span><span class="ps-target-edit">更改 ›</span>
+        </button>
+        <div id="drive-picker-panel" class="hidden">
+          <div id="drive-picker">
+            <nav id="dp-crumbs" class="crumbs hidden"></nav>
+            <div id="dp-status" class="picker-status"></div>
+            <ul id="dp-list" class="picker-list"></ul>
+            <button id="dp-more" class="link hidden" type="button">加载更多</button>
+            <div class="picker-actions">
+              <button id="dp-back" class="link hidden" type="button">返回上级</button>
+              <button id="dp-retry" class="link hidden" type="button">重试</button>
+              <button id="dp-save" class="ps-btn primary picker-confirm" type="button" disabled>设为该预设的 PDF 目录</button>
+            </div>
           </div>
+          <details id="drive-advanced">
+            <summary>高级设置：手动输入目录 token</summary>
+            <p class="ps-desc">与可视化选择使用同一套 Bridge 验证语义；留空表示云盘根目录。</p>
+            <label class="ps-field"><span class="ps-label">云盘目录 token</span><input id="drive-token" class="ps-input" placeholder="fldcn…"></label>
+            <button id="save-drive-target" class="ps-btn primary pair-submit" type="button">验证并保存</button>
+          </details>
         </div>
-        <details id="drive-advanced">
-          <summary>高级设置：手动输入目录 token</summary>
-          <p class="ps-desc">与可视化选择使用同一套 Bridge 验证语义；留空表示云盘根目录。</p>
-          <label class="ps-field"><span class="ps-label">云盘目录 token</span><input id="drive-token" class="ps-input" placeholder="fldcn…"></label>
-          <button id="save-drive-target" class="ps-btn primary pair-submit" type="button">验证并保存</button>
-        </details>
       </div>
     </section>
 
     <section class="pc-sub">
-      <h3 class="pc-sub-title">AI 摘要</h3>
-      <button class="ps-switch-row" id="f-digest" type="button" aria-pressed="false">
-        <span class="ps-switch-text"><span class="ps-switch-label">剪藏时生成 AI 摘要</span><span class="ps-switch-sub">由本机 Bridge 调用配置的 AI API 生成；正文模板中的 {{digest}} 占位符原位插入，否则摘要排在正文之前</span></span>
-        <span class="ps-switch"></span>
-      </button>
-      <label class="ps-field hidden" id="f-digest-provider-row"><span class="ps-label">AI provider</span><select id="f-digest-provider" class="ps-input"></select><span class="ps-desc hidden" id="f-digest-provider-hint">未读取到 provider 列表，仅可选「默认」</span></label>
-      <div class="ps-field hidden" id="f-digest-mode-row"><span class="ps-label">摘要呈现方式</span>
-        <div class="ps-seg" id="f-digest-mode">
-          <button class="ps-seg-opt" data-value="subdoc" type="button">子文档</button>
-          <button class="ps-seg-opt" data-value="inline" type="button">内联</button>
-        </div>
-        <span class="ps-desc">子文档：摘要在建档后写入「Digest」子文档，正文 {{digest}} 渲染为子文档链接；内联：建档前生成，摘要直接写进正文。</span>
+      <div class="pc-sub-head">
+        <h3 class="pc-sub-title">AI 摘要</h3>
+        <button class="ps-switch-row pc-sub-switch" id="f-digest" type="button" aria-pressed="false" aria-label="AI 摘要开关">
+          <span class="ps-switch"></span>
+        </button>
       </div>
-      <label class="ps-field hidden" id="f-digest-doctitle-row"><span class="ps-label">摘要子文档标题</span><input id="f-digest-doctitle" class="ps-input mono" autocomplete="off" placeholder="Digest"><span class="ps-desc">支持 {{title}} 等模板变量；留空用默认标题 Digest。</span></label>
-      <div class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea><div class="ps-vars" data-field="f-digest-instruction" data-vars="@file"></div><span class="ps-desc">{{@file}}：检出 PDF 时随请求一并发给 AI；无 PDF 时降级为纯文本摘要。</span><span class="ps-desc hidden" id="f-digest-file-hint">该预设未开「PDF 存云盘」，{{@file}} 没有 PDF 可附，摘要将降级为纯文本。</span></div>
+      <p class="ps-desc">剪藏时由本机 Bridge 调用配置的 AI API 生成摘要；正文模板中的 {{digest}} 占位符原位插入，否则摘要排在正文之前。</p>
+      <div class="pc-sub-body hidden" id="f-digest-body">
+        <label class="ps-field hidden" id="f-digest-provider-row"><span class="ps-label">AI provider</span><select id="f-digest-provider" class="ps-input"></select><span class="ps-desc hidden" id="f-digest-provider-hint">未读取到 provider 列表，仅可选「默认」</span></label>
+        <div class="ps-field hidden" id="f-digest-mode-row"><span class="ps-label">摘要呈现方式</span>
+          <div class="ps-seg" id="f-digest-mode">
+            <button class="ps-seg-opt" data-value="subdoc" type="button">子文档</button>
+            <button class="ps-seg-opt" data-value="inline" type="button">内联</button>
+          </div>
+          <span class="ps-desc">子文档：摘要在建档后写入「Digest」子文档，正文 {{digest}} 渲染为子文档链接；内联：建档前生成，摘要直接写进正文。</span>
+        </div>
+        <label class="ps-field hidden" id="f-digest-doctitle-row"><span class="ps-label">摘要子文档标题</span><input id="f-digest-doctitle" class="ps-input mono" autocomplete="off" placeholder="Digest"><span class="ps-desc">支持 {{title}} 等模板变量；留空用默认标题 Digest。</span></label>
+        <div class="ps-field hidden" id="f-digest-instruction-row"><span class="ps-label">预设摘要指令</span><textarea id="f-digest-instruction" class="ps-input mono" rows="3" placeholder="留空使用全局摘要指令"></textarea><div class="ps-vars" data-field="f-digest-instruction" data-vars="@file"></div><span class="ps-desc">{{@file}}：检出 PDF 时随请求一并发给 AI；无 PDF 时降级为纯文本摘要。</span><span class="ps-desc hidden" id="f-digest-file-hint">该预设未开「PDF 存云盘」，{{@file}} 没有 PDF 可附，摘要将降级为纯文本。</span></div>
+      </div>
     </section>
   </div>
   </details>

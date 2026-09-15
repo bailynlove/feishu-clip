@@ -56,8 +56,12 @@ test('preset editor has a PDF-drive switch, initially off', () => {
 });
 
 test('preset editor has a PDF folder row and drive picker panel (#66)', () => {
-  assert.ok(classAttr('f-pdf-folder').includes('hidden'), '目录行初始隐藏（开关默认关）');
-  assert.ok(html.includes('id="f-pdf-folder-text"'), '目录行有展示名位');
+  // 目录行/picker 面板在初始隐藏的 #f-pdf-drive-body 折叠体内（#100 跟进：开关融合小节头部控制展开）
+  const pdf = subSection('PDF 保存');
+  const body = pdf.match(/<div class="pc-sub-body hidden" id="f-pdf-drive-body">([\s\S]*)/);
+  assert.ok(body, 'PDF 保存小节应有初始隐藏的折叠体');
+  assert.ok(body[1].includes('id="f-pdf-folder"'), '目录行在折叠体内');
+  assert.ok(body[1].includes('id="f-pdf-folder-text"'), '目录行有展示名位');
   assert.ok(classAttr('drive-picker-panel').includes('hidden'), 'drive picker 面板初始隐藏');
   for (const id of ['dp-crumbs', 'dp-status', 'dp-list']) assert.ok(html.includes(`id="${id}"`), `应有 #${id}`);
   for (const id of ['dp-more', 'dp-back', 'dp-retry']) {
@@ -178,8 +182,15 @@ test('AI 高级设置含 reasoning 三态下拉（默认/开/关）（#96）', (
 // 控制小节折叠（打开才展示对应设置），字体层级 区大标题 > 小节标题 > 正文/控件 ———
 
 function subSection(title) {
-  const match = html.match(new RegExp(`<section class="pc-sub">\\s*<h3 class="pc-sub-title">${title}</h3>([\\s\\S]*?)</section>`));
-  assert.ok(match, `应有「${title}」小节（section.pc-sub > h3.pc-sub-title）`);
+  const match = html.match(new RegExp(`<section class="pc-sub">\\s*(?:<div class="pc-sub-head">\\s*)?<h3 class="pc-sub-title">${title}</h3>([\\s\\S]*?)</section>`));
+  assert.ok(match, `应有「${title}」小节（section.pc-sub，可选 .pc-sub-head > h3.pc-sub-title）`);
+  return match[1];
+}
+
+// 小节头部融合（#100 跟进）：标题与开关同一行，开关直接控制 .pc-sub-body 的展开/折叠
+function subHead(title) {
+  const match = html.match(new RegExp(`<section class="pc-sub">\\s*<div class="pc-sub-head">\\s*<h3 class="pc-sub-title">${title}</h3>([\\s\\S]*?)</div>`));
+  assert.ok(match, `「${title}」小节应有 .pc-sub-head 头部行`);
   return match[1];
 }
 
@@ -200,18 +211,26 @@ test('基本信息小节含名称/保存目标/图片模式/标题模板/正文�
   }
 });
 
-test('PDF 保存小节：开关 + 目录行 + picker 面板，目录行初始隐藏（开关折叠语义）(#100)', () => {
+test('PDF 保存小节：开关融入头部行，body 初始隐藏（开关折叠语义）(#100)', () => {
+  const head = subHead('PDF 保存');
+  assert.ok(head.includes('id="f-pdf-drive"'), '开关应在小节头部行内');
   const pdf = subSection('PDF 保存');
-  for (const id of ['f-pdf-drive', 'f-pdf-folder', 'drive-picker-panel']) {
-    assert.ok(pdf.includes(`id="${id}"`), `PDF 保存小节应含 #${id}`);
+  const body = pdf.match(/<div class="pc-sub-body hidden" id="f-pdf-drive-body">([\s\S]*)/);
+  assert.ok(body, '应有初始隐藏的 #f-pdf-drive-body');
+  for (const id of ['f-pdf-folder', 'drive-picker-panel']) {
+    assert.ok(body[1].includes(`id="${id}"`), `折叠 body 应含 #${id}`);
   }
   assert.ok(!pdf.includes('id="f-digest"'), 'AI 摘要不属于本小节');
 });
 
-test('AI 摘要小节：开关 + provider/mode/子文档标题/指令行，初始隐藏随开关展开 (#100)', () => {
+test('AI 摘要小节：开关融入头部行，body 初始隐藏（开关折叠语义）(#100)', () => {
+  const head = subHead('AI 摘要');
+  assert.ok(head.includes('id="f-digest"'), '开关应在小节头部行内');
   const ai = subSection('AI 摘要');
-  for (const id of ['f-digest', 'f-digest-provider-row', 'f-digest-mode-row', 'f-digest-doctitle-row', 'f-digest-instruction-row']) {
-    assert.ok(ai.includes(`id="${id}"`), `AI 摘要小节应含 #${id}`);
+  const body = ai.match(/<div class="pc-sub-body hidden" id="f-digest-body">([\s\S]*)/);
+  assert.ok(body, '应有初始隐藏的 #f-digest-body');
+  for (const id of ['f-digest-provider-row', 'f-digest-mode-row', 'f-digest-doctitle-row', 'f-digest-instruction-row']) {
+    assert.ok(body[1].includes(`id="${id}"`), `折叠 body 应含 #${id}`);
   }
   assert.ok(!ai.includes('id="f-triggers"'), '触发规则不属于本小节');
 });
@@ -224,13 +243,13 @@ function fontSizeOf(selector) {
   return Number(match[1]);
 }
 
-test('字体层级统一：区大标题 > 小节标题 > 正文控件；开关文字归入正文档 (#100)', () => {
+test('字体层级统一：区大标题 > 小节标题 > 正文控件；开关不再带文字 (#100)', () => {
   const h2 = fontSizeOf('.ps-card h2');
   const sub = fontSizeOf('.pc-sub-title');
   const label = fontSizeOf('.pc-form .ps-label');
-  const input = fontSizeOf('.pc-form .ps-input');
-  const switchLabel = fontSizeOf('.pc-form .ps-switch-label');
   assert.ok(h2 > sub, `区大标题(${h2}) 应大于小节标题(${sub})`);
   assert.ok(sub > label, `小节标题(${sub}) 应大于字段标签(${label})`);
-  assert.equal(switchLabel, input, `开关文字(${switchLabel}) 应与输入控件字号(${input})同档，不再偏大`);
+  const form = html.match(/<div class="pc-form">([\s\S]*?)<\/div>\s*<\/details>/);
+  assert.ok(form, '应能截取 pc-form 区域');
+  assert.ok(!form[1].includes('ps-switch-label'), 'pc-form 内不应再有偏大的开关文字（已并入小节标题/描述）');
 });

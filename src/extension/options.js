@@ -251,6 +251,7 @@ function syncEditor() {
   const pdfEnabled = pdfDrive?.enabled === true;
   $('#f-pdf-drive').classList.toggle('on', pdfEnabled);
   $('#f-pdf-drive').setAttribute('aria-pressed', String(pdfEnabled));
+  $('#f-pdf-drive-body').classList.toggle('hidden', !pdfEnabled);
   $('#f-pdf-folder').classList.toggle('hidden', !pdfEnabled);
   $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
   if (!pdfEnabled) closeDrivePicker();
@@ -262,6 +263,7 @@ function syncEditor() {
   const digestEnabled = digest?.enabled === true;
   $('#f-digest').classList.toggle('on', digestEnabled);
   $('#f-digest').setAttribute('aria-pressed', String(digestEnabled));
+  $('#f-digest-body').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-instruction-row').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-provider-row').classList.toggle('hidden', !digestEnabled);
   $('#f-digest-mode-row').classList.toggle('hidden', !digestEnabled);
