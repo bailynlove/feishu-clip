@@ -254,6 +254,15 @@ test('字体层级统一：区大标题 > 小节标题 > 正文控件；开关�
   assert.ok(!form[1].includes('ps-switch-label'), 'pc-form 内不应再有偏大的开关文字（已并入小节标题/描述）');
 });
 
+// 规则预设控件字号（#101 跟进）：保存按钮/内联表单的保存与取消全部归入正文档（与字段标签一致），
+// 不得吃 .ps-btn(13px)/.link(继承 14px) 的默认档
+test('规则预设区按钮字号与字段标签一致 (#101)', () => {
+  const label = fontSizeOf('.pc-form .ps-label');
+  for (const selector of ['.trigger-save-btn', '.trigger-save-form .ps-btn', '.trigger-save-form .link']) {
+    assert.equal(fontSizeOf(selector), label, `${selector} 应为 ${label}px（正文档）`);
+  }
+});
+
 // ——— 触发规则预设气泡（#101）：气泡在输入框上方；名称+规则两字段；保存为新预设按钮 + 内联名称表单 ———
 
 test('触发规则预设气泡区位于 triggers 输入框上方，含保存按钮与内联名称表单 (#101)', () => {
