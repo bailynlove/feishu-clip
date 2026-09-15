@@ -487,3 +487,33 @@ test('appendTriggerRule：一行一条追加；空文本直用规则；规则空
   assert.equal(appendTriggerRule('a\n', 'c'), 'a\nc', '尾随换行不叠加空行');
   assert.equal(appendTriggerRule('a', '  '), 'a', '空白规则不动');
 });
+
+// ——— 内置规则预设（#95）：首次使用注入名为 paper 的论文站点预设；用户删除后不复活 ———
+
+import { BUILT_IN_TRIGGER_PRESETS, seedTriggerPresets } from '../src/extension/options-state.js';
+
+test('内置规则预设恰好一个、名为 paper，规则全部过 triggers 校验', () => {
+  assert.equal(BUILT_IN_TRIGGER_PRESETS.length, 1);
+  const paper = BUILT_IN_TRIGGER_PRESETS[0];
+  assert.equal(paper.name, 'paper');
+  assert.ok(paper.id, '有稳定 id');
+  const errors = validateTriggers(paper.rule);
+  assert.deepEqual(errors, [], `内置规则须全部合法：${JSON.stringify(errors)}`);
+  const lines = paper.rule.split('\n').filter((line) => line.trim());
+  assert.ok(lines.length >= 20 && lines.length <= 40, `20~30 个高频站点（当前 ${lines.length} 条）`);
+});
+
+test('seedTriggerPresets：键不存在（undefined）注入内置并标记 seeded', () => {
+  const { list, seeded } = seedTriggerPresets(undefined);
+  assert.equal(seeded, true);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].name, 'paper');
+});
+
+test('seedTriggerPresets：键已存在按用户数据归一——空数组/删掉 paper 不复活', () => {
+  assert.deepEqual(seedTriggerPresets([]), { list: [], seeded: false }, '用户删光后不再注入');
+  const mine = [{ id: 'x', name: '我的', rule: 'https://example.com/' }];
+  const { list, seeded } = seedTriggerPresets(mine);
+  assert.equal(seeded, false);
+  assert.deepEqual(list, mine, '用户数据原样归一');
+});

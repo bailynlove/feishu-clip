@@ -427,3 +427,53 @@ export function appendTriggerRule(text, rule) {
   if (!current.trim()) return trimmedRule;
   return `${current.replace(/\s+$/, '')}\n${trimmedRule}`;
 }
+
+// ——— 内置规则预设（#95）：paper = 论文站点清单，照 Zotero Connector translator targets 取高频子集；
+// 仅在 storage 无 triggerPresets 键（首次使用/升级迁移）时注入，用户删除后不复活。
+// 规则语法与 triggers 校验一致（一行一条；/pattern/i 正则或 http(s) 前缀）——
+// 每行一个站点域名，([a-z0-9-]+\.)* 覆盖任意级子域名 ———
+const PAPER_TRIGGER_RULES = `/^https?:\\/\\/([a-z0-9-]+\\.)*arxiv\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*doi\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*semanticscholar\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*dblp\\.org\\//i
+/^https?:\\/\\/scholar\\.google\\.[a-z.]{2,}\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*nlm\\.nih\\.gov\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*ieee\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*acm\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*usenix\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*springer\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*nature\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*science\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*sciencedirect\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*wiley\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*tandfonline\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*jstor\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*oup\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*cambridge\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*rsc\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*aps\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*aip\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*iop\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*cell\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*plos\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*frontiersin\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*mdpi\\.com\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*biorxiv\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*medrxiv\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*openreview\\.net\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*aclanthology\\.org\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*neurips\\.cc\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*mlr\\.press\\//i
+/^https?:\\/\\/([a-z0-9-]+\\.)*thecvf\\.com\\//i
+/^https?:\\/\\/huggingface\\.co\\/papers\\//i`;
+
+export const BUILT_IN_TRIGGER_PRESETS = Object.freeze([
+  { id: 'builtin-paper', name: 'paper', rule: PAPER_TRIGGER_RULES },
+]);
+
+// 种子语义：raw === undefined（从未存过该键）→ 注入内置预设并标记 seeded（调用侧写回）；
+// 否则按用户数据归一——空数组/删掉 paper 都尊重，不复活
+export function seedTriggerPresets(raw) {
+  if (raw === undefined) return { list: normalizeTriggerPresets(BUILT_IN_TRIGGER_PRESETS), seeded: true };
+  return { list: normalizeTriggerPresets(raw), seeded: false };
+}

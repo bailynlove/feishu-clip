@@ -6,7 +6,7 @@ import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireD
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, variableRowNames, digestFileHintNeeded,
-  TRIGGER_PRESETS_KEY, normalizeTriggerPresets, addTriggerPreset, removeTriggerPreset, appendTriggerRule,
+  TRIGGER_PRESETS_KEY, normalizeTriggerPresets, seedTriggerPresets, addTriggerPreset, removeTriggerPreset, appendTriggerRule,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
@@ -984,8 +984,10 @@ async function init() {
   initBridge();
   initAiSection(settings.aiDigestInstruction);
   initCollapsibleSections(settings.optionsUiCollapsed);
-  // 触发规则预设气泡（#101）：直读 chrome.storage.local，归一后渲染
-  triggerPresets = normalizeTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
+  // 触发规则预设气泡（#101）：直读 chrome.storage.local；键不存在时注入内置 paper 预设（#95）并写回
+  const seededTriggerPresets = seedTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
+  triggerPresets = seededTriggerPresets.list;
+  if (seededTriggerPresets.seeded) await chrome.storage.local.set({ [TRIGGER_PRESETS_KEY]: triggerPresets });
   renderTriggerPresets();
   // 开关为开时展开日志区并自动加载一次（缺省 false 不加载）
   setDeveloperMode(settings.developerMode === true);

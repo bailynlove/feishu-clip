@@ -1148,3 +1148,50 @@ test('initPdfTabState：trigger 命中预设优先于默认预设取目录；无
   assert.equal(pdfFolderLabel(moved), '云盘根目录（我的空间）');
   assert.equal(hit.presets[0].pdfDrive.folderToken, 'fld-papers', '会话选择不改预设本身');
 });
+
+// ——— 内置 paper 规则预设的命中行为（#95）：照 Zotero Connector 高频学术站点 ———
+
+import { BUILT_IN_TRIGGER_PRESETS, parseTriggers } from '../src/extension/options-state.js';
+
+const paperPreset = { id: 'builtin-paper', triggers: parseTriggers(BUILT_IN_TRIGGER_PRESETS[0].rule) };
+
+test('内置 paper 预设命中主流学术站点（arXiv/Nature/IEEE/ACM/Springer/Wiley/PubMed/Scholar 等）', () => {
+  const hits = [
+    'https://arxiv.org/abs/2609.11916',
+    'https://arxiv.org/pdf/2609.11916',
+    'https://www.nature.com/articles/s41586-026-00001-x',
+    'https://ieeexplore.ieee.org/document/1234567',
+    'https://dl.acm.org/doi/10.1145/1234567',
+    'https://link.springer.com/article/10.1007/s00001-026-0001-x',
+    'https://onlinelibrary.wiley.com/doi/10.1002/xyz',
+    'https://pubmed.ncbi.nlm.nih.gov/12345678/',
+    'https://scholar.google.com/scholar?q=test',
+    'https://scholar.google.com.hk/scholar?q=test',
+    'https://www.sciencedirect.com/science/article/pii/S0000000000',
+    'https://doi.org/10.1000/xyz123',
+    'https://www.biorxiv.org/content/10.1101/2026.01.01.123456v1',
+    'https://www.mdpi.com/1424-8220/26/5/1518',
+    'https://huggingface.co/papers/2609.11916',
+    'https://openreview.net/forum?id=abc',
+    'https://aclanthology.org/2026.acl-long.1/',
+    'https://proceedings.mlr.press/v100/abc26a.html',
+  ];
+  for (const url of hits) {
+    assert.equal(matchTrigger([paperPreset], url), 'builtin-paper', `应命中：${url}`);
+  }
+});
+
+test('内置 paper 预设不误伤非学术/非论文 URL', () => {
+  const misses = [
+    'https://example.com/blog/post',
+    'https://www.zhihu.com/question/123',
+    'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash',
+    'https://github.com/bailynlove/feishu-clip',
+    'https://www.google.com/search?q=arxiv',
+    'https://notarxiv.org/abs/123',
+    'https://arxiv.org.evil.com/fake',
+  ];
+  for (const url of misses) {
+    assert.equal(matchTrigger([paperPreset], url), null, `不应命中：${url}`);
+  }
+});
