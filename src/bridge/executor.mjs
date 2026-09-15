@@ -948,13 +948,25 @@ export class ClipExecutor {
               '--command', 'append', '--doc-format', 'markdown',
               '--content', '@content.md', '--format', 'json',
             ], { cwd: scratch, timeoutMs: 120_000 });
-            // 父文档顶部插子页面列表块（block_type 51，wiki_token = 剪藏文档节点 token）作导航
-            // 入口；失败仅警告——正文里已有子文档链接可点
+            // 父文档插子页面列表块（block_type 51，wiki_token = 剪藏文档节点 token）作导航入口。
+            // 位置紧随「来源」元信息引用容器之后（真实文档块结构实证：pdf 引用回填插 index 0，
+            // 这里若也插 index 0 会把引用区劈成「附件→子文档列表→来源」的断层）；块渲染是动态的，
+            // 子文档后续建好会自动列出，无需重写。失败仅警告——正文里已有子文档链接可点
             if (effectiveSubdoc && parentWikiToken) {
               try {
+                let subPageIndex = 0;
+                try {
+                  const blocks = await api('GET', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${document.documentId}/children`, [
+                    '--params', '{"page_size": 20}',
+                  ]);
+                  // 正文首个 quote_container 即「来源/剪藏时间/剪藏尝试」元信息块（此刻 pdf 引用
+                  // 尚未回填——recordDocument 之前 pdf 侧拿不到 documentId，不存在撞车）
+                  const quoteAt = (blocks.data?.items ?? []).findIndex((block) => block.block_type === 34);
+                  if (quoteAt >= 0) subPageIndex = quoteAt + 1;
+                } catch { /* 查不到块结构回落 index 0（旧行为） */ }
                 await api('POST', `/open-apis/docx/v1/documents/${document.documentId}/blocks/${document.documentId}/children`, [
                   '--params', '{"document_revision_id": "-1"}',
-                  '--data', JSON.stringify({ index: 0, children: [{ block_type: 51, sub_page_list: { wiki_token: parentWikiToken } }] }),
+                  '--data', JSON.stringify({ index: subPageIndex, children: [{ block_type: 51, sub_page_list: { wiki_token: parentWikiToken } }] }),
                 ]);
               } catch (error) {
                 if (error.code === 'LEASE_LOST') throw error;

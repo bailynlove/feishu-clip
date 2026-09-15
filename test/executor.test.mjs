@@ -2267,6 +2267,11 @@ function subdocSetup({
           // 子文档当前内容：页块下挂一个占位文本块
           return { ok: true, data: { items: [containerBlock('doc-digest', '', 1, ['ph']), textBlock('ph', 'doc-digest', 'AI 摘要生成中…')], has_more: false } };
         }
+        if (method === 'GET' && apiPath.endsWith('/children')) {
+          // 父文档顶层块（真实块结构实证）：首个 quote_container 是「来源」元信息块，
+          // 子页面列表应插到它后面（index 1），不再插 index 0 制造断层
+          return { ok: true, data: { items: [{ block_type: 34, quote_container: {} }, { block_type: 2, text: {} }] } };
+        }
         if (method === 'DELETE') { events.push(`clear:${apiPath.match(/documents\/([^/]+)/)?.[1]}`); return { ok: true, data: {} }; }
         if (method === 'POST' && apiPath.includes('/children')) { events.push('sub-page-list'); return { ok: true, data: { children: [{ block_id: 'sp-1' }] } }; }
         return { ok: true, data: {} };
@@ -2300,8 +2305,8 @@ test('AI 摘要子文档（#98）：space 目标完整时序——父文档秒�
   const subPageList = apiCalls(lark.calls, 'POST', '/children');
   assert.equal(subPageList.length, 1);
   assert.deepEqual(JSON.parse(subPageList[0][subPageList[0].indexOf('--data') + 1]), {
-    index: 0, children: [{ block_type: 51, sub_page_list: { wiki_token: 'node-parent' } }],
-  }, '父文档顶部插 sub_page_list 块（wiki_token=clip 文档节点 token）');
+    index: 1, children: [{ block_type: 51, sub_page_list: { wiki_token: 'node-parent' } }],
+  }, 'sub_page_list 紧随「来源」元信息引用容器（index 1），wiki_token=clip 文档节点 token');
   const clear = apiCalls(lark.calls, 'DELETE', 'batch_delete');
   assert.deepEqual(deleteBody(clear[0]), { start_index: 0, end_index: 1 }, '重写前清空子文档全部块');
   assert.equal(store.digestRecorded, 'AI 要点', '摘要文本照常缓存');
