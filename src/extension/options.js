@@ -6,7 +6,7 @@ import { describeDestination, renderPicker, wirePicker, renderDrivePicker, wireD
 import {
   addPreset, duplicatePreset, movePreset, removePreset, renamePreset, setDefaultPreset, updatePreset,
   validateTriggers, parseTriggers, insertVariable, variableRowNames, digestFileHintNeeded,
-  TRIGGER_PRESETS_KEY, normalizeTriggerPresets, seedTriggerPresets, addTriggerPreset, removeTriggerPreset, appendTriggerRule,
+  TRIGGER_PRESETS_KEY, mergeBuiltInTriggerPresets, addTriggerPreset, removeTriggerPreset, appendTriggerRule,
   jobStatusTone, jobStatusLabel, jobTotalLabel, jobDisplayTitle, formatClock, jobDetailRows,
   imageModeHint,
   AI_API_TYPE_OPTIONS, aiDefaultBaseUrl, aiConfigPayload, aiDigestProviderOptions, aiHeadersToText, aiProviderByName, aiTestResultView,
@@ -464,17 +464,21 @@ function renderTriggerPresets() {
       $('#f-triggers').value = appendTriggerRule($('#f-triggers').value, preset.rule);
       applyTriggersText($('#f-triggers').value);
     });
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'trigger-chip-x';
-    removeBtn.type = 'button';
-    removeBtn.textContent = '×';
-    removeBtn.setAttribute('aria-label', `删除预设 ${preset.name}`);
-    removeBtn.addEventListener('click', async () => {
-      triggerPresets = removeTriggerPreset(triggerPresets, preset.id);
-      await chrome.storage.local.set({ [TRIGGER_PRESETS_KEY]: triggerPresets });
-      renderTriggerPresets();
-    });
-    chip.append(appendBtn, removeBtn);
+    chip.append(appendBtn);
+    // 内置预设（builtin- 前缀，#95 paper）不给删除入口
+    if (!preset.id.startsWith('builtin-')) {
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'trigger-chip-x';
+      removeBtn.type = 'button';
+      removeBtn.textContent = '×';
+      removeBtn.setAttribute('aria-label', `删除预设 ${preset.name}`);
+      removeBtn.addEventListener('click', async () => {
+        triggerPresets = removeTriggerPreset(triggerPresets, preset.id);
+        await chrome.storage.local.set({ [TRIGGER_PRESETS_KEY]: triggerPresets });
+        renderTriggerPresets();
+      });
+      chip.append(removeBtn);
+    }
     box.append(chip);
   }
 }
@@ -984,10 +988,8 @@ async function init() {
   initBridge();
   initAiSection(settings.aiDigestInstruction);
   initCollapsibleSections(settings.optionsUiCollapsed);
-  // 触发规则预设气泡（#101）：直读 chrome.storage.local；键不存在时注入内置 paper 预设（#95）并写回
-  const seededTriggerPresets = seedTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
-  triggerPresets = seededTriggerPresets.list;
-  if (seededTriggerPresets.seeded) await chrome.storage.local.set({ [TRIGGER_PRESETS_KEY]: triggerPresets });
+  // 触发规则预设气泡（#101）：直读 chrome.storage.local；内置 paper 常驻不可删（#95），缺失即补
+  triggerPresets = mergeBuiltInTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
   renderTriggerPresets();
   // 开关为开时展开日志区并自动加载一次（缺省 false 不加载）
   setDeveloperMode(settings.developerMode === true);

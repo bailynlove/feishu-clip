@@ -310,3 +310,5 @@
 /* 内联表单的保存/取消也归正文档：.ps-btn 默认 13px、.link 继承 14px，都偏大 */
 .options .trigger-save-form .ps-btn{padding:6px 12px;font-size:11.5px;border-radius:9px}
 .options .trigger-save-form .link{font-size:11.5px}
+/* 内置预设气泡无 ×，名称按钮右侧留白补齐 */
+.options .trigger-chip .trigger-chip-add:only-child{padding-right:11px}

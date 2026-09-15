@@ -415,7 +415,9 @@ export function addTriggerPreset(list, { name, rule } = {}) {
   return [...list, { id: crypto.randomUUID(), name: trimmedName, rule: trimmedRule }];
 }
 
+// 内置预设（builtin- 前缀 id）不可删，防御性原样返回
 export function removeTriggerPreset(list, id) {
+  if (typeof id === 'string' && id.startsWith('builtin-')) return list;
   return list.filter((item) => item.id !== id);
 }
 
@@ -429,7 +431,7 @@ export function appendTriggerRule(text, rule) {
 }
 
 // ——— 内置规则预设（#95）：paper = 论文站点清单，照 Zotero Connector translator targets 取高频子集；
-// 仅在 storage 无 triggerPresets 键（首次使用/升级迁移）时注入，用户删除后不复活。
+// 常驻不可删：读取时经 mergeBuiltInTriggerPresets 缺失即补，UI 不给删除入口。
 // 规则语法与 triggers 校验一致（一行一条；/pattern/i 正则或 http(s) 前缀）——
 // 每行一个站点域名，([a-z0-9-]+\.)* 覆盖任意级子域名 ———
 const PAPER_TRIGGER_RULES = `/^https?:\\/\\/([a-z0-9-]+\\.)*arxiv\\.org\\//i
@@ -471,9 +473,10 @@ export const BUILT_IN_TRIGGER_PRESETS = Object.freeze([
   { id: 'builtin-paper', name: 'paper', rule: PAPER_TRIGGER_RULES },
 ]);
 
-// 种子语义：raw === undefined（从未存过该键）→ 注入内置预设并标记 seeded（调用侧写回）；
-// 否则按用户数据归一——空数组/删掉 paper 都尊重，不复活
-export function seedTriggerPresets(raw) {
-  if (raw === undefined) return { list: normalizeTriggerPresets(BUILT_IN_TRIGGER_PRESETS), seeded: true };
-  return { list: normalizeTriggerPresets(raw), seeded: false };
+// 并入口径：内置预设常驻不可删——无论 storage 键是否存在，缺失即补（按 id 判重），
+// 内置在前、用户预设在后；不落库（每次打开重并，内置不进用户数据）
+export function mergeBuiltInTriggerPresets(raw) {
+  const list = normalizeTriggerPresets(raw);
+  const missing = BUILT_IN_TRIGGER_PRESETS.filter((builtin) => !list.some((item) => item.id === builtin.id));
+  return [...missing, ...list];
 }
