@@ -102,6 +102,63 @@ test('普通页面回归：body 内容足够时正常提取，不触发 frameset
   assert.ok(result.markdown.includes('足够长的正文内容'));
 });
 
+test('IEEE Xplore 论文页：移除控件区和重复摘要，标题只保留 citation title', async () => {
+  const paperTitle = 'Double DQN-GAMO: A Cyber Threat Detection Framework for Zero-Day Attacks';
+  const citationTitle = element('meta');
+  citationTitle.setAttribute('content', paperTitle);
+  const emptyBold = element('b', [element('svg')]);
+  const main = element('main', [
+    element('p', [emptyBold]),
+    element('h1', [textNode(paperTitle), element('span', [textNode('TH-CPL')]), element('span', [textNode('BCCF C')])]),
+    element('p', [element('a', [emptyBold, textNode('PDF')])]),
+    element('p', [
+      element('a', [textNode('Zhenwei Cang')]), textNode('; '),
+      element('a', [textNode('Aniket Mahanti')]), textNode('; '),
+      element('a', [textNode('Ranesh Naha')]), textNode('; '),
+      element('a', [textNode('Sudheer Kumar Battula')]),
+    ]),
+    element('div', [
+      element('h1', [textNode('Alerts')]),
+      element('a', [textNode('Manage Content Alerts')]),
+      element('p', [textNode('Add to Citation Alerts')]),
+      element('ul', [
+        element('li', [textNode('Download PDF')]),
+        element('li', [textNode('Download References')]),
+        element('li', [textNode('Request Permissions')]),
+        element('li', [textNode('Save to')]),
+      ]),
+    ]),
+    element('div', [element('h2', [textNode('Abstract:')]), element('p', [textNode('Short abstract teaser...Show More')])]),
+    element('section', [
+      element('h2', [textNode('Abstract:')]),
+      element('p', [textNode('This is the complete abstract text with enough useful detail for the paper clipping.')]),
+    ]),
+    element('p', [textNode('SECTION I.')]),
+    element('h2', [textNode('Introduction')]),
+    element('p', [textNode('Cyber attacks are growing in both frequency and sophistication. This is the article body.')]),
+    element('section', [element('h2', [textNode('More Like This')]), element('p', [textNode('Unrelated recommended paper')])]),
+  ]);
+  for (const [index, author] of main.querySelectorAll('a').slice(1, 5).entries()) author.setAttribute('href', `/author/${index + 1}`);
+  const doc = {
+    title: `${paperTitle} - IEEE Conference Publication - IEEE Xplore`,
+    body: main,
+    querySelector(selector) {
+      if (selector === 'meta[name="citation_title"]') return citationTitle;
+      if (selector === 'article, main, [role="main"]') return main;
+      return null;
+    },
+    querySelectorAll: () => [],
+  };
+  const result = await runExtractor(doc, 'https://ieeexplore.ieee.org/document/11146309');
+  assert.equal(result.error, undefined);
+  assert.equal(result.title, paperTitle);
+  assert.match(result.markdown, /## Abstract:\n\nThis is the complete abstract text/);
+  assert.equal((result.markdown.match(/^## Abstract:$/gm) || []).length, 1, '只保留完整摘要');
+  assert.ok(!/TH-CPL|BCCF C|Alerts|Download References|Request Permissions|Save to|Show More|More Like This/.test(result.markdown));
+  assert.ok(!/^\s*(?:-\s*)?\*\*\s*$/m.test(result.markdown), '空图标不得退化成裸 **');
+  assert.ok(!/^SECTION [IVX]+\.$/m.test(result.markdown), '章节序号标签不与标题重复输出');
+});
+
 // pre 内图片回归（labuladong 页面）：img 在 <pre> 里时锚点原地替换会变成围栏代码块里的一行文本，
 // 导入飞书后落在 code 块（block_type 14）内——bridge 既定位不到也删不掉。锚点必须移出 pre。
 test('pre 内的图片：锚点移到代码块外成为独立段落', async () => {

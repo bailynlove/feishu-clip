@@ -245,8 +245,14 @@
       if (/^H[1-6]$/.test(tag)) return `\n\n${'#'.repeat(Number(tag[1]))} ${text(node)}\n\n`;
       if (tag === 'P' || tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE') return `\n\n${children()}\n\n`;
       if (tag === 'BR') return '  \n';
-      if (tag === 'STRONG' || tag === 'B') return `**${children()}**`;
-      if (tag === 'EM' || tag === 'I') return `*${children()}*`;
+      if (tag === 'STRONG' || tag === 'B') {
+        const value = children();
+        return value.trim() ? `**${value}**` : '';
+      }
+      if (tag === 'EM' || tag === 'I') {
+        const value = children();
+        return value.trim() ? `*${value}*` : '';
+      }
       if (tag === 'DEL' || tag === 'S') return `~~${children()}~~`;
       if (tag === 'CODE' && node.parentElement?.tagName !== 'PRE') return `\`${text(node).replaceAll('`', '\\`')}\``;
       if (tag === 'PRE') return `\n\n\`\`\`\n${node.textContent.trim()}\n\`\`\`\n\n`;
@@ -534,6 +540,45 @@
       } catch { return null; }
     }
 
+    function isIeeeDocumentPage(pageUrl) {
+      try {
+        const page = new URL(pageUrl);
+        return (page.hostname === 'ieeexplore.ieee.org' || page.hostname.endsWith('.ieeexplore.ieee.org'))
+          && /^\/document\/\d+\/?$/.test(page.pathname);
+      } catch { return false; }
+    }
+
+    function ieeeCitationTitle() {
+      if (!isIeeeDocumentPage(location.href)) return null;
+      return document.querySelector('meta[name="citation_title"]')?.getAttribute('content')?.trim() || null;
+    }
+
+    // IEEE 的 main 同时包含论文和操作面板；响应式页面还会同时挂载折叠摘要与完整摘要。
+    // 先渲染再按稳定的语义边界收窄，避免依赖经常变动的 Angular class 名。
+    function cleanIeeeMarkdown(markdown, citationTitle) {
+      if (!citationTitle) return markdown;
+      const escapedTitle = citationTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      markdown = markdown.replace(new RegExp(`^# ${escapedTitle}.*$`, 'm'), `# ${citationTitle}`);
+      let blocks = markdown.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+      const titleIndex = blocks.findIndex((block) => block === `# ${citationTitle}`);
+      if (titleIndex >= 0) blocks = blocks.slice(titleIndex);
+
+      const abstractIndexes = blocks.flatMap((block, index) => /^## Abstract:?$/i.test(block) ? [index] : []);
+      if (abstractIndexes.length) {
+        const fullAbstractAt = abstractIndexes.at(-1);
+        const authors = blocks.slice(1, fullAbstractAt).find((block) => /\/author\/\d+/i.test(block));
+        blocks = [blocks[0], ...(authors ? [authors] : []), ...blocks.slice(fullAbstractAt)];
+      }
+
+      const relatedAt = blocks.findIndex((block) => /^#{1,6}\s+More Like This\b/i.test(block));
+      if (relatedAt >= 0) blocks = blocks.slice(0, relatedAt);
+      return blocks
+        .filter((block) => !/^SECTION\s+[IVXLCDM]+\.$/i.test(block))
+        .filter((block) => !/^(?:[-*]\s*)?(?:\*\*|__)$/.test(block))
+        .join('\n\n')
+        .trim();
+    }
+
     // frameset 页面（90 年代老站常见）：主文档 document.body 为空/null，正文在同源子 frame 里
     function frameBodies() {
       const bodies = [];
@@ -552,6 +597,7 @@
     // （下载按钮/浏览上下文/引用服务等导航噪音），对齐 Obsidian web clipper 产出
     const arxivColumn = isArxivAbsPage(location.href) ? document.querySelector('#abs-outer .leftcolumn') : null;
     const primary = arxivColumn || document.querySelector('article, main, [role="main"]') || body;
+    const ieeeTitle = ieeeCitationTitle();
     let markdown = primary ? await extractFrom(primary) : '';
     if (markdown.length < 20) {
       const bodies = frameBodies();
@@ -562,8 +608,9 @@
         markdown = parts.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
       }
     }
+    if (ieeeTitle) markdown = cleanIeeeMarkdown(markdown, ieeeTitle);
     if (markdown.length < 20) throw new Error('未提取到足够的正文内容');
-    const title = hfBlobTitle(location.href) || document.title.trim() || '网页剪藏';
+    const title = hfBlobTitle(location.href) || ieeeTitle || document.title.trim() || '网页剪藏';
     return { title, sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes };
   } catch (error) { return { error: error.message }; }
 })()
