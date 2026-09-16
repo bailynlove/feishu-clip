@@ -15,7 +15,7 @@ import {
 import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, readPdfDriveConfig, resolveImageMode, resolvePdfDrive } from './presets.js';
 import { createProxySettingsController } from './options-proxy.js';
 import { parsePdfTranslatorFile } from './pdf-translator.js';
-import { effectivePdfTranslatorRegistry, PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY, normalizePdfTranslatorEntries, pdfTranslatorView, removePdfTranslator, setPdfTranslatorEnabled, upsertPdfTranslator } from './pdf-translator-store.js';
+import { effectivePdfTranslatorRegistry, PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY, normalizePdfTranslatorEntries, pdfTranslatorDisplayNames, pdfTranslatorView, setPdfTranslatorEnabled, upsertPdfTranslator } from './pdf-translator-store.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -881,30 +881,26 @@ $('#proxy-save').addEventListener('click', () => proxySettings.save());
 
 let pdfTranslators = [];
 let disabledBuiltInTranslators = [];
-function renderPdfTranslators() {
+async function renderPdfTranslators() {
   const list = $('#pdf-translator-list');
   list.replaceChildren();
-  const registry = effectivePdfTranslatorRegistry(pdfTranslators, disabledBuiltInTranslators);
-  const entries = [...registry.selected, ...registry.shadowed, ...registry.rejected];
+  const registry = await effectivePdfTranslatorRegistry(pdfTranslators, disabledBuiltInTranslators);
+  const entries = [...registry.selected, ...registry.rejected];
   if (!entries.length) { list.textContent = '当前没有可用文件。'; return; }
-  for (const entry of entries) {
+  const displayNames = pdfTranslatorDisplayNames(entries);
+  entries.forEach((entry, index) => {
     const view = pdfTranslatorView(entry);
     const row = document.createElement('div');
-    row.className = 'ps-note';
-    const title = document.createElement('strong');
-    const current = registry.active.includes(entry);
-    const shadowed = registry.shadowed.includes(entry);
-    title.textContent = `${view.label} · ${view.version} · ${view.source === 'builtin' ? '内置' : '已导入'}${current ? ' · 当前使用' : shadowed ? ' · 已被覆盖' : ''}`;
-    const detail = document.createElement('div');
-    detail.textContent = `${view.creator} · ID ${view.translatorID} · target ${view.target || '—'} · priority ${view.priority} · ${view.compatibility} · ${view.enabled ? '启用' : '停用'}${view.requestOrigins.length ? ` · 权限：${view.requestOrigins.join(', ')}` : ' · 权限：无'}`;
-    if (view.diagnostics.length) {
-      const diagnostics = document.createElement('div');
-      diagnostics.textContent = `诊断：${view.diagnostics.map((item) => item.message).join('；')}`;
-      detail.append(diagnostics);
-    }
+    row.className = 'pdf-translator-row';
+    const title = document.createElement('span');
+    title.className = 'pdf-translator-name';
+    title.textContent = displayNames[index];
     const toggle = document.createElement('button');
-    toggle.type = 'button'; toggle.className = 'link'; toggle.textContent = view.enabled ? '停用' : '启用';
-    toggle.classList.toggle('hidden', shadowed);
+    toggle.type = 'button';
+    toggle.className = `pdf-translator-toggle${view.enabled ? ' on' : ''}`;
+    toggle.setAttribute('aria-pressed', String(view.enabled));
+    toggle.textContent = view.enabled ? '已启用' : '已停用';
+    toggle.disabled = entry.ok !== true || entry.compatibility !== 'compatible';
     toggle.addEventListener('click', async () => {
       if (view.source === 'builtin') {
         disabledBuiltInTranslators = view.enabled
@@ -915,25 +911,11 @@ function renderPdfTranslators() {
         pdfTranslators = setPdfTranslatorEnabled(pdfTranslators, view.translatorID, !view.enabled);
         await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators });
       }
-      renderPdfTranslators();
+      await renderPdfTranslators();
     });
-    const remove = document.createElement('button');
-    remove.type = 'button'; remove.className = 'link'; remove.textContent = '移除';
-    remove.classList.toggle('hidden', view.source === 'builtin');
-    remove.addEventListener('click', async () => { if (!window.confirm(`移除 Translator「${view.label}」？`)) return; pdfTranslators = removePdfTranslator(pdfTranslators, view.translatorID); await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators }); renderPdfTranslators(); });
-    const source = document.createElement('button');
-    source.type = 'button'; source.className = 'link'; source.textContent = '查看/复制源代码';
-    source.addEventListener('click', async () => {
-      const code = entry.translator?.source || entry.translator?.code || '';
-      try { await navigator.clipboard.writeText(code); toast('源代码已复制', 'success'); }
-      catch { window.prompt('复制源代码', code); }
-    });
-    row.append(title, detail);
-    if (!shadowed) row.append(toggle, document.createTextNode(' '));
-    row.append(source);
-    if (view.source !== 'builtin') row.append(document.createTextNode(' '), remove);
+    row.append(title, toggle);
     list.append(row);
-  }
+  });
 }
 $('#pdf-translator-files').addEventListener('change', async (event) => {
   for (const file of event.target.files || []) {
@@ -943,16 +925,15 @@ $('#pdf-translator-files').addEventListener('change', async (event) => {
       const safeParsed = { ...parsed, translator: candidate };
       const view = pdfTranslatorView({ ...safeParsed, confirmed: true, enabled: parsed.ok });
       const previous = pdfTranslators.find((item) => item.translator?.metadata?.translatorID === view.translatorID);
-      const previousView = previous ? pdfTranslatorView(previous) : null;
-      const replacement = previousView ? `\n\n将替换当前版本：${previousView.version} → ${view.version}\n跨域权限：${previousView.requestOrigins.join(', ') || '无'} → ${view.requestOrigins.join(', ') || '无'}` : '';
-      const warning = parsed.ok ? '' : `\n\n兼容性：不兼容（将保留为停用状态）\n诊断：${parsed.diagnostics.map((item) => item.message).join('；')}`;
-      if (!window.confirm(`确认导入「${view.label}」？\n作者：${view.creator}\nID：${view.translatorID}\n适用网址：${view.target}\n跨域权限：${view.requestOrigins.join(', ') || '无'}${warning}${replacement}`)) continue;
+      const replacement = previous ? '\n\n将替换当前已加载的同一 Translator 文件。' : '';
+      const warning = parsed.ok ? '' : '\n\n该文件与当前版本不兼容，将以停用状态保留。';
+      if (!window.confirm(`确认导入「${view.label}」？${warning}${replacement}`)) continue;
       pdfTranslators = upsertPdfTranslator(pdfTranslators, { ...safeParsed, confirmed: true, enabled: parsed.ok });
       await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators });
     } catch (error) { toast(`${file.name} 导入失败：${error.message}`, 'error'); }
   }
   event.target.value = '';
-  renderPdfTranslators();
+  await renderPdfTranslators();
 });
 
 
@@ -1074,7 +1055,7 @@ async function init() {
   const translatorSettings = await chrome.storage.local.get([PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
   pdfTranslators = normalizePdfTranslatorEntries(translatorSettings[PDF_TRANSLATORS_STORAGE_KEY]);
   disabledBuiltInTranslators = Array.isArray(translatorSettings[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]) ? translatorSettings[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY] : [];
-  renderPdfTranslators();
+  await renderPdfTranslators();
   // 触发规则预设气泡（#101）：直读 chrome.storage.local；内置 paper 常驻不可删（#95），缺失即补
   triggerPresets = mergeBuiltInTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);
   renderTriggerPresets();

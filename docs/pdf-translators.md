@@ -18,7 +18,7 @@ PDF Translator 是从论文页面识别 PDF Attachment Candidate 的可执行 Ja
 ```
 
 - `translatorID`：稳定 UUID。同一 ID 的用户文件覆盖内置版本。
-- `label`、`creator`：设置页展示名称和作者。
+- `label`：设置页展示名称；同名文件才追加序号。`creator` 保留作者信息，但不在简洁列表中展示。
 - `target`：匹配来源页面 URL 的正则表达式；空字符串表示通用后备项。
 - `priority`：非负整数，数字越小越先检测。
 - `translatorType`：必须是 Zotero Web Translator 使用的 `4`。
@@ -40,6 +40,8 @@ PDF Translator 是从论文页面识别 PDF Attachment Candidate 的可执行 Ja
 兼容检查只负责在导入时给出明确反馈。真正执行文件时仍由 PDF Translator Runtime 强制实施隔离、网络权限、超时和响应体预算。
 
 同一 `translatorID` 只选择一个有效版本。通过兼容检查的用户导入版本覆盖内置版本；用户停用覆盖版本时该 ID 不执行，移除用户版本后内置版本自然恢复。不兼容的用户文件仍显示在设置页，但不会静默禁用可用的内置版本。有效版本按 `priority` 从小到大执行。
+
+随扩展提供的默认规则也使用相同文件格式，位于 `src/extension/pdf-translators/`。设置页打开时加载这些文件，并默认启用。
 
 ## PDF 附件输出
 

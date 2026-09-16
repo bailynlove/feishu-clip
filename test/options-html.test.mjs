@@ -76,6 +76,20 @@ test('preset editor has a PDF folder row and drive picker panel (#66)', () => {
   assert.ok(advanced[1].includes('id="save-drive-target"'), '应有验证并保存按钮');
 });
 
+test('PDF Translator picker and loaded-file list live in the PDF save subsection', () => {
+  const pdf = subSection('PDF 保存');
+  for (const id of ['pdf-translator-files', 'pdf-translator-list']) {
+    assert.ok(pdf.includes(`id="${id}"`), `PDF 保存小节应包含 #${id}`);
+    assert.equal(html.match(new RegExp(`id="${id}"`, 'g'))?.length, 1, `#${id} 只出现一次`);
+  }
+  const otherStart = html.indexOf('<h2>4. 其他设置</h2>');
+  const developerStart = html.indexOf('<h2>5. 开发者模式</h2>');
+  const other = html.slice(otherStart, developerStart);
+  assert.ok(!other.includes('PDF Translator 文件'), '其他设置不再放置 Translator 文件选择器');
+  assert.ok(classAttr('pdf-translator-files').includes('hidden'), '原生文件输入隐藏，由同风格选择行触发');
+  assert.match(pdf, /class="ps-target pdf-translator-picker"[^>]*for="pdf-translator-files"/, '文件选择器沿用预设目标选择行样式');
+});
+
 // AI 摘要设置区（#75）：第 2 节，位于「配对」之后、「预设管理」之前（后调整：配置先行，
 // 预设里的开关引用它）——API 类型下拉（选项由 options.js 按 AI_API_TYPE_OPTIONS 动态填充）、
 // Base URL/Model/API key 输入框、保存 + 测试连接按钮 + 行内结果（初始隐藏）、全局摘要指令 textarea

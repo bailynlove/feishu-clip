@@ -119,6 +119,18 @@
 .options .pc-sub-head .ps-switch-row{width:auto;margin:0;padding:0}
 .options .pc-sub > .ps-desc{margin:0 0 8px}
 .options .pc-form .ps-seg-opt{padding:7px;font-size:11.5px;border-radius:9px}
+.options .pdf-translator-settings{margin-top:10px;padding-top:10px;border-top:1px dashed #e2e7ee}
+.options .pdf-translator-settings>.ps-label{display:block;margin-bottom:6px}
+.options .pdf-translator-settings>.ps-desc{margin:6px 0 8px}
+.options .pdf-translator-picker{margin:0}
+.options .pdf-translator-list{display:flex;flex-direction:column;border:1.5px solid #e2e7ee;border-radius:12px;overflow:hidden;background:#fff}
+.options .pdf-translator-list:empty{display:none}
+.options .pdf-translator-row{display:flex;align-items:center;gap:10px;padding:8px 11px}
+.options .pdf-translator-row+.pdf-translator-row{border-top:1px solid #eef1f6}
+.options .pdf-translator-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600;color:#1a2233}
+.options .pdf-translator-toggle{border:1px solid #dfe4ec;background:#f7f9fc;color:#7b8494;border-radius:999px;padding:4px 9px;font:600 11px/1.2 inherit;cursor:pointer}
+.options .pdf-translator-toggle.on{border-color:var(--brand-line);background:var(--brand-soft);color:var(--brand-deep)}
+.options .pdf-translator-toggle:disabled{cursor:default;opacity:.65}
 
 /* 开发者模式任务日志：状态点沿用语义色（成功薄荷绿/警告黄/失败红/进行中天空蓝），
    明细区限高滚动，行 indent 层级对应 stage/image/cli */

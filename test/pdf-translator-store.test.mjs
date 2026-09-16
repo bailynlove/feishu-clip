@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { effectivePdfTranslatorRegistry, normalizePdfTranslatorEntries, pdfTranslatorView, removePdfTranslator, setPdfTranslatorEnabled, upsertPdfTranslator } from '../src/extension/pdf-translator-store.js';
+import { readFile } from 'node:fs/promises';
+import { effectivePdfTranslatorRegistry, normalizePdfTranslatorEntries, pdfTranslatorDisplayNames, pdfTranslatorView, removePdfTranslator, setPdfTranslatorEnabled, upsertPdfTranslator } from '../src/extension/pdf-translator-store.js';
+
+const readText = (path) => readFile(new URL(`../src/extension/${path.replace(/^\.\//, '')}`, import.meta.url), 'utf8');
 
 const entry = (id = 'one') => ({ ok: true, compatibility: 'compatible', enabled: true, confirmed: true, translator: { metadata: { translatorID: id, label: id, creator: 'Author', priority: 1, requestOrigins: [] }, code: 'function doWeb(){}', source: 'source' } });
 
@@ -21,17 +24,24 @@ test('toggle, remove, and display preserve current file state', () => {
   assert.equal(normalizePdfTranslatorEntries(null).length, 0);
 });
 
-test('effective registry exposes built-ins, user overrides and rejected imports', () => {
+test('effective registry exposes loaded built-in files, user overrides and rejected imports', async () => {
   const builtInId = '2b9c4f21-3c8a-4a7b-8c10-000000000001';
   const override = entry(builtInId);
   override.translator.metadata.label = 'Override';
-  const registry = effectivePdfTranslatorRegistry([
+  const registry = await effectivePdfTranslatorRegistry([
     entry('community'),
     override,
     { ...entry('broken'), ok: false, compatibility: 'incompatible' },
-  ], [builtInId]);
+  ], [builtInId], { readText });
   assert.ok(registry.selected.some((item) => item.source === 'builtin'));
   assert.equal(registry.selected.find((item) => item.translator.metadata.translatorID === builtInId).translator.metadata.label, 'Override');
   assert.equal(registry.active.some((item) => item.translator.metadata.translatorID === builtInId), true);
   assert.deepEqual(registry.rejected.map((item) => item.translator.metadata.translatorID), ['broken']);
+});
+
+test('display names add sequence numbers only when labels repeat', () => {
+  assert.deepEqual(pdfTranslatorDisplayNames([entry('one'), entry('two'), entry('three')]), ['one', 'two', 'three']);
+  const repeated = [entry('one'), entry('two'), entry('three')];
+  repeated.forEach((item) => { item.translator.metadata.label = 'Paper'; });
+  assert.deepEqual(pdfTranslatorDisplayNames(repeated), ['Paper (1)', 'Paper (2)', 'Paper (3)']);
 });

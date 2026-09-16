@@ -80,7 +80,7 @@ async function ensurePdfTranslatorHost() {
 
 async function runPdfTranslators(tab) {
   const stored = await localGet([PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
-  const registry = effectivePdfTranslatorRegistry(stored[PDF_TRANSLATORS_STORAGE_KEY], stored[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
+  const registry = await effectivePdfTranslatorRegistry(stored[PDF_TRANSLATORS_STORAGE_KEY], stored[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
   if (!registry.active.length) return { attachments: [], diagnostics: [] };
   const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageSnapshot });
   if (!execution?.result) return { attachments: [], diagnostics: [] };

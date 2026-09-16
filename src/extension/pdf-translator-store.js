@@ -54,9 +54,22 @@ export function pdfTranslatorView(entry) {
   };
 }
 
-export function effectivePdfTranslatorRegistry(imported, disabledBuiltIns = []) {
+export function pdfTranslatorDisplayNames(entries) {
+  const labels = entries.map((entry) => pdfTranslatorView(entry).label);
+  const totals = new Map();
+  for (const label of labels) totals.set(label, (totals.get(label) || 0) + 1);
+  const seen = new Map();
+  return labels.map((label) => {
+    if (totals.get(label) === 1) return label;
+    const order = (seen.get(label) || 0) + 1;
+    seen.set(label, order);
+    return `${label} (${order})`;
+  });
+}
+
+export async function effectivePdfTranslatorRegistry(imported, disabledBuiltIns = [], options) {
   const disabled = new Set(Array.isArray(disabledBuiltIns) ? disabledBuiltIns : []);
-  const builtIn = createBuiltInPdfTranslatorEntries().map((entry) => ({
+  const builtIn = (await createBuiltInPdfTranslatorEntries(options)).map((entry) => ({
     ...entry,
     enabled: !disabled.has(entry.translator.metadata.translatorID),
   }));
