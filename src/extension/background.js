@@ -3,6 +3,7 @@ import { buildContext, renderBody, renderTemplate, sanitizeClipTitle } from './t
 import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
 import { detectBuiltInPdf } from './pdf-translators-builtins.js';
+import { normalizePdfCandidates } from './pdf-attachments.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 // 分块切块口径与 src/bridge/job-store.mjs 的 PDF_CHUNK_BYTES 保持一致（SW 与 bridge 分属
@@ -309,12 +310,15 @@ async function handle(message) {
       const attemptId = message.attemptId ?? crypto.randomUUID();
       // pdfSource 以保存时快照的识别结果为准（比弹窗打开时的探测更新），探测结果兜底
       const detected = message.pdfEnabled === true ? (snapshot.pdf ?? message.pdfSource ?? null) : null;
-      const pdfSource = detected?.url && /^https?:/.test(detected.url)
-        ? { type: 'url', url: detected.url, name: detected.name ?? null, sizeBytes: detected.sizeBytes ?? null }
-        : null;
+      const normalizedPdfs = message.pdfEnabled === true
+        ? normalizePdfCandidates(snapshot.pdfAttachments ?? (detected ? [detected] : [])).attachments
+        : [];
+      const pdfSources = normalizedPdfs.map((item) => ({ type: 'url', url: item.url, name: item.name, sizeBytes: item.sizeBytes, primary: item.primary }));
+      const primarySource = pdfSources.find((item) => item.primary) ?? pdfSources[0] ?? null;
+      const { primary: _primary, ...pdfSource } = primarySource || {};
       // pdf 目标目录（#66）：弹窗 chip 选定的 folderToken（null = 云盘根目录），随 job 透传
       const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource, pdfFolderToken, digest } });
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot: { ...snapshot, pdfAttachments: normalizedPdfs }, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource: primarySource ? pdfSource : null, pdfSources, pdfFolderToken, digest } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }

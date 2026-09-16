@@ -914,3 +914,14 @@ test('requestBytes：排队中的 url 型 pdf job 转 awaiting_bytes；已 await
     await assert.rejects(() => store.requestBytes('attempt-unknown'), /Unknown attemptId/);
   });
 });
+
+test('同一剪藏尝试可拥有多个带稳定 attachmentId 的独立 PDF jobs', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', kind: 'pdf', pdfSource: { type: 'url', url: 'https://example.test/a.pdf' } });
+    await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', kind: 'pdf', attachmentId: 'pdf-2', pdfSource: { type: 'url', url: 'https://example.test/b.pdf' } });
+    const jobs = await store.get('attempt-1');
+    assert.deepEqual(jobs.filter((job) => job.kind === 'pdf').map((job) => job.attachmentId), [null, 'pdf-2']);
+    const second = await store.claim('attempt-1', 'worker-b', 'pdf', 'pdf-2');
+    assert.equal(second.pdfSource.url, 'https://example.test/b.pdf');
+  });
+});

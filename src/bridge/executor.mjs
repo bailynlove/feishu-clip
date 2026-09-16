@@ -386,7 +386,7 @@ export class ClipExecutor {
   // 唯一例外：url 型下载撞 401/403 不 fail，转 awaiting_bytes 等扩展持凭据分块回传（#68）
   async #executePdf(job) {
     const workerId = randomUUID();
-    await this.store.claim(job.attemptId, workerId, JOB_KIND.PDF);
+    await this.store.claim(job.attemptId, workerId, JOB_KIND.PDF, job.attachmentId);
     const scratch = await mkdtemp(path.join(tmpdir(), 'feishu-clip-pdf-'));
     // 长下载/上传期间周期续约（#89），收尾 finally 停表；挂在 mkdtemp 之后，
     // 防建目录抛错时计时器泄漏、持续给未进入 try 的死任务续约
@@ -422,7 +422,7 @@ export class ClipExecutor {
         // 字节共享（#94）：同次 clip 的摘要阶段可能在等这份字节，下载成功即共享，
         // 免摘要第二次下载。仅当 clip job 存在且非终态时才建共享条目
         const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
-        if (clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) this.#pdfShareEntry(job.attemptId).resolve({ buffer: fetched.buffer });
+        if (!job.attachmentId && clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) this.#pdfShareEntry(job.attemptId).resolve({ buffer: fetched.buffer });
       }
       const uploadAt = Date.now();
       this.#assertLease(lease);
@@ -446,17 +446,17 @@ export class ClipExecutor {
         timeline.push({ kind: 'stage', name: 'pdf_ref_insert', ms: Date.now() - refAt, detail: String(error?.message || error).slice(0, 300) });
         warnings.push(`PDF 云盘引用插入失败：${error?.message || '未知错误'}`);
       }
-      await this.store.complete(job.attemptId, workerId, { document: uploaded, warnings, ...timing() }, JOB_KIND.PDF);
+      await this.store.complete(job.attemptId, workerId, { document: uploaded, warnings, ...timing() }, JOB_KIND.PDF, job.attachmentId);
     } catch (error) {
       if (error.code === 'LEASE_LOST') {
         // 租约已被收走：由接管的新执行体负责终态，这里只记日志不写库
         this.logger.warn?.('租约丢失，pdf 执行中止', { attemptId: job.attemptId });
       } else {
-        const current = await this.store.get(job.attemptId, JOB_KIND.PDF);
+        const current = await this.store.get(job.attemptId, JOB_KIND.PDF, job.attachmentId);
         if (current?.status === JOB_STATUS.RUNNING && current.workerId === workerId) {
           if (!isBytes && browserFallbackError === error) {
             // 401/403 或 Bridge 网络不可达：不 fail，转 awaiting_bytes，弹窗轮询看到后经 SW 喂字节
-            await this.store.awaitBytes(job.attemptId, workerId);
+            await this.store.awaitBytes(job.attemptId, workerId, job.attachmentId);
             // 共享以凭据语义拒绝（#94）：摘要侧直接进 #80 staging 等待，不重复撞 401
             const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
             if (clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) {
@@ -464,7 +464,7 @@ export class ClipExecutor {
             }
             this.logger.log?.('pdf download requires browser fallback, awaiting extension bytes', { attemptId: job.attemptId, failureType: error.failureType, statusCode: error.statusCode });
           } else {
-            await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF);
+            await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF, job.attachmentId);
             // 共享拒绝（#94）：摘要侧收到后回退自己下载
             this.pdfShares.get(job.attemptId)?.reject(error);
             this.logger.error('pdf job failed', { attemptId: job.attemptId, error });

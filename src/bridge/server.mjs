@@ -374,7 +374,10 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         // pdfSource + 目标目录，落一条 pdf job；下方 clip 语义路径（snapshot/destination 校验）保持不变
         if (body.snapshot === undefined || body.snapshot === null) {
           if (!body.attemptId) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
-          const pdfSource = validatePdfSource(body.pdfSource);
+          const pdfSources = Array.isArray(body.pdfSources) ? body.pdfSources : [body.pdfSource];
+          const validSources = pdfSources.filter(Boolean).map(validatePdfSource);
+          if (validSources.length === 0) return send(response, 400, { ok: false, code: 'PDF_SOURCE_REQUIRED' }, origin);
+          const pdfSource = validSources[0];
           const pdfFolderToken = body.pdfFolderToken === undefined || body.pdfFolderToken === null ? null : body.pdfFolderToken;
           if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
             return send(response, 400, { ok: false, code: 'PDF_FOLDER_INVALID', message: 'pdfFolderToken 不合法' }, origin);
@@ -392,14 +395,23 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
             title: typeof body.title === 'string' && body.title ? body.title : null,
             folderToken: pdfFolderToken,
           });
+          const pdfJobs = [submitted.job];
+          for (let index = 1; index < validSources.length; index += 1) {
+            const extra = await store.submit({ attemptId: body.attemptId, sourceUrl: validSources[index].url, kind: JOB_KIND.PDF, pdfSource: validSources[index], title: body.title, folderToken: pdfFolderToken, attachmentId: `pdf-${index + 1}` });
+            pdfJobs.push(extra.job);
+          }
           executor.kick();
-          return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: null, pdfJob: jobView(submitted.job) }, origin);
+          return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: null, pdfJob: jobView(submitted.job), pdfJobs: pdfJobs.map(jobView) }, origin);
         }
         const isSpaceTarget = body.destination?.kind === 'space';
         if (!body.attemptId || !(isSpaceTarget ? body.destination?.spaceId : body.destination?.nodeToken)) return send(response, 400, { ok: false, code: 'JOB_INPUT_REQUIRED' }, origin);
         validateSnapshot(body.snapshot);
         const clientTiming = validateClientTiming(body.clientTiming);
-        const pdfSource = body.pdfSource === undefined || body.pdfSource === null ? null : validatePdfSource(body.pdfSource);
+        const rawPdfSources = Array.isArray(body.pdfSources) ? body.pdfSources : (body.pdfSource == null ? [] : [body.pdfSource]);
+        const normalizedPdfSources = rawPdfSources.map(validatePdfSource);
+        const knownPdfBytes = normalizedPdfSources.reduce((sum, source) => sum + (source.sizeBytes || 0), 0);
+        if (knownPdfBytes > 300 * 1024 * 1024) return send(response, 400, { ok: false, code: 'PDF_TOTAL_TOO_LARGE', message: 'PDF 总大小超过 300 MiB' }, origin);
+        const pdfSource = normalizedPdfSources.find((source, index) => rawPdfSources[index]?.primary === true) ?? normalizedPdfSources[0] ?? null;
         // pdf 目标目录（#66）：null = 云盘根目录；非空须是合法 token 形态
         const pdfFolderToken = body.pdfFolderToken === undefined || body.pdfFolderToken === null ? null : body.pdfFolderToken;
         if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
@@ -450,18 +462,25 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名；
         // folderToken（#66）是 picker/弹窗选定的云盘目录，null 即根目录
         let pdfSubmitted = null;
-        if (pdfSource) {
-          pdfSubmitted = await store.submit({
+        const pdfSubmittedList = [];
+        if (normalizedPdfSources.length) {
+          for (let index = 0; index < normalizedPdfSources.length; index += 1) {
+            const source = normalizedPdfSources[index];
+            const item = await store.submit({
             attemptId: body.attemptId,
             sourceUrl: body.snapshot.sourceUrl,
             kind: JOB_KIND.PDF,
-            pdfSource,
+            pdfSource: source,
             title: body.snapshot.title,
             folderToken: pdfFolderToken,
+            attachmentId: index === 0 ? null : `pdf-${index + 1}`,
           });
+            pdfSubmittedList.push(item);
+          }
+          pdfSubmitted = pdfSubmittedList[0];
         }
         executor.kick();
-        return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: jobView(submitted.job), pdfJob: pdfSubmitted ? jobView(pdfSubmitted.job) : null }, origin);
+        return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: jobView(submitted.job), pdfJob: pdfSubmitted ? jobView(pdfSubmitted.job) : null, pdfJobs: pdfSubmittedList.map((item) => jobView(item.job)) }, origin);
       }
 
       // ——— 分块通道（#61/#68）：扩展凭据回传 PDF 字节 ———

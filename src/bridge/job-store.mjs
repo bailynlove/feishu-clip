@@ -188,7 +188,7 @@ export class PersistentJobStore {
     this.#awaitingBytesTtlMs = awaitingBytesTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null, digest = null }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null, digest = null, attachmentId = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
     if (!JOB_KINDS.has(kind)) throw new TypeError(`Unknown job kind: ${kind}`);
     // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名；
@@ -199,7 +199,7 @@ export class PersistentJobStore {
     const normalizedFolderToken = typeof folderToken === 'string' && folderToken ? folderToken : null;
 
     return this.#mutate(async (data) => {
-      const existing = data.jobs.find((job) => job.attemptId === attemptId && jobKind(job) === kind);
+      const existing = data.jobs.find((job) => job.attemptId === attemptId && jobKind(job) === kind && (kind !== JOB_KIND.PDF || (job.attachmentId ?? null) === (attachmentId ?? null)));
       if (existing) {
         if (existing.sourceUrl !== sourceUrl) {
           throw new Error(`attemptId ${attemptId} is already bound to another source URL`);
@@ -251,6 +251,7 @@ export class PersistentJobStore {
           jobId: this.#createJobId(),
           attemptId,
           kind,
+          attachmentId: attachmentId ?? null,
           sourceUrl,
           title: typeof title === 'string' && title ? title : null,
           pdfSource: normalizedPdfSource,
@@ -320,12 +321,12 @@ export class PersistentJobStore {
 
   // get(attemptId) 语义（#60）：不传 kind 返回该次尝试的全部 job（数组，可为空）；
   // 传 kind 返回单个 job 或 null。弹窗恢复拿整次尝试，worker 只认自己的 kind
-  async get(attemptId, kind = null) {
+  async get(attemptId, kind = null, attachmentId = null) {
     const data = await this.#read();
     if (kind === null) {
       return data.jobs.filter((candidate) => candidate.attemptId === attemptId).map((job) => structuredClone(job));
     }
-    const job = data.jobs.find((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === kind);
+    const job = data.jobs.find((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === kind && (kind !== JOB_KIND.PDF || (candidate.attachmentId ?? null) === (attachmentId ?? null)));
     return job ? structuredClone(job) : null;
   }
 
@@ -342,10 +343,10 @@ export class PersistentJobStore {
     return structuredClone(jobs);
   }
 
-  async claim(attemptId, workerId, kind = JOB_KIND.CLIP) {
+  async claim(attemptId, workerId, kind = JOB_KIND.CLIP, attachmentId = null) {
     if (!workerId) throw new TypeError('workerId is required');
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, kind);
+      const job = this.#findJob(data, attemptId, kind, attachmentId);
       if (job.status !== JOB_STATUS.QUEUED) throw new Error(`Cannot claim job in ${job.status} state`);
       job.status = JOB_STATUS.RUNNING;
       job.workerId = workerId;
@@ -507,9 +508,9 @@ export class PersistentJobStore {
     });
   }
 
-  async complete(attemptId, workerId, { warnings = [], timeline = null, totalMs = null, document = null } = {}, kind = JOB_KIND.CLIP) {
+  async complete(attemptId, workerId, { warnings = [], timeline = null, totalMs = null, document = null } = {}, kind = JOB_KIND.CLIP, attachmentId = null) {
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, kind);
+      const job = this.#findJob(data, attemptId, kind, attachmentId);
       this.#assertActiveWorker(job, workerId);
       // 终态判定按 kind 策略表（completePatch 内含各自的前置校验，先算补丁再落，避免半改状态）
       Object.assign(job, kindStrategy(kind).completePatch(job, { warnings, document }));
@@ -522,14 +523,14 @@ export class PersistentJobStore {
     });
   }
 
-  async fail(attemptId, workerId, { stage, error, cleanup = null, timeline = null, totalMs = null }, kind = JOB_KIND.CLIP) {
+  async fail(attemptId, workerId, { stage, error, cleanup = null, timeline = null, totalMs = null }, kind = JOB_KIND.CLIP, attachmentId = null) {
     if (!stage || !error) throw new TypeError('stage and error are required');
     if (!FAILURE_STAGES.has(stage)) throw new TypeError(`Unknown failure stage: ${stage}`);
     if (cleanup && !CLEANUP_STATUSES.has(cleanup.status)) {
       throw new TypeError(`Unknown cleanup status: ${cleanup.status}`);
     }
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, kind);
+      const job = this.#findJob(data, attemptId, kind, attachmentId);
       this.#assertActiveWorker(job, workerId);
       job.error = error;
       job.step = JOB_STEP.DONE;
@@ -547,9 +548,9 @@ export class PersistentJobStore {
   // ——— 凭据回退（#68）：awaiting_bytes 的三个流转 ———
 
   // url 型下载撞 401/403：不 fail，转 awaiting_bytes 等扩展持凭据分块回传
-  async awaitBytes(attemptId, workerId) {
+  async awaitBytes(attemptId, workerId, attachmentId = null) {
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
       this.#assertActiveWorker(job, workerId);
       job.status = JOB_STATUS.AWAITING_BYTES;
       this.#releaseLease(job);
@@ -674,8 +675,8 @@ export class PersistentJobStore {
     return run;
   }
 
-  #findJob(data, attemptId, kind = JOB_KIND.CLIP) {
-    const job = data.jobs.find((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === kind);
+  #findJob(data, attemptId, kind = JOB_KIND.CLIP, attachmentId = null) {
+    const job = data.jobs.find((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === kind && (kind !== JOB_KIND.PDF || (candidate.attachmentId ?? null) === (attachmentId ?? null)));
     if (!job) throw new Error(`Unknown attemptId: ${attemptId}`);
     return job;
   }

@@ -113,9 +113,10 @@ function clipPhase(clip, digestWaitSeconds = null) {
 export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds = null } = {}) {
   const list = Array.isArray(jobs) ? jobs : [];
   const clip = list.find((job) => (job.kind ?? 'clip') === 'clip') ?? null;
-  const pdf = list.find((job) => job.kind === 'pdf') ?? null;
+  const pdfJobs = list.filter((job) => job.kind === 'pdf');
+  const pdf = pdfJobs[0] ?? null;
   if (!clip && !pdf) return null;
-  const pdfAwaitingBytes = pdf?.status === 'awaiting_bytes';
+  const pdfAwaitingBytes = pdfJobs.some((job) => job.status === 'awaiting_bytes');
   if (!pdf) {
     const view = describeJobView(clip, { recovered, digestWaitSeconds });
     return { ...view, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes: false };
@@ -123,8 +124,10 @@ export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds
 
   const docOk = clip ? clipSucceeded(clip) : false;
   const clipTerminal = clip ? TERMINAL_STATUSES.has(clip.status) : false;
-  const pdfOk = pdf.status === 'succeeded';
-  const pdfFailed = PDF_TERMINAL_STATUSES.has(pdf.status) && !pdfOk;
+  const pdfOk = pdfJobs.length > 0 && pdfJobs.every((job) => job.status === 'succeeded');
+  const pdfFailed = pdfJobs.some((job) => PDF_TERMINAL_STATUSES.has(job.status) && job.status !== 'succeeded');
+  const pdfCount = pdfJobs.length;
+  const pdfFailureCount = pdfJobs.filter((job) => PDF_TERMINAL_STATUSES.has(job.status) && job.status !== 'succeeded').length;
   const documentUrl = clip?.document?.url || null;
   const pdfUrl = pdf.document?.url || null;
 
@@ -138,7 +141,7 @@ export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds
   }
   // PDF 失败：文档不受影响，警告横幅 + [打开文档][重试 PDF]
   if (docOk && pdfFailed) {
-    return { kind: 'warning', message: `文档已保存 ✓，PDF 上传失败（${pdf.error || '未知错误'}）。文档不受影响。`, swapPrimary: false, documentUrl, pdfUrl: null, pdfRetry: true, pdfAwaitingBytes };
+      return { kind: 'warning', message: `文档已保存 ✓，${pdfCount > 1 ? `${pdfFailureCount}/${pdfCount} 个 PDF 上传失败` : `PDF 上传失败（${pdf.error || '未知错误'}）`}。文档不受影响。`, swapPrimary: false, documentUrl, pdfUrl: null, pdfRetry: true, pdfAwaitingBytes };
   }
   // 文档失败：错误横幅 + [重试文档]（主按钮保持可点），PDF 成功时链接仍可打开
   if (clip && clipTerminal && !docOk) {
@@ -159,7 +162,7 @@ export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds
   // 运行中：单条进度 + 阶段文案轮替。文档已成（带警告）但 PDF 仍在途时警告随进度条呈现——
   // 否则「已按纯文本生成摘要」这类降级在 PDF 未完成期间完全不可见（MDPI 事故复盘）
   const runningWarning = docOk && clip ? warningsText(clip.warnings) : null;
-  const runningMessage = `${clipPhase(clip, digestWaitSeconds)} · ${pdfPhase(pdf)}`;
+  const runningMessage = `${clipPhase(clip, digestWaitSeconds)} · ${pdfCount > 1 ? `PDF ${pdfJobs.filter((job) => job.status === 'succeeded').length}/${pdfCount}` : pdfPhase(pdf)}`;
   return { kind: 'progress', message: runningWarning ? `${runningMessage} · ${runningWarning}` : runningMessage, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
 }
 
