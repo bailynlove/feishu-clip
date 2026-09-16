@@ -25,6 +25,7 @@ let lastJobsBody = null; // CLIP/SAVE_PDF_TAB 转发给 bridge 的 POST /v1/jobs
 let lastDriveListUrl = null; // LIST_DRIVE_FOLDERS 的请求 URL（#66）
 let lastDriveValidateBody = null; // VALIDATE_DRIVE_FOLDER 的请求体（#66）
 let stubSnapshotPdf = null; // 非 null 时 extractor 桩的快照带 pdf 识别结果（#65）
+let stubSnapshotPdfAttachments = null;
 let detectPdfResult = { pdf: null }; // pdf-detect.js 桩的探测结果
 let tabUrl = PAGE; // 当前标签页 URL 桩（#67 探测用例会换 URL）
 let pdfTabProbeResult = null; // DETECT_PDF_TAB 探针（func 注入）返回值
@@ -52,7 +53,7 @@ globalThis.chrome = {
       }
       if (files?.[0] === 'pdf-detect.js') return [{ result: detectPdfResult }];
       return [{
-        result: { title: '页面标题', sourceUrl: PAGE, capturedAt: '2026-09-02T00:00:00.000Z', markdown: '# 正文', images: [], ...(stubSnapshotPdf ? { pdf: stubSnapshotPdf } : {}) },
+        result: { title: '页面标题', sourceUrl: PAGE, capturedAt: '2026-09-02T00:00:00.000Z', markdown: '# 正文', images: [], ...(stubSnapshotPdf ? { pdf: stubSnapshotPdf } : {}), ...(stubSnapshotPdfAttachments ? { pdfAttachments: stubSnapshotPdfAttachments } : {}) },
       }];
     },
   },
@@ -189,6 +190,22 @@ test('CLIP 未开 pdfEnabled：不上报 pdfSource', async () => {
 test('重试 PDF：弹窗复用同一 attemptId 重发 CLIP，原样透传给 bridge（bridge 侧幂等复位重排）', async () => {
   await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, attemptId: 'aaaaaaaa-1111-4111-8111-111111111111', pdfEnabled: true, pdfSource: { url: PDF_URL } });
   assert.equal(lastJobsBody.attemptId, 'aaaaaaaa-1111-4111-8111-111111111111');
+});
+
+test('CLIP 的多个 PDF source 保留稳定 attachmentId 与主文件标记', async () => {
+  stubSnapshotPdfAttachments = [
+    { id: 'supplement', url: 'https://example.test/supplement.pdf' },
+    { id: 'main-paper', url: 'https://example.test/main.pdf', primary: true },
+  ];
+  try {
+    await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true });
+    assert.deepEqual(lastJobsBody.pdfSources.map(({ attachmentId, primary }) => ({ attachmentId, primary })), [
+      { attachmentId: 'supplement', primary: false },
+      { attachmentId: 'main-paper', primary: true },
+    ]);
+  } finally {
+    stubSnapshotPdfAttachments = null;
+  }
 });
 
 test('DETECT_PDF：注入 pdf-detect.js 返回探测结果；未识别/异常按 null 处理', async () => {

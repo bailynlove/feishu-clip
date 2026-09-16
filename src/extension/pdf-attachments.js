@@ -1,41 +1,33 @@
-// Multi-PDF candidate normalization for one Clip Attempt (#111).
+// Multi-PDF budgets for one Clip Attempt. URL/PDF/primary normalization is owned by
+// normalizePdfAttachments so Translator output and upload input cannot drift.
+import { normalizePdfAttachments } from './pdf-translator.js';
+
 export const PDF_ATTACHMENT_LIMITS = Object.freeze({ maxCount: 10, maxEachBytes: 100 * 1024 * 1024, maxTotalBytes: 300 * 1024 * 1024 });
 
-function normalizeUrl(value) {
-  try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol)) return null;
-    url.hash = '';
-    return url.href;
-  } catch { return null; }
-}
-
 export function normalizePdfCandidates(candidates, limits = PDF_ATTACHMENT_LIMITS) {
-  const warnings = [];
-  const seen = new Set();
+  const normalized = normalizePdfAttachments(candidates);
+  const warnings = normalized.diagnostics.map((entry) => (
+    entry.code === 'DUPLICATE_ATTACHMENT' ? `已去重 PDF：${entry.url}` : entry.message
+  ));
   const attachments = [];
-  for (const candidate of Array.isArray(candidates) ? candidates : []) {
-    const url = normalizeUrl(candidate?.url);
-    if (!url) { warnings.push('已跳过无效 PDF 地址'); continue; }
-    if (seen.has(url)) { warnings.push(`已去重 PDF：${url}`); continue; }
-    seen.add(url);
+  for (const candidate of normalized.candidates) {
+    const original = candidates[candidate.order] || {};
     if (attachments.length >= limits.maxCount) { warnings.push(`超过 ${limits.maxCount} 个 PDF，后续附件已跳过`); continue; }
-    const sizeBytes = Number.isInteger(candidate?.sizeBytes) && candidate.sizeBytes > 0 ? candidate.sizeBytes : null;
-    if (sizeBytes !== null && sizeBytes > limits.maxEachBytes) { warnings.push(`PDF 超过单文件 ${limits.maxEachBytes} 字节限制：${url}`); continue; }
+    const sizeBytes = Number.isInteger(original.sizeBytes) && original.sizeBytes > 0 ? original.sizeBytes : null;
+    if (sizeBytes !== null && sizeBytes > limits.maxEachBytes) { warnings.push(`PDF 超过单文件 ${limits.maxEachBytes} 字节限制：${candidate.url}`); continue; }
     const used = attachments.reduce((sum, item) => sum + (item.sizeBytes || 0), 0);
-    if (sizeBytes !== null && used + sizeBytes > limits.maxTotalBytes) { warnings.push(`PDF 超过总计 ${limits.maxTotalBytes} 字节限制：${url}`); continue; }
+    if (sizeBytes !== null && used + sizeBytes > limits.maxTotalBytes) { warnings.push(`PDF 超过总计 ${limits.maxTotalBytes} 字节限制：${candidate.url}`); continue; }
     attachments.push({
-      id: candidate?.id || `pdf-${attachments.length + 1}`,
-      url,
-      name: typeof candidate?.name === 'string' && candidate.name ? candidate.name : null,
+      id: original.id || `pdf-${attachments.length + 1}`,
+      url: candidate.url,
+      name: candidate.name,
       sizeBytes,
-      primary: candidate?.primary === true,
-      translatorID: candidate?.translatorID || null,
+      primary: candidate.primary,
+      translatorID: original.translatorID || null,
     });
   }
-  const marked = attachments.findIndex((item) => item.primary);
-  const primaryIndex = marked >= 0 ? marked : 0;
-  if (attachments.filter((item) => item.primary).length > 1) warnings.push('多个 PDF 标记为主文件，已使用第一个主文件');
+  let primaryIndex = attachments.findIndex((item) => item.primary);
+  if (primaryIndex < 0 && attachments.length) { attachments[0].primary = true; primaryIndex = 0; }
   return { attachments: attachments.map((item, index) => ({ ...item, primary: index === primaryIndex })), primary: attachments[primaryIndex] || null, warnings };
 }
 

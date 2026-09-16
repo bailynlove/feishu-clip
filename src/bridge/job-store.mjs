@@ -114,6 +114,15 @@ function jobKind(job) {
   return JOB_KINDS.has(job?.kind) ? job.kind : JOB_KIND.CLIP;
 }
 
+export function createJobKey(attemptId, kind = JOB_KIND.CLIP, attachmentId = null) {
+  return Object.freeze({ attemptId, kind, attachmentId: kind === JOB_KIND.PDF ? (attachmentId ?? null) : null });
+}
+
+function matchesJobKey(job, key) {
+  return job.attemptId === key.attemptId && jobKind(job) === key.kind
+    && (key.kind !== JOB_KIND.PDF || (job.attachmentId ?? null) === key.attachmentId);
+}
+
 // pdfSource 两型（#60/#68）：url 型由 bridge 直接下载（撞 401/403 转 awaiting_bytes 回退）；
 // bytes 型由扩展持凭据抓取后分块回传，提交时声明文件名/总大小/总块数/SHA-256。
 // url 在 bytes 型里同样必填：既是扩展回传的抓取地址，也是幂等绑定键。
@@ -199,7 +208,8 @@ export class PersistentJobStore {
     const normalizedFolderToken = typeof folderToken === 'string' && folderToken ? folderToken : null;
 
     return this.#mutate(async (data) => {
-      const existing = data.jobs.find((job) => job.attemptId === attemptId && jobKind(job) === kind && (kind !== JOB_KIND.PDF || (job.attachmentId ?? null) === (attachmentId ?? null)));
+      const key = createJobKey(attemptId, kind, attachmentId);
+      const existing = data.jobs.find((job) => matchesJobKey(job, key));
       if (existing) {
         if (existing.sourceUrl !== sourceUrl) {
           throw new Error(`attemptId ${attemptId} is already bound to another source URL`);
@@ -326,7 +336,8 @@ export class PersistentJobStore {
     if (kind === null) {
       return data.jobs.filter((candidate) => candidate.attemptId === attemptId).map((job) => structuredClone(job));
     }
-    const job = data.jobs.find((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === kind && (kind !== JOB_KIND.PDF || (candidate.attachmentId ?? null) === (attachmentId ?? null)));
+    const key = createJobKey(attemptId, kind, attachmentId);
+    const job = data.jobs.find((candidate) => matchesJobKey(candidate, key));
     return job ? structuredClone(job) : null;
   }
 
@@ -676,7 +687,8 @@ export class PersistentJobStore {
   }
 
   #findJob(data, attemptId, kind = JOB_KIND.CLIP, attachmentId = null) {
-    const job = data.jobs.find((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === kind && (kind !== JOB_KIND.PDF || (candidate.attachmentId ?? null) === (attachmentId ?? null)));
+    const key = createJobKey(attemptId, kind, attachmentId);
+    const job = data.jobs.find((candidate) => matchesJobKey(candidate, key));
     if (!job) throw new Error(`Unknown attemptId: ${attemptId}`);
     return job;
   }

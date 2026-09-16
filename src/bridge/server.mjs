@@ -70,6 +70,23 @@ function validatePdfSource(value) {
   }
 }
 
+async function submitPdfJobs({ store, attemptId, sourceUrl, sources, title = null, folderToken = null }) {
+  const submitted = [];
+  for (const source of sources) {
+    const item = await store.submit({
+      attemptId,
+      sourceUrl: source.sourceUrl ?? sourceUrl ?? source.url,
+      kind: JOB_KIND.PDF,
+      pdfSource: source,
+      title,
+      folderToken,
+      attachmentId: source.attachmentId ?? null,
+    });
+    submitted.push(item);
+  }
+  return submitted;
+}
+
 function jobView(job) {
   if (!job) return null;
   const { snapshot: _snapshot, ...visible } = job;
@@ -386,20 +403,22 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           // 例外（#99 续）：clip 流创建的 pdf job sourceUrl 是页面 URL——declare 升级
           // （凭据回传补交 bytes 声明）必须沿用既有绑定，否则被 job-store 的
           // attemptId↔sourceUrl 绑定校验误拒（MDPI 实测三次 declare 全部被打回）
-          const existingPdfJob = await store.get(body.attemptId, JOB_KIND.PDF).catch(() => null);
-          const submitted = await store.submit({
-            attemptId: body.attemptId,
-            sourceUrl: existingPdfJob?.sourceUrl ?? pdfSource.url,
-            kind: JOB_KIND.PDF,
-            pdfSource,
-            title: typeof body.title === 'string' && body.title ? body.title : null,
-            folderToken: pdfFolderToken,
+          const existingJobs = await store.get(body.attemptId).catch(() => []);
+          const existingPdfJobs = existingJobs.filter((job) => job.kind === JOB_KIND.PDF);
+          const sources = validSources.map((source, index) => {
+            const requestedId = pdfSources[index]?.attachmentId;
+            const existing = existingPdfJobs.find((job) => requestedId != null
+              ? job.attachmentId === requestedId
+              : job.pdfSource?.url === source.url);
+            return {
+              ...source,
+              attachmentId: requestedId ?? existing?.attachmentId ?? (index ? `pdf-${index + 1}` : null),
+              sourceUrl: existing?.sourceUrl ?? source.url,
+            };
           });
-          const pdfJobs = [submitted.job];
-          for (let index = 1; index < validSources.length; index += 1) {
-            const extra = await store.submit({ attemptId: body.attemptId, sourceUrl: validSources[index].url, kind: JOB_KIND.PDF, pdfSource: validSources[index], title: body.title, folderToken: pdfFolderToken, attachmentId: `pdf-${index + 1}` });
-            pdfJobs.push(extra.job);
-          }
+          const submittedList = await submitPdfJobs({ store, attemptId: body.attemptId, sources, title: typeof body.title === 'string' && body.title ? body.title : null, folderToken: pdfFolderToken });
+          const submitted = submittedList[0];
+          const pdfJobs = submittedList.map((item) => item.job);
           executor.kick();
           return send(response, submitted.created ? 202 : 200, { ok: true, created: submitted.created, job: null, pdfJob: jobView(submitted.job), pdfJobs: pdfJobs.map(jobView) }, origin);
         }
@@ -408,7 +427,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         validateSnapshot(body.snapshot);
         const clientTiming = validateClientTiming(body.clientTiming);
         const rawPdfSources = Array.isArray(body.pdfSources) ? body.pdfSources : (body.pdfSource == null ? [] : [body.pdfSource]);
-        const normalizedPdfSources = rawPdfSources.map(validatePdfSource);
+        const normalizedPdfSources = rawPdfSources.map((source) => ({ ...validatePdfSource(source), attachmentId: source.attachmentId ?? null }));
         const knownPdfBytes = normalizedPdfSources.reduce((sum, source) => sum + (source.sizeBytes || 0), 0);
         if (knownPdfBytes > 300 * 1024 * 1024) return send(response, 400, { ok: false, code: 'PDF_TOTAL_TOO_LARGE', message: 'PDF 总大小超过 300 MiB' }, origin);
         const pdfSource = normalizedPdfSources.find((source, index) => rawPdfSources[index]?.primary === true) ?? normalizedPdfSources[0] ?? null;
@@ -464,19 +483,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         let pdfSubmitted = null;
         const pdfSubmittedList = [];
         if (normalizedPdfSources.length) {
-          for (let index = 0; index < normalizedPdfSources.length; index += 1) {
-            const source = normalizedPdfSources[index];
-            const item = await store.submit({
-            attemptId: body.attemptId,
-            sourceUrl: body.snapshot.sourceUrl,
-            kind: JOB_KIND.PDF,
-            pdfSource: source,
-            title: body.snapshot.title,
-            folderToken: pdfFolderToken,
-            attachmentId: index === 0 ? null : `pdf-${index + 1}`,
-          });
-            pdfSubmittedList.push(item);
-          }
+          pdfSubmittedList.push(...await submitPdfJobs({ store, attemptId: body.attemptId, sourceUrl: body.snapshot.sourceUrl, sources: normalizedPdfSources, title: body.snapshot.title, folderToken: pdfFolderToken }));
           pdfSubmitted = pdfSubmittedList[0];
         }
         executor.kick();
