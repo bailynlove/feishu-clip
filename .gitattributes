@@ -1,0 +1,3 @@
+# Keep the upstream Zotero compatibility fixture byte-for-byte, including its original trailing
+# whitespace; the test documents and checks the unchanged file shape.
+test/fixtures/pdf-translators/zotero-google-presentation.js whitespace=-blank-at-eol
