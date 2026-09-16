@@ -896,7 +896,12 @@ function renderPdfTranslators() {
     const shadowed = registry.shadowed.includes(entry);
     title.textContent = `${view.label} · ${view.version} · ${view.source === 'builtin' ? '内置' : '已导入'}${current ? ' · 当前使用' : shadowed ? ' · 已被覆盖' : ''}`;
     const detail = document.createElement('div');
-    detail.textContent = `${view.creator} · priority ${view.priority} · ${view.compatibility} · ${view.enabled ? '启用' : '停用'}${view.requestOrigins.length ? ` · 跨域：${view.requestOrigins.join(', ')}` : ''}`;
+    detail.textContent = `${view.creator} · ID ${view.translatorID} · target ${view.target || '—'} · priority ${view.priority} · ${view.compatibility} · ${view.enabled ? '启用' : '停用'}${view.requestOrigins.length ? ` · 权限：${view.requestOrigins.join(', ')}` : ' · 权限：无'}`;
+    if (view.diagnostics.length) {
+      const diagnostics = document.createElement('div');
+      diagnostics.textContent = `诊断：${view.diagnostics.map((item) => item.message).join('；')}`;
+      detail.append(diagnostics);
+    }
     const toggle = document.createElement('button');
     toggle.type = 'button'; toggle.className = 'link'; toggle.textContent = view.enabled ? '停用' : '启用';
     toggle.classList.toggle('hidden', shadowed);

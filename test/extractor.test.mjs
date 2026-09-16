@@ -994,69 +994,34 @@ test('无背景色类的普通 div：渲染行为不变，不包 callout', async
   assert.ok(result.markdown.includes('普通容器内容'));
 });
 
-// ——— 主 PDF 识别（#65）：arXiv 站点规则 + citation_pdf_url meta；识别结果随快照带出 ———
-
-// citation_pdf_url meta 夹具：extractor 只用 querySelector 取这一个 meta
-function citationMeta(url) {
-  return url === null ? null : { getAttribute: (name) => (name === 'content' ? url : null) };
-}
-
 function pdfDoc({ citation = null, bodyChildren = null } = {}) {
   return {
     title: '论文页面',
     body: element('body', [element('p', [textNode(LONG)]), ...(bodyChildren ?? [])]),
-    querySelector: (selector) => (selector === 'meta[name="citation_pdf_url"]' ? citationMeta(citation) : null),
+    querySelector: () => null,
     querySelectorAll: () => [],
   };
 }
 
-test('arXiv abs 页：按站点规则识别主 PDF（/abs/<id> → /pdf/<id>）', async () => {
-  const result = await runExtractor(pdfDoc(), 'https://arxiv.org/abs/2401.00001');
-  assert.equal(result.error, undefined);
-  assert.equal(result.pdf.url, 'https://arxiv.org/pdf/2401.00001');
-  assert.equal(result.pdf.name, '2401.00001.pdf');
-});
-
-test('arXiv 新版编号与子域也命中；非 abs 路径不误报', async () => {
-  const modern = await runExtractor(pdfDoc(), 'https://arxiv.org/abs/2401.00001v2');
-  assert.equal(modern.pdf.url, 'https://arxiv.org/pdf/2401.00001v2');
-  const subdomain = await runExtractor(pdfDoc(), 'https://www.arxiv.org/abs/1706.03762');
-  assert.equal(subdomain.pdf.url, 'https://www.arxiv.org/pdf/1706.03762');
-  const listing = await runExtractor(pdfDoc(), 'https://arxiv.org/list/cs.AI/recent');
-  assert.equal(listing.pdf, null, '列表页没有主 PDF');
-});
-
-test('citation_pdf_url meta：命中并按页面 URL resolve 相对路径', async () => {
-  const result = await runExtractor(pdfDoc({ citation: '/files/paper%20final.pdf' }), 'https://journal.example/articles/42');
-  assert.equal(result.pdf.url, 'https://journal.example/files/paper%20final.pdf');
-  assert.equal(result.pdf.name, 'paper final.pdf', '文件名按 URL 末段解码');
-});
-
-test('非 http(s) 的 citation_pdf_url（如 ftp://）不识别', async () => {
-  const result = await runExtractor(pdfDoc({ citation: 'ftp://example.com/x.pdf' }));
-  assert.equal(result.pdf, null);
-});
-
-test('正文里有随机 .pdf 链接但无 meta/站点规则：不误报主 PDF', async () => {
+test('正文提取不维护 PDF 站点规则，随机 PDF 链接仍作为正文保留', async () => {
   const link = element('a', [textNode('下载附录')]);
   link.setAttribute('href', 'https://example.test/attachments/appendix.pdf');
   const result = await runExtractor(pdfDoc({ bodyChildren: [element('p', [link])] }));
   assert.equal(result.error, undefined);
-  assert.equal(result.pdf, null, '不做全量 PDF 链接扫描（#58 结论）');
+  assert.equal(result.pdf, undefined, 'PDF 候选只由 Translator 注册表产生');
   assert.ok(result.markdown.includes('[下载附录](https://example.test/attachments/appendix.pdf)'), '链接仍是普通正文');
 });
 
-test('普通页面无 meta：pdf 为 null，不影响正文提取', async () => {
+test('普通页面不带 pdf 字段，不影响正文提取', async () => {
   const result = await runExtractor(pdfDoc());
   assert.equal(result.error, undefined);
-  assert.equal(result.pdf, null);
+  assert.equal(result.pdf, undefined);
   assert.ok(result.markdown.includes('足够长的正文内容'));
 });
 
-test('Hugging Face blob 页（#95）：识别 resolve 直链 PDF，标题取文件名词干', async () => {
+test('Hugging Face blob 页标题取文件名词干，PDF 发现交给 Translator', async () => {
   const result = await runExtractor(pdfDoc(), 'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf');
   assert.equal(result.error, undefined);
-  assert.equal(result.pdf.url, 'https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/resolve/main/DeepSeek_V41_Tech_Report.pdf');
-  assert.equal(result.pdf.name, 'DeepSeek_V41_Tech_Report.pdf');
+  assert.equal(result.pdf, undefined);
   assert.equal(result.title, 'DeepSeek_V41_Tech_Report', 'blob 页标题是「file.pdf · org/repo at ref」，论文语义在文件名词干');
 });

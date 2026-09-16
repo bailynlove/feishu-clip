@@ -2,7 +2,6 @@ import { DEFAULT_DIGEST_DOC_TITLE, ensurePresets, resolveDigestInstruction } fro
 import { buildContext, renderBody, renderTemplate, sanitizeClipTitle } from './templates.js';
 import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
-import { detectBuiltInPdf } from './pdf-translators-builtins.js';
 import { normalizePdfCandidates } from './pdf-attachments.js';
 import { effectivePdfTranslatorRegistry, PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY } from './pdf-translator-store.js';
 
@@ -55,10 +54,6 @@ async function extractActiveTab() {
       result.pdf = translated.attachments.find((item) => item.primary) ?? translated.attachments[0];
       result.pdfTranslatorDiagnostics = translated.diagnostics;
     }
-  } else {
-    // Test/legacy browser fallback while offscreen documents are unavailable.
-    const builtin = detectBuiltInPdf(result.sourceUrl, null);
-    if (builtin) result.pdf = { ...builtin, sizeBytes: result.pdf?.sizeBytes ?? null };
   }
   return result;
 }
@@ -379,8 +374,8 @@ async function handle(message) {
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }
-    // 弹窗打开时的主 PDF 轻量探测（#65）：注入 pdf-detect.js（只读 meta/location + 一次 HEAD），
-    // 不跑正文提取；失败按未识别处理，弹窗不出现 PDF 入口
+    // 弹窗打开时通过同一有效 Translator 注册表执行 detectWeb + doWeb；
+    // 失败按未识别处理，弹窗不出现 PDF 入口。
     case 'DETECT_PDF': {
       try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -390,8 +385,7 @@ async function handle(message) {
           const normalized = normalizePdfCandidates(translated.attachments);
           return { pdf: normalized.primary, pdfAttachments: normalized.attachments, diagnostics: [...translated.diagnostics, ...normalized.warnings] };
         }
-        const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['pdf-detect.js'] });
-        return execution?.result ?? { pdf: null };
+        return { pdf: null };
       } catch {
         return { pdf: null };
       }

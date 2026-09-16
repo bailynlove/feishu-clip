@@ -208,18 +208,8 @@ test('CLIP 的多个 PDF source 保留稳定 attachmentId 与主文件标记', a
   }
 });
 
-test('DETECT_PDF：注入 pdf-detect.js 返回探测结果；未识别/异常按 null 处理', async () => {
-  try {
-    detectPdfResult = { pdf: { url: PDF_URL, name: '2401.00001.pdf', sizeBytes: 2048 } };
-    const detected = await send({ type: 'DETECT_PDF' });
-    assert.equal(detected.pdf.url, PDF_URL);
-    assert.equal(detected.pdf.sizeBytes, 2048);
-
-    detectPdfResult = { pdf: null };
-    assert.equal((await send({ type: 'DETECT_PDF' })).pdf, null);
-  } finally {
-    detectPdfResult = { pdf: null };
-  }
+test('DETECT_PDF：缺少 offscreen 能力时保守返回 null', async () => {
+  assert.equal((await send({ type: 'DETECT_PDF' })).pdf, null);
 });
 
 test('GET_JOB 兼容老 bridge 单 job 形态，并聚合新 bridge 的 jobs 数组', async () => {

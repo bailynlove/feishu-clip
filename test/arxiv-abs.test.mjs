@@ -80,7 +80,6 @@ test('arXiv abs 页：右侧 extra-services 栏目（下载按钮/浏览上下�
   assert.ok(!markdown.includes('Google Scholar'));
 });
 
-test('arXiv abs 页：主 PDF 识别不受正文根收窄影响', () => {
-  assert.equal(result.pdf.url, 'https://arxiv.org/pdf/2608.26263');
-  assert.equal(result.pdf.name, '2608.26263.pdf');
+test('arXiv abs 页：正文提取不再维护 PDF 站点规则', () => {
+  assert.equal(result.pdf, undefined);
 });

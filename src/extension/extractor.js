@@ -510,40 +510,6 @@
       return render(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     }
 
-    // 主 PDF 识别（#65）：arXiv 站点规则（abs 页 → /pdf/<id>）+ 通用 citation_pdf_url meta
-    // 启发式；不做全量 PDF 链接扫描（#58 结论）。pdf-detect.js 的弹窗探测用同一份规则，
-    // 两处是独立注入的经典脚本、无法共享模块，规则修改须两边同步
-    function detectMainPdf(pageUrl, citationPdfUrl) {
-      try {
-        const page = new URL(pageUrl);
-        const isArxiv = page.hostname === 'arxiv.org' || page.hostname.endsWith('.arxiv.org');
-        if (isArxiv) {
-          const match = page.pathname.match(/^\/abs\/([^/]+)/);
-          if (match && match[1]) return { url: `${page.origin}/pdf/${match[1]}`, name: `${match[1]}.pdf` };
-        }
-        // Hugging Face blob 查看器（#95）：/[datasets/]<org>/<repo>/blob/<ref>/<path>.pdf →
-        // /resolve/ 直链（302 到 CDN，response-content-type=application/pdf）；名字取路径末段解码
-        if (page.hostname === 'huggingface.co') {
-          const match = page.pathname.match(/^\/(datasets\/)?([^/]+\/[^/]+)\/blob\/([^/]+)\/(.+?\.pdf)$/i);
-          if (match) {
-            const [, datasets = '', repo, ref, filePath] = match;
-            let name = filePath.split('/').pop() || null;
-            try { name = name ? decodeURIComponent(name) : null; } catch { /* 保留未解码原名 */ }
-            return { url: `${page.origin}/${datasets}${repo}/resolve/${ref}/${filePath}`, name };
-          }
-        }
-        if (citationPdfUrl) {
-          const pdf = new URL(citationPdfUrl, page);
-          if (pdf.protocol === 'http:' || pdf.protocol === 'https:') {
-            let name = pdf.pathname.split('/').filter(Boolean).pop() || null;
-            try { name = name ? decodeURIComponent(name) : null; } catch { /* 保留未解码原名 */ }
-            return { url: pdf.href, name };
-          }
-        }
-      } catch { /* 非法输入一律按未识别处理 */ }
-      return null;
-    }
-
     // arXiv abs 页判定（#69）：正文根收窄与标题降级共用。与 detectMainPdf 的 arXiv 规则同形，
     // 但用途不同（排版对齐，非 PDF 识别），两处各自维护
     function isArxivAbsPage(pageUrl) {
@@ -597,10 +563,7 @@
       }
     }
     if (markdown.length < 20) throw new Error('未提取到足够的正文内容');
-    // 识别失败不阻塞主流程：pdf 为 null 时弹窗不显示「PDF 存云盘」相关入口
-    const citationPdf = document.querySelector('meta[name="citation_pdf_url"]')?.getAttribute('content') ?? null;
-    const pdf = detectMainPdf(location.href, citationPdf);
     const title = hfBlobTitle(location.href) || document.title.trim() || '网页剪藏';
-    return { title, sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes, pdf };
+    return { title, sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes };
   } catch (error) { return { error: error.message }; }
 })()

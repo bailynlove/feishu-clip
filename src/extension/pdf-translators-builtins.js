@@ -1,37 +1,5 @@
-// Built-in PDF Translator registry (#110). Detection lives here so popup probing and translator
-// selection share one ordered source of truth; direct PDF tabs remain handled by the core path.
-const HTTP = new Set(['http:', 'https:']);
-
-function fileName(url) {
-  try {
-    const value = new URL(url, 'https://invalid.test').pathname.split('/').filter(Boolean).pop() || null;
-    return value ? decodeURIComponent(value) : null;
-  } catch { return null; }
-}
-
-export function detectBuiltInPdf(pageUrl, citationPdfUrl = null) {
-  try {
-    const page = new URL(pageUrl);
-    if (!HTTP.has(page.protocol)) return null;
-    const isArxiv = page.hostname === 'arxiv.org' || page.hostname.endsWith('.arxiv.org');
-    if (isArxiv) {
-      const match = page.pathname.match(/^\/abs\/([^/]+)/);
-      if (match?.[1]) return { url: `${page.origin}/pdf/${match[1]}`, name: `${match[1]}.pdf`, translatorID: '2b9c4f21-3c8a-4a7b-8c10-000000000001' };
-    }
-    if (page.hostname === 'huggingface.co') {
-      const match = page.pathname.match(/^\/(datasets\/)?([^/]+\/[^/]+)\/blob\/([^/]+)\/(.+?\.pdf)$/i);
-      if (match) {
-        const [, datasets = '', repo, ref, filePath] = match;
-        return { url: `${page.origin}/${datasets}${repo}/resolve/${ref}/${filePath}`, name: fileName(filePath), translatorID: '2b9c4f21-3c8a-4a7b-8c10-000000000002' };
-      }
-    }
-    if (citationPdfUrl) {
-      const pdf = new URL(citationPdfUrl, page);
-      if (HTTP.has(pdf.protocol)) return { url: pdf.href, name: fileName(pdf.href), translatorID: '2b9c4f21-3c8a-4a7b-8c10-000000000003' };
-    }
-  } catch { /* invalid page or citation URL */ }
-  return null;
-}
+// Built-in PDF Translator registry (#110). Site rules exist only as executable Translator files,
+// so popup probing and final extraction cannot drift into separate hard-coded implementations.
 
 export const BUILT_IN_PDF_TRANSLATORS = Object.freeze([
   Object.freeze({ translatorID: '2b9c4f21-3c8a-4a7b-8c10-000000000001', label: 'arXiv PDF', priority: 10, target: '^https?://(?:[^/]+\\.)?arxiv\\.org/abs/', kind: 'arxiv' }),
