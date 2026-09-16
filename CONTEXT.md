@@ -57,7 +57,7 @@ Bridge 端 `ai.json` 里一套命名的 AI API 配置（apiType / baseUrl / mode
 _Avoid_: 模型配置、API 档案
 
 **PDF 附件占位符（{{@file}}）**:
-摘要指令（预设级/全局）中的占位符；Bridge 检出后把本次剪藏 PDF 以 base64 附件随摘要请求一并发给 AI（三种 API 类型各自附件形状），无 PDF、预设未开「PDF 存云盘」或超 32MB 时降级为纯文本摘要并记 job 警告，不阻断剪藏。
+摘要指令（预设级/全局）中的占位符；Bridge 检出后只把本次剪藏的主 PDF 以 base64 附件随摘要请求一并发给 AI（三种 API 类型各自附件形状），其余 PDF 仍上传云盘但不发给 AI。无主 PDF、预设未开「PDF 存云盘」或主 PDF 超 32MB 时降级为纯文本摘要并记 job 警告，不自动改选其他附件，也不阻断剪藏。
 _Avoid_: 模板变量、正文占位符
 
 **悬浮内容（Hover Content）**:
@@ -81,11 +81,31 @@ _Avoid_: 水印、追踪码
 _Avoid_: 嵌入帧、外部网页块
 
 **PDF 识别（PDF Detection）**:
-点击剪藏时判定来源页面是否携带一份可存云盘的 PDF：标签页本身是 PDF（executeScript 探针读 `document.contentType`，注入失败回退 URL 后缀兜底），或 HTML 论文页存在主 PDF 链接（站点规则 + `citation_pdf_url` meta 启发式，不做全量 PDF 链接扫描）。
+点击剪藏时判定来源页面是否携带可存云盘的 PDF：标签页本身是 PDF 时由核心直接识别（executeScript 探针读 `document.contentType`，注入失败回退 URL 后缀兜底），HTML 论文页则由 PDF Translator 识别出一个或多个 PDF 附件候选；不做无边界的全页面 PDF 链接扫描。现有 arXiv 与 Hugging Face 逻辑分别作为内置 Translator 交付，`citation_pdf_url` 逻辑作为最低优先级的通用内置 Translator，升级后保持原有识别覆盖。
 _Avoid_: 网页里有 PDF 链接、浏览器下载记录
 
+**PDF 附件候选（PDF Attachment Candidate）**:
+PDF Translator 从来源页面识别出的一个可下载 PDF，包含地址、展示文件名、可选的 `primary` 标记及其在 Translator 结果中的顺序；同一来源页面可以产生多个候选。候选按规范化地址去重并保留 Translator 顺序；每次剪藏最多接收 10 个、单个最多 100 MiB、合计最多 300 MiB，预算内通过校验的候选都进入上传流程，超出预算的候选跳过并形成警告。首个标记 `primary: true` 的候选是主 PDF；没有标记时以首个候选为主 PDF；出现多个标记时仍取首个并记录 Translator 警告。
+_Avoid_: 主 PDF、网页 PDF 链接、补充材料链接
+
+**PDF Translator**:
+针对一类来源页面运行的可执行适配器：判断自己是否适用，并从页面、页面元数据或必要的后续请求中找出 PDF 附件候选。打开剪藏弹窗时只运行轻量 `detectWeb`，用于尽快展示 PDF 开关与候选数量；用户提交剪藏后才运行完整 `doWeb` 与受控网络请求，其结果绑定并固定到本次剪藏尝试，后续上传直接复用。页面在两个阶段之间发生变化时，以提交剪藏时的完整提取结果为准。Translator 可以由项目或社区维护，让不同站点形成各自完整的提取方法。
+_Avoid_: PDF 下载规则、触发规则、通用网页插件
+
+**PDF Translator 文件（PDF Translator File）**:
+用户在设置页从本地手动导入并明确确认启用的 Translator 交付单元；导入后由扩展保存独立副本，不跟随原文件变化，也不从远程自动更新。设置页始终列出当前使用的全部文件及其状态，多个文件可以同时生效。每个条目显示名称、作者、版本、来源（内置或用户导入）、稳定 ID、适用网址、优先级、启用状态、兼容性、声明的跨域权限及最近一次诊断；用户可以启用或停用、查看源代码、重新导入替换，以及移除用户版本。v1 不在设置页内置代码编辑器；用户查看、导出或复制源代码，在本地编辑器修改后重新导入，同一 ID 替换前展示版本与权限差异并再次确认。执行顺序只由文件内优先级决定，设置页不另设拖拽排序。多个 Translator 适用时按优先级逐个检测，首个成功识别出 PDF 附件候选的结果生效，未命中、异常或超时则继续后备项。内置 Translator 可查看、停用但不能删除；同一 ID 的用户导入版本经确认后覆盖内置版本，移除用户版本后恢复内置版本及其原启用状态。文件决定识别与提取方法，不负责 PDF 字节下载或上传。
+_Avoid_: PDF 规则文件、站点脚本、剪藏预设
+
+**PDF Translator 运行时（PDF Translator Runtime）**:
+执行 PDF Translator 的隔离环境；向 Translator 提供当前页面的 URL、只读页面内容与受控网络请求能力，并接收 PDF 识别结果和诊断信息。轻量 `detectWeb` 最多执行 1 秒且不能发起网络请求；完整 `doWeb` 最多执行 15 秒、最多发起 8 个请求，单个响应最多 5 MiB且响应合计最多 20 MiB。Translator 只返回 PDF 地址与元数据，不在运行时下载 PDF 字节。网络请求默认限于当前页面同源；跨域目标必须由 Translator 声明并在导入时向用户展示，未声明目标与越界重定向均被拒绝，认证信息不跨域转发。Translator 无权访问扩展存储、Bridge 凭据、本地文件、系统命令或页面写操作；单个 Translator 的异常、超时与资源超限会形成诊断，并继续尝试后备 Translator，不影响网页剪藏。
+_Avoid_: JavaScript 沙箱、插件宿主、脚本执行器
+
+**Zotero 兼容 PDF Translator（Zotero-Compatible PDF Translator）**:
+采用 Zotero Web Translator 文件外形并只使用本产品明确支持的兼容能力的 PDF Translator。兼容范围包含 Translator 元数据、页面检测、页面转换、常用页面查询与受控网络请求，以及从条目附件中返回 PDF；超出兼容范围的文件在导入时标记为不兼容，不在运行时静默失败。
+_Avoid_: Zotero Connector、完整 Zotero Translator、Zotero 插件
+
 **PDF 上传任务（PDF Upload Job）**:
-与剪藏 job 共享同一剪藏尝试 `attemptId`、以 `kind: 'pdf'` 区分的独立 job；状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 或传输层网络错误时转入 awaiting_bytes 等待扩展喂字节，HTTP 内容、类型、大小和 SSRF 拒绝仍直接失败。上传成功后把该 PDF 以「@」引用（mention_doc，quote container 内）插到本次剪藏文档开头（#88）；幂等靠剪藏 job 的 `pdfRefInserted` 标记（mark-before-insert：先置位再插入，插入失败清除标记），插入失败只记 pdf job 警告、不改终态；clip 文档尚未建好时跳过并记警告，clip 侧建档后不自动补插（协议空隙，pdf 重试可补）。
+与剪藏 job 共享同一剪藏尝试、并绑定一个稳定附件标识的独立 job；同一尝试可以包含多个 PDF 上传任务。状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），各附件独立下载、回传、上传和重试，单个失败不阻塞其他附件。上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 或传输层网络错误时转入 awaiting_bytes 等待扩展喂字节，HTTP 内容、类型、大小和 SSRF 拒绝仍直接失败。每个上传成功的 PDF 都以「@」引用插入本次剪藏文档；插入按附件分别幂等，失败只影响对应附件的警告。剪藏结果聚合展示全部附件状态，允许部分成功。
 _Avoid_: 附件同步、文献库条目
 
 **云盘目录（Drive Folder）**:
