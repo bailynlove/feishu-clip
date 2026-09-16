@@ -380,7 +380,7 @@ const PDF_SOURCE = { type: 'url', url: 'https://arxiv.org/pdf/2401.00001', name:
 
 test('同一 attemptId 下 clip 与 pdf job 各自独立，get 不带 kind 返回全部', async () => {
   await withStore(async ({ store }) => {
-    const clip = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article' });
+    const clip = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', pdfFailurePolicy: 'abort' });
     const pdf = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', kind: 'pdf', pdfSource: PDF_SOURCE, title: '论文标题' });
 
     assert.equal(clip.created, true);
@@ -388,6 +388,7 @@ test('同一 attemptId 下 clip 与 pdf job 各自独立，get 不带 kind 返�
     assert.notEqual(pdf.job.jobId, clip.job.jobId);
     assert.equal(pdf.job.kind, 'pdf');
     assert.equal(clip.job.kind, 'clip');
+    assert.equal(clip.job.pdfFailurePolicy, 'abort');
     assert.equal(pdf.job.title, '论文标题');
     assert.deepEqual(pdf.job.pdfSource, PDF_SOURCE);
     assert.equal(pdf.job.snapshot, null, 'pdf job 不携带正文快照');
@@ -406,6 +407,15 @@ test('同一 attemptId 下 clip 与 pdf job 各自独立，get 不带 kind 返�
     assert.equal(againClip.created, false);
     assert.equal(againPdf.created, false);
     assert.equal((await store.list()).length, 2);
+  });
+});
+
+test('clip job 的 PDF 失败策略缺省及非法值均归一为 continue', async () => {
+  await withStore(async ({ store }) => {
+    const defaulted = await store.submit({ attemptId: 'attempt-default', sourceUrl: 'https://example.test/default' });
+    const invalid = await store.submit({ attemptId: 'attempt-invalid', sourceUrl: 'https://example.test/invalid', pdfFailurePolicy: 'wat' });
+    assert.equal(defaulted.job.pdfFailurePolicy, 'continue');
+    assert.equal(invalid.job.pdfFailurePolicy, 'continue');
   });
 });
 

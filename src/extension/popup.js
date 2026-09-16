@@ -3,6 +3,7 @@ import { createPopupPicker } from './popup-picker.js';
 import { createDrivePicker } from './drive-picker.js';
 import { describeAttemptView, initPopupPresets, initPdfTabState, currentPreset, selectPreset, editTitle, editCustomBody, resetTitle, isTitleEdited, primaryLabel, overrideDestination, finalTitle, toggleSection, previewBody, previewScrollTarget, isSessionModified, setIncludeImages, saveAsNewPreset, updateCurrentPreset, composeClip, clipFilename, setMenuOpen, setPdfDetected, setPdfOn, setPdfFolder, presetPdfEnabled, isPdfSessionOnly, isPdfFolderSessionOnly, pdfFolderLabel, formatPdfSize, pdfDisplayName, clipDigest, setDigestOn, setDigestProvider, editDigestInstruction, digestSubLabel, reduceDigestSince } from './popup-state.js';
 import { aiDigestProviderOptions } from './options-state.js';
+import { resolvePdfFailurePolicy } from './presets.js';
 
 let attemptId = null;
 let recoveredAttempt = false;
@@ -379,6 +380,7 @@ async function savePdfTab() {
       attemptId: recoveredAttempt ? null : attemptId,
       pdfSource: presetState.pdf,
       pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
+      pdfFailurePolicy: resolvePdfFailurePolicy(currentPreset(presetState)),
     });
     attemptId = result.pdfJob?.attemptId ?? attemptId;
     recoveredAttempt = false;
@@ -674,6 +676,7 @@ async function clipToFeishu() {
       pdfEnabled: presetState.pdfOn && Boolean(presetState.pdf),
       pdfSource: presetState.pdf,
       pdfFolderToken: presetState.pdfFolder?.folderToken ?? null,
+      pdfFailurePolicy: resolvePdfFailurePolicy(currentPreset(presetState)),
       // AI 摘要（#75）：预设开关 + 预设级指令；全局回落在 background 解析
       ...clipDigest(presetState),
     });

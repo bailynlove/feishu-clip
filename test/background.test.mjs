@@ -187,6 +187,13 @@ test('CLIP 未开 pdfEnabled：不上报 pdfSource', async () => {
   assert.equal(lastJobsBody.pdfSource, null, '缺省等同关闭');
 });
 
+test('CLIP 透传 PDF 保存失败策略，非法或缺省值归一为继续', async () => {
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL }, pdfFailurePolicy: 'abort' });
+  assert.equal(lastJobsBody.pdfFailurePolicy, 'abort');
+  await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, pdfEnabled: true, pdfSource: { url: PDF_URL }, pdfFailurePolicy: 'wat' });
+  assert.equal(lastJobsBody.pdfFailurePolicy, 'continue');
+});
+
 test('重试 PDF：弹窗复用同一 attemptId 重发 CLIP，原样透传给 bridge（bridge 侧幂等复位重排）', async () => {
   await send({ type: 'CLIP', destination: { kind: 'node', nodeToken: 'n1' }, attemptId: 'aaaaaaaa-1111-4111-8111-111111111111', pdfEnabled: true, pdfSource: { url: PDF_URL } });
   assert.equal(lastJobsBody.attemptId, 'aaaaaaaa-1111-4111-8111-111111111111');

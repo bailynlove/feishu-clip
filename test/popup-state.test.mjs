@@ -1019,10 +1019,10 @@ test('会话 PDF 开关：初值 = 预设默认，偏离预设即「仅本次」
 test('saveAsNewPreset / updateCurrentPreset 把会话 PDF 开关写回预设 pdfDrive（未选目录时 folderToken 为 null = 根目录）', () => {
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   const { preset: created } = saveAsNewPreset(setPdfOn(state, true), '论文');
-  assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: null, folderName: null });
+  assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: null, folderName: null, failurePolicy: 'continue' });
 
   const { preset: updated } = updateCurrentPreset(setPdfOn(state, true));
-  assert.deepEqual(updated.pdfDrive, { enabled: true, folderToken: null, folderName: null });
+  assert.deepEqual(updated.pdfDrive, { enabled: true, folderToken: null, folderName: null, failurePolicy: 'continue' });
 
   const pdfPreset = [{ id: 'p1', name: '论文', titleTemplate: '{{title}}', action: 'feishu', destination: null, pdfDrive: { enabled: true, folderToken: null, folderName: null } }];
   state = initPopupPresets({ presets: pdfPreset, defaultPresetId: 'p1' }, tab, now);
@@ -1113,16 +1113,24 @@ test('saveAsNewPreset / updateCurrentPreset 把会话目录写回 pdfDrive（fol
   let state = initPopupPresets({ presets, defaultPresetId: 'p1' }, tab, now);
   state = setPdfOn(setPdfFolder(state, { folderToken: 'fld-papers', folderName: '论文' }), true);
   const { preset: created } = saveAsNewPreset(state, '论文');
-  assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: 'fld-papers', folderName: '论文' });
+  assert.deepEqual(created.pdfDrive, { enabled: true, folderToken: 'fld-papers', folderName: '论文', failurePolicy: 'continue' });
 
   const { preset: updated, state: next } = updateCurrentPreset(state);
-  assert.deepEqual(updated.pdfDrive, { enabled: true, folderToken: 'fld-papers', folderName: '论文' });
+  assert.deepEqual(updated.pdfDrive, { enabled: true, folderToken: 'fld-papers', folderName: '论文', failurePolicy: 'continue' });
   assert.equal(isSessionModified(next), false, '写回后 session 与预设一致');
 
   // 根目录覆盖写回：folderToken 为 null 的合法态
   state = setPdfFolder(state, { folderToken: null, folderName: null });
   const { preset: rootBack } = updateCurrentPreset(state);
-  assert.deepEqual(rootBack.pdfDrive, { enabled: true, folderToken: null, folderName: null });
+  assert.deepEqual(rootBack.pdfDrive, { enabled: true, folderToken: null, folderName: null, failurePolicy: 'continue' });
+});
+
+test('弹窗写回目录时保留预设的 PDF 失败策略', () => {
+  const configured = [{ ...presets[0], pdfDrive: { enabled: true, folderToken: null, folderName: null, failurePolicy: 'abort' } }];
+  let state = initPopupPresets({ presets: configured, defaultPresetId: 'p1' }, tab, now);
+  state = setPdfFolder(state, { folderToken: 'fld-papers', folderName: '论文' });
+  const { preset } = updateCurrentPreset(state);
+  assert.equal(preset.pdfDrive.failurePolicy, 'abort');
 });
 
 // ——— PDF 标签页形态（#67）：initPdfTabState 只携带单面板需要的字段 ———

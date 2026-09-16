@@ -11,8 +11,9 @@ export function createDefaultPreset(overrides = {}) {
     bodyTemplate: '',
     action: 'feishu',
     triggers: [],
-    // PDF 存云盘（#65）：null | { enabled, folderToken, folderName }；folderToken 为 null 即云盘根目录；
+    // PDF 存云盘（#65）：null | { enabled, folderToken, folderName, failurePolicy }；folderToken 为 null 即云盘根目录；
     // enabled:false = 关闭但保留目录配置（设置页开关只折叠不清空，#100）
+    // failurePolicy: continue（默认，存量兼容）/ abort（PDF 失败时在建档前终止剪藏）
     pdfDrive: null,
     // AI 摘要（#75）：null | { enabled, instruction, provider, mode, docTitleTemplate }；
     // enabled:false = 关闭但保留配置（设置页开关只折叠设置区，不清空内容）；instruction 空串 = 用全局指令
@@ -50,13 +51,21 @@ export function createDriveFolder({ folderToken = null, folderName = null } = {}
 export function readPdfDriveConfig(preset) {
   const value = preset?.pdfDrive;
   if (!value || typeof value !== 'object') return null;
-  return { enabled: value.enabled === true, ...createDriveFolder(value) };
+  return {
+    enabled: value.enabled === true,
+    ...createDriveFolder(value),
+    failurePolicy: value.failurePolicy === 'abort' ? 'abort' : 'continue',
+  };
 }
 
 // 运行时判定（要不要存云盘）：未开启一律 null
 export function resolvePdfDrive(preset) {
   const config = readPdfDriveConfig(preset);
   return config?.enabled === true ? config : null;
+}
+
+export function resolvePdfFailurePolicy(preset) {
+  return readPdfDriveConfig(preset)?.failurePolicy ?? 'continue';
 }
 
 // AI 摘要预设字段（#75）：读取时迁移——缺字段/非对象一律归一为 null（= 从未配置）；

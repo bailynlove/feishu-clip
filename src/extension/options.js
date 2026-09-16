@@ -258,6 +258,9 @@ function syncEditor() {
   $('#f-pdf-drive-body').classList.toggle('hidden', !pdfEnabled);
   $('#f-pdf-folder').classList.toggle('hidden', !pdfEnabled);
   $('#f-pdf-folder-text').textContent = pdfDrive?.folderToken ? (pdfDrive.folderName ?? pdfDrive.folderToken) : '云盘根目录（我的空间）';
+  for (const option of document.querySelectorAll('#f-pdf-failure-policy .ps-seg-opt')) {
+    option.classList.toggle('on', option.dataset.value === (pdfDrive?.failurePolicy ?? 'continue'));
+  }
   if (!pdfEnabled) closeDrivePicker();
   // AI 摘要（#75）：开关 = 折叠/展开设置区，关闭不清空内容——回填走 readDigestConfig
   // （关闭态也读得出已存指令/provider/mode），运行时判定才走 resolveDigest。
@@ -361,8 +364,13 @@ function closeDrivePicker() {
 // 选择器/手贴 token 验证成功后，目录写入当前预设的 pdfDrive 并整体持久化
 function applyPdfDrive(saved) {
   if (!editingId || !saved) return;
+  const current = readPdfDriveConfig(editingPreset());
   applyMutation(updatePreset(state, editingId, {
-    pdfDrive: { enabled: true, ...createDriveFolder({ folderToken: saved.folderToken, folderName: saved.title }) },
+    pdfDrive: {
+      enabled: true,
+      ...createDriveFolder({ folderToken: saved.folderToken, folderName: saved.title }),
+      failurePolicy: current?.failurePolicy ?? 'continue',
+    },
   }));
   syncEditor();
   closeDrivePicker();
@@ -543,10 +551,27 @@ for (const option of document.querySelectorAll('#f-action .ps-seg-opt')) {
 $('#f-pdf-drive').addEventListener('click', () => {
   const current = readPdfDriveConfig(editingPreset());
   applyMutation(updatePreset(state, editingId, {
-    pdfDrive: { enabled: !(current?.enabled === true), ...createDriveFolder(current ?? {}) },
+    pdfDrive: {
+      enabled: !(current?.enabled === true),
+      ...createDriveFolder(current ?? {}),
+      failurePolicy: current?.failurePolicy ?? 'continue',
+    },
   }));
   syncEditor();
 });
+for (const option of document.querySelectorAll('#f-pdf-failure-policy .ps-seg-opt')) {
+  option.addEventListener('click', () => {
+    const current = readPdfDriveConfig(editingPreset());
+    applyMutation(updatePreset(state, editingId, {
+      pdfDrive: {
+        enabled: current?.enabled === true,
+        ...createDriveFolder(current ?? {}),
+        failurePolicy: option.dataset.value === 'abort' ? 'abort' : 'continue',
+      },
+    }));
+    syncEditor();
+  });
+}
 
 // AI 摘要预设开关（#75）：开关 = 折叠/展开设置区，与弹窗的临时摘要开关同语义——切换只翻转
 // enabled 标志，instruction/provider/mode/docTitleTemplate 全部保留，不再归一为 null；

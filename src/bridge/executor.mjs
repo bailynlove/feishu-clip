@@ -99,6 +99,8 @@ const PDF_SHARE_CREDENTIALS = 'PDF_SHARE_CREDENTIALS';
 // 等待期间的放弃态：pdf 最小状态集里的四个终态（succeeded 时先尝试读 staging 残留再放弃——
 // pdf 收尾会为非终态 clip 保留字节，见 #executePdf finally）
 const PDF_GIVE_UP_STATUSES = new Set([JOB_STATUS.SUCCEEDED, JOB_STATUS.SKIPPED, JOB_STATUS.FAILED, JOB_STATUS.CANCELLED, JOB_STATUS.EXPIRED]);
+const PDF_POLICY_SUCCESS_STATUSES = new Set([JOB_STATUS.SUCCEEDED, JOB_STATUS.SKIPPED]);
+const PDF_POLICY_FAILURE_STATUSES = new Set([JOB_STATUS.FAILED, JOB_STATUS.CANCELLED, JOB_STATUS.EXPIRED]);
 // clip 终态全集：pdf 收尾据此决定是否保留 staging 字节给摘要阶段（succeeded_with_warnings 也是终态）
 const CLIP_TERMINAL_STATUSES = new Set([
   JOB_STATUS.SUCCEEDED, JOB_STATUS.SUCCEEDED_WITH_WARNINGS, JOB_STATUS.FAILED,
@@ -384,6 +386,31 @@ export class ClipExecutor {
     return result;
   }
 
+  // 预设选择「PDF 保存失败时：中断」时，剪藏文档必须在所有 PDF 上传有结论后才创建。
+  // PDF lane 与 clip lane 并行，因此这里仅轮询同一 attempt 的兄弟 job；心跳仍覆盖整个等待期。
+  // succeeded/skipped 允许继续，failed/cancelled/expired 在任何建档调用前终止剪藏。
+  async #waitForRequiredPdfs(job, lease, timeline) {
+    if (job.pdfFailurePolicy !== 'abort') return;
+    const startedAt = Date.now();
+    for (;;) {
+      this.#assertLease(lease);
+      const jobs = await this.store.get(job.attemptId);
+      const pdfJobs = (Array.isArray(jobs) ? jobs : [jobs]).filter((candidate) => candidate?.kind === JOB_KIND.PDF);
+      if (pdfJobs.length === 0) return;
+      const failed = pdfJobs.find((candidate) => PDF_POLICY_FAILURE_STATUSES.has(candidate.status));
+      if (failed) {
+        const detail = failed.error || (failed.status === JOB_STATUS.EXPIRED ? 'PDF 保存超时' : `PDF 状态：${failed.status}`);
+        timeline.push({ kind: 'stage', name: 'pdf_wait', ms: Date.now() - startedAt, detail });
+        throw Object.assign(new Error(`PDF 保存失败，已按设置中断剪藏：${detail}`), { code: 'PDF_REQUIRED_FAILED' });
+      }
+      if (pdfJobs.every((candidate) => PDF_POLICY_SUCCESS_STATUSES.has(candidate.status))) {
+        timeline.push({ kind: 'stage', name: 'pdf_wait', ms: Date.now() - startedAt });
+        return;
+      }
+      await this.sleep(500);
+    }
+  }
+
   // pdf job 消费者（#65）：url 型按 pdfSource.url 下载（image-policy 的 SSRF/逐跳校验 +
   // 100 MiB 硬上限）；bytes 型（#68 凭据回退）字节已在 staging 整验过，复制进任务目录即可。
   // 落盘后都经 lark-cli drive +upload 原格式上传云盘；job.folderToken（#66）是 picker/
@@ -521,6 +548,8 @@ export class ClipExecutor {
     const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP);
     if (!clip) return null;
     if (!clip.document?.documentId) {
+      // abort 策略下 clip 正在主动等 PDF，稍后会由 clip 侧补插；这里不是协议空隙，无需误报警告。
+      if (clip.pdfFailurePolicy === 'abort' && CLIP_DOC_PENDING_STATUSES.has(clip.status)) return null;
       return CLIP_DOC_PENDING_STATUSES.has(clip.status) ? { warning: 'clip 文档尚未建好，PDF 引用未插入' } : null;
     }
     if ((job.attachmentId == null && clip.pdfRefInserted) || clip.pdfRefAttachmentIds?.includes(job.attachmentId)) return null;
@@ -849,6 +878,7 @@ export class ClipExecutor {
     try {
       // 任务级图片写入模式：合法三态直用；存量任务只有 includeImages 布尔，false → off，其余 → preview
       const imageMode = IMAGE_MODES.includes(job.imageMode) ? job.imageMode : (job.includeImages === false ? 'off' : 'preview');
+      await this.#waitForRequiredPdfs(job, lease, timeline);
       // 文档块操作辅助（频控退避 + 原生块 API 调用）提升到建档分支之前——
       // subdoc 流程（#98）在建档分支内就要用（get_node 反查 wiki 节点、父文档顶部插子页面列表块）；
       // 图片/iframe 阶段复用同一组

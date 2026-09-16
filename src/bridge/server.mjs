@@ -432,6 +432,10 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         const pdfSource = normalizedPdfSources.find((source, index) => rawPdfSources[index]?.primary === true)
           ?? (declaredNoPrimary ? null : normalizedPdfSources[0] ?? null);
         const primaryAttachmentId = declaredNoPrimary ? null : (body.primaryAttachmentId ?? pdfSource?.attachmentId ?? null);
+        if (body.pdfFailurePolicy !== undefined && body.pdfFailurePolicy !== 'continue' && body.pdfFailurePolicy !== 'abort') {
+          return send(response, 400, { ok: false, code: 'PDF_FAILURE_POLICY_INVALID', message: 'pdfFailurePolicy 只接受 continue / abort' }, origin);
+        }
+        const pdfFailurePolicy = body.pdfFailurePolicy === 'abort' ? 'abort' : 'continue';
         // pdf 目标目录（#66）：null = 云盘根目录；非空须是合法 token 形态
         const pdfFolderToken = body.pdfFolderToken === undefined || body.pdfFolderToken === null ? null : body.pdfFolderToken;
         if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
@@ -479,6 +483,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           // {{@file}} 附件（#79）：clip job 同携 pdfSource，digest 阶段检出占位符时据此下载
           pdfSource,
           primaryAttachmentId,
+          pdfFailurePolicy,
         });
         // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名；
         // folderToken（#66）是 picker/弹窗选定的云盘目录，null 即根目录

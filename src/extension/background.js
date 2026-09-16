@@ -361,7 +361,8 @@ async function handle(message) {
       const { primary: _primary, attachmentId: _attachmentId, ...pdfSource } = primarySource || {};
       // pdf 目标目录（#66）：弹窗 chip 选定的 folderToken（null = 云盘根目录），随 job 透传
       const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot: { ...snapshot, pdfAttachments: normalizedPdfs }, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource: primarySource ? pdfSource : null, primaryAttachmentId: primarySource?.attachmentId ?? null, pdfSources, pdfFolderToken, digest } });
+      const pdfFailurePolicy = message.pdfFailurePolicy === 'abort' ? 'abort' : 'continue';
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot: { ...snapshot, pdfAttachments: normalizedPdfs }, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource: primarySource ? pdfSource : null, primaryAttachmentId: primarySource?.attachmentId ?? null, pdfSources, pdfFolderToken, pdfFailurePolicy, digest } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }

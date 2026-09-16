@@ -123,6 +123,41 @@ function fakeStore(job) {
   return store;
 }
 
+test('PDF 失败策略 abort：PDF 失败时在建档前终止剪藏', async () => {
+  const job = { ...fakeJob({ markdown: '正文', images: [] }), pdfFailurePolicy: 'abort' };
+  const store = fakeStore(job);
+  let workerId;
+  store.claim = async (_attemptId, worker) => { workerId = worker; };
+  store.get = async (_attemptId, kind) => {
+    if (kind === 'clip') return { ...job, status: 'running', workerId };
+    if (kind === 'pdf') return { kind: 'pdf', status: 'failed', error: 'PDF_HTTP_202' };
+    return [{ kind: 'clip', status: 'running' }, { kind: 'pdf', status: 'failed', error: 'PDF_HTTP_202' }];
+  };
+  const lark = fakeLark({ items: [] });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} } }).kick();
+  await store.settled;
+  assert.equal(lark.calls.length, 0, 'PDF 失败后不得创建文档');
+  assert.match(store.failed?.error, /PDF 保存失败.*PDF_HTTP_202/);
+});
+
+test('PDF 失败策略 abort：等待 PDF 成功后才继续建档', async () => {
+  const job = { ...fakeJob({ markdown: '正文', images: [] }), pdfFailurePolicy: 'abort' };
+  const store = fakeStore(job);
+  let reads = 0;
+  store.get = async (_attemptId, kind) => {
+    if (kind === 'clip') return { ...job, status: 'running' };
+    if (kind === 'pdf') return { kind: 'pdf', status: 'succeeded' };
+    reads += 1;
+    return [{ kind: 'clip', status: 'running' }, { kind: 'pdf', status: reads === 1 ? 'running' : 'succeeded' }];
+  };
+  const lark = fakeLark({ items: [] });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, sleep: async () => {} }).kick();
+  await store.settled;
+  assert.ok(reads >= 2, 'PDF 未完成时应继续等待');
+  assert.ok(lark.calls.some((args) => args[0] === 'docs' && args[1] === '+create'), 'PDF 成功后继续建档');
+  assert.ok(store.completed, '剪藏最终成功');
+});
+
 function fakeJob({ markdown, images }) {
   return {
     attemptId: 'attempt-pipe',
@@ -1129,6 +1164,19 @@ test('pdf job：clip 文档尚未建好（非终态无 document）→ 跳过插�
     assert.equal(store.completed.warnings.length, 1, `clip ${status}：记一条可见警告`);
     assert.match(store.completed.warnings[0], /clip 文档尚未建好/);
   }
+});
+
+test('pdf job：abort 策略下 clip 正在等 PDF，暂未建档不记误导性引用警告', async () => {
+  const clipJob = { kind: 'clip', status: 'running', document: null, pdfFailurePolicy: 'abort', pdfRefInserted: false };
+  const store = pdfFakeStore({ ...PDF_JOB, attemptId: 'pdf-ref-abort-wait' }, { clipJob });
+  const lark = {
+    async uploadDriveFile() { return { fileToken: 'f', url: 'https://u' }; },
+    async insertDocFileReference() { throw new Error('不应在 clip 建档前插入'); },
+  };
+  const downloadPdf = async () => ({ buffer: Buffer.from('%PDF-'), source: PDF_JOB.pdfSource.url, sizeBytes: 5 });
+  new ClipExecutor({ store, lark, logger: { warn() {}, error() {} }, downloadPdf }).kick();
+  await store.settled;
+  assert.deepEqual(store.completed.warnings, []);
 });
 
 test('pdf job：重排竞态——mark 返回 claimed=false（另一执行体已置位）→ 跳过插入不双插', async () => {

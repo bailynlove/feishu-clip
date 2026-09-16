@@ -380,6 +380,13 @@ test('POST /v1/jobs with pdfSource queues a second pdf job; GET returns both job
     assert.equal(settled.jobs.find((job) => job.kind === 'clip').status, 'succeeded');
     assert.equal(settled.jobs.find((job) => job.kind === 'pdf').status, 'failed', '环回地址被 SSRF 拒绝，pdf 落 failed 而不拖垮 clip');
 
+    const badPolicy = await call('/v1/jobs', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ attemptId: '56565656-5656-4656-8656-565656565656', destination: { nodeToken: 'wikcn-parent' }, snapshot, pdfSource, pdfFailurePolicy: 'wat' }),
+    });
+    assert.equal(badPolicy.status, 400);
+    assert.equal((await badPolicy.json()).code, 'PDF_FAILURE_POLICY_INVALID');
+
     // 非法 pdfSource 一律 400
     for (const bad of [
       { type: 'bytes', url: 'https://example.com/x.pdf' },

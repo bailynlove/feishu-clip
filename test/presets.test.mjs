@@ -125,7 +125,7 @@ test('resolvePdfDrive：缺字段/非法值一律归一为 null', () => {
     undefined,
   ]) {
     if (preset?.pdfDrive?.enabled === true) {
-      assert.deepEqual(resolvePdfDrive(preset), { enabled: true, folderToken: null, folderName: null });
+      assert.deepEqual(resolvePdfDrive(preset), { enabled: true, folderToken: null, folderName: null, failurePolicy: 'continue' });
     } else {
       assert.equal(resolvePdfDrive(preset), null, JSON.stringify(preset));
     }
@@ -137,15 +137,24 @@ test('resolvePdfDrive：enabled:true + folderToken:null = 云盘根目录（合�
     enabled: true,
     folderToken: null,
     folderName: null,
+    failurePolicy: 'continue',
   });
 });
 
 test('resolvePdfDrive：完整结构透传 folderToken 与 folderName（picker 归 #66）', () => {
-  assert.deepEqual(resolvePdfDrive({ pdfDrive: { enabled: true, folderToken: 'fldcnABC', folderName: '论文' } }), {
+  assert.deepEqual(resolvePdfDrive({ pdfDrive: { enabled: true, folderToken: 'fldcnABC', folderName: '论文', failurePolicy: 'abort' } }), {
     enabled: true,
     folderToken: 'fldcnABC',
     folderName: '论文',
+    failurePolicy: 'abort',
   });
+});
+
+test('PDF 保存失败策略：存量配置默认继续，仅接受 abort 映射为中断', () => {
+  assert.equal(readPdfDriveConfig({ pdfDrive: { enabled: true } }).failurePolicy, 'continue');
+  assert.equal(readPdfDriveConfig({ pdfDrive: { enabled: true, failurePolicy: 'continue' } }).failurePolicy, 'continue');
+  assert.equal(readPdfDriveConfig({ pdfDrive: { enabled: true, failurePolicy: 'abort' } }).failurePolicy, 'abort');
+  assert.equal(readPdfDriveConfig({ pdfDrive: { enabled: true, failurePolicy: 'invalid' } }).failurePolicy, 'continue');
 });
 
 // ——— readPdfDriveConfig（#100）：设置页编辑器读取路径——开关只折叠不清空，关闭态保留目录配置 ———
@@ -158,16 +167,16 @@ test('readPdfDriveConfig：从未配置（缺字段/null/非对象）返回 null
 
 test('readPdfDriveConfig：关闭态保留已选目录（enabled:false 不归 null）', () => {
   const stored = { enabled: false, folderToken: 'fldcnABC', folderName: '论文' };
-  assert.deepEqual(readPdfDriveConfig({ pdfDrive: stored }), stored, '目录配置原样读出');
+  assert.deepEqual(readPdfDriveConfig({ pdfDrive: stored }), { ...stored, failurePolicy: 'continue' }, '目录配置保留，存量策略补默认值');
   assert.equal(resolvePdfDrive({ pdfDrive: stored }), null, '运行时仍读作关闭（不存云盘）');
 });
 
 test('readPdfDriveConfig：字段归一与 resolvePdfDrive 同口径', () => {
   assert.deepEqual(readPdfDriveConfig({ pdfDrive: { enabled: true } }), {
-    enabled: true, folderToken: null, folderName: null,
+    enabled: true, folderToken: null, folderName: null, failurePolicy: 'continue',
   }, '缺省目录归一为云盘根目录');
   assert.deepEqual(readPdfDriveConfig({ pdfDrive: { enabled: 'yes', folderToken: 42 } }), {
-    enabled: false, folderToken: null, folderName: null,
+    enabled: false, folderToken: null, folderName: null, failurePolicy: 'continue',
   }, '非布尔 enabled 读作关；非法 folderToken 归一 null');
 });
 

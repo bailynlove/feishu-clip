@@ -93,6 +93,14 @@ test('PDF Translator picker and loaded-file list live in the PDF save subsection
   assert.match(pdf, /class="ps-target pdf-translator-picker"[^>]*for="pdf-translator-files"/, '文件选择器沿用预设目标选择行样式');
 });
 
+test('PDF 保存失败策略位于 PDF 保存折叠体，提供中断与继续两项', () => {
+  const pdf = subSection('PDF 保存');
+  const body = pdf.match(/<div class="pc-sub-body hidden" id="f-pdf-drive-body">([\s\S]*)/);
+  assert.ok(body?.[1].includes('id="f-pdf-failure-policy"'));
+  assert.match(body[1], /data-value="abort">中断</);
+  assert.match(body[1], /data-value="continue">继续</);
+});
+
 // AI 摘要设置区（#75）：第 2 节，位于「配对」之后、「预设管理」之前（后调整：配置先行，
 // 预设里的开关引用它）——API 类型下拉（选项由 options.js 按 AI_API_TYPE_OPTIONS 动态填充）、
 // Base URL/Model/API key 输入框、保存 + 测试连接按钮 + 行内结果（初始隐藏）、全局摘要指令 textarea

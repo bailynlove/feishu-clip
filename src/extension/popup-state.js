@@ -1,7 +1,7 @@
 // 弹窗 job 状态的纯归约逻辑。recovered 表示该 attempt 是打开弹窗时从存储恢复的旧会话：
 // 旧会话的终态只作提示，不得把「保存到飞书」主按钮换成「打开文档」——用户可能正准备发起新剪藏。
 
-import { createDefaultPreset, createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
+import { createDefaultPreset, createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, resolveDigest, resolveImageMode, resolvePdfDrive, resolvePdfFailurePolicy } from './presets.js';
 import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
 export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'skipped', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
@@ -438,7 +438,11 @@ export function setIncludeImages(state, includeImages) {
 // folderToken 为 null = 存云盘根目录（合法态）；关闭态归一为 null（与存量预设缺省同形）
 function sessionPdfDrive(state) {
   return state.pdfOn
-    ? { enabled: true, ...createDriveFolder({ folderToken: state.pdfFolder?.folderToken, folderName: state.pdfFolder?.folderName }) }
+    ? {
+        enabled: true,
+        ...createDriveFolder({ folderToken: state.pdfFolder?.folderToken, folderName: state.pdfFolder?.folderName }),
+        failurePolicy: resolvePdfFailurePolicy(currentPreset(state)),
+      }
     : null;
 }
 

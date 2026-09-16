@@ -164,6 +164,14 @@
             <button id="save-drive-target" class="ps-btn primary pair-submit" type="button">验证并保存</button>
           </details>
         </div>
+        <div class="ps-field">
+          <span class="ps-label">PDF 保存失败时</span>
+          <div class="ps-seg" id="f-pdf-failure-policy">
+            <button class="ps-seg-opt" type="button" data-value="abort">中断</button>
+            <button class="ps-seg-opt" type="button" data-value="continue">继续</button>
+          </div>
+          <p class="ps-desc">中断：PDF 未保存成功时不创建剪藏文档；继续：保留文档并提示 PDF 失败。</p>
+        </div>
         <div class="pdf-translator-settings">
           <span class="ps-label">PDF Translator 文件</span>
           <label class="ps-target pdf-translator-picker" for="pdf-translator-files">

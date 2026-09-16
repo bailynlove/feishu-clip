@@ -198,7 +198,7 @@ export class PersistentJobStore {
     this.#awaitingBytesTtlMs = awaitingBytesTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, primaryAttachmentId = null, title = null, folderToken = null, digest = null, attachmentId = null }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, primaryAttachmentId = null, pdfFailurePolicy = 'continue', title = null, folderToken = null, digest = null, attachmentId = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
     if (!JOB_KINDS.has(kind)) throw new TypeError(`Unknown job kind: ${kind}`);
     // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名；
@@ -307,6 +307,7 @@ export class PersistentJobStore {
         // {{@file}} 附件（#79）：本次剪藏检出的 PDF，digest 阶段据此下载字节随摘要请求发出
         pdfSource: normalizedPdfSource ? structuredClone(normalizedPdfSource) : null,
         primaryAttachmentId: typeof primaryAttachmentId === 'string' && primaryAttachmentId ? primaryAttachmentId : null,
+        pdfFailurePolicy: pdfFailurePolicy === 'abort' ? 'abort' : 'continue',
         // PDF 云盘引用回填的幂等标记（#88）：pdf job 上传成功后把 PDF 插到本文档开头，
         // 置位后 pdf job 重试/重跑不再重复插入
         pdfRefInserted: false,
