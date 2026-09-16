@@ -104,7 +104,11 @@ test('普通页面回归：body 内容足够时正常提取，不触发 frameset
 
 test('IEEE Xplore 论文页：缺少 citation_title 时仍移除控件区和重复摘要', async () => {
   const paperTitle = 'Double DQN-GAMO: A Cyber Threat Detection Framework for Zero-Day Attacks';
+  const latex = String.raw`\begin{align*} & \overrightarrow{{h_t}} = LSTM_{\text{forward}}(x_t)\tag{1} \\ & \overleftarrow{{h_t}} = LSTM_{\text{backward}}(x_t)\tag{2}\end{align*}`;
   const emptyBold = element('b', [element('svg')]);
+  const proceedings = element('a', [textNode('Proceedings')]);
+  proceedings.setAttribute('href', 'https://ieeexplore.ieee.org/xpl/conhome/11146280/proceeding');
+  const figure = img('https://ieeexplore.ieee.org/mediastore/figure.png', 'Figure 1');
   const main = element('main', [
     element('p', [emptyBold]),
     element('h1', [textNode(paperTitle), element('span', [textNode('TH-CPL')]), element('span', [textNode('BCCF C')])]),
@@ -134,6 +138,16 @@ test('IEEE Xplore 论文页：缺少 citation_title 时仍移除控件区和重�
     element('p', [textNode('SECTION I.')]),
     element('h2', [textNode('Introduction')]),
     element('p', [textNode('Cyber attacks are growing in both frequency and sophistication. This is the article body.')]),
+    element('p', [element('strong', [textNode('Published in: ')]), proceedings]),
+    element('div', [
+      element('div', [textNode('h→t=LSTMforward(xt) h←t=LSTMbackward(xt) (1) (2)')]),
+      element('div', [
+        element('span', [textNode('View Source')]),
+        img('https://ieeexplore.ieee.org/assets/help.png', 'help'),
+        element('pre', [textNode(latex)]),
+      ]),
+    ]),
+    element('p', [figure]),
     element('section', [element('h2', [textNode('More Like This')]), element('p', [textNode('Unrelated recommended paper')])]),
   ]);
   for (const [index, author] of main.querySelectorAll('a').slice(1, 5).entries()) author.setAttribute('href', `/author/${index + 1}`);
@@ -155,6 +169,10 @@ test('IEEE Xplore 论文页：缺少 citation_title 时仍移除控件区和重�
   assert.ok(!/TH-CPL|BCCF C|Alerts|Download References|Request Permissions|Save to|Show More|More Like This/.test(result.markdown));
   assert.ok(!/^\s*(?:-\s*)?\*\*\s*$/m.test(result.markdown), '空图标不得退化成裸 **');
   assert.ok(!/^SECTION [IVX]+\.$/m.test(result.markdown), '章节序号标签不与标题重复输出');
+  assert.match(result.markdown, /\*\*Published in:\*\* \[Proceedings\]/, '加粗标记内不得保留尾随空格');
+  assert.ok(result.markdown.includes(`$$\n${latex}\n$$`), `LaTeX 源应转成飞书可识别的块公式：${result.markdown}`);
+  assert.ok(!/View Source|h→t=LSTMforward|help\.png/.test(result.markdown), '公式控件、渲染副本和帮助图标不重复进入正文');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.images.map(({ source }) => source))), ['https://ieeexplore.ieee.org/mediastore/figure.png'], '删除公式帮助图标后，后续论文图片仍映射到原图');
 });
 
 // pre 内图片回归（labuladong 页面）：img 在 <pre> 里时锚点原地替换会变成围栏代码块里的一行文本，

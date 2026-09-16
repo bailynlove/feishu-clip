@@ -40,6 +40,7 @@
     // 旧版是通用启发式（任何无布局盒 + 文本≥2 字符或含图的元素都打标），arXiv 等页面大量
     // 隐藏元素误中；其余隐藏容器一律不打标，按普通内容渲染或随垃圾清理丢弃
     const HOVER_ATTR = 'data-feishu-clip-hover';
+    const FORMULA_ATTR = 'data-feishu-clip-formula';
     const HOVER_LIMIT = 20;
     const JUNK_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'NAV', 'ASIDE', 'FORM', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SVG', 'CANVAS', 'IFRAME']);
     const hasClass = (node, name) => (node.getAttribute('class') || '').split(/\s+/).includes(name);
@@ -243,15 +244,20 @@
         }
       }
       if (/^H[1-6]$/.test(tag)) return `\n\n${'#'.repeat(Number(tag[1]))} ${text(node)}\n\n`;
+      if (node.getAttribute(FORMULA_ATTR) !== null) return `\n\n$$\n${node.textContent.trim()}\n$$\n\n`;
       if (tag === 'P' || tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE') return `\n\n${children()}\n\n`;
       if (tag === 'BR') return '  \n';
       if (tag === 'STRONG' || tag === 'B') {
         const value = children();
-        return value.trim() ? `**${value}**` : '';
+        const core = value.trim();
+        if (!core) return '';
+        return `${value.match(/^\s*/)[0]}**${core}**${value.match(/\s*$/)[0]}`;
       }
       if (tag === 'EM' || tag === 'I') {
         const value = children();
-        return value.trim() ? `*${value}*` : '';
+        const core = value.trim();
+        if (!core) return '';
+        return `${value.match(/^\s*/)[0]}*${core}*${value.match(/\s*$/)[0]}`;
       }
       if (tag === 'DEL' || tag === 'S') return `~~${children()}~~`;
       if (tag === 'CODE' && node.parentElement?.tagName !== 'PRE') return `\`${text(node).replaceAll('`', '\\`')}\``;
@@ -278,10 +284,51 @@
       return children();
     }
 
+    function ieeeLatexSource(value) {
+      const match = String(value || '').match(/\\begin\{([A-Za-z][A-Za-z0-9*]*)\}[\s\S]*?\\end\{\1\}/);
+      return match?.[0]?.trim() || null;
+    }
+
+    // IEEE HTML 论文的公式组件同时带可视化渲染、View Source 控件和可复制的 LaTeX 源。
+    // 找到最深的 LaTeX 源节点，再用包含渲染副本的紧邻组件整体替换，正文只留下飞书可识别的块公式。
+    function prepareIeeeEquations(root) {
+      if (!isIeeeDocumentPage(location.href)) return;
+      const sources = [];
+      const walk = (node) => {
+        for (const child of node.children || []) walk(child);
+        const latex = ieeeLatexSource(node.textContent);
+        if (latex && ![...(node.children || [])].some((child) => ieeeLatexSource(child.textContent))) sources.push({ node, latex });
+      };
+      walk(root);
+      for (const { node, latex } of sources) {
+        if (!node.parentElement) continue;
+        let sourcePanel = node;
+        for (let current = node.parentElement; current && current !== root; current = current.parentElement) {
+          if (/View Source/i.test(current.textContent || '') && ieeeLatexSource(current.textContent)) {
+            sourcePanel = current;
+            break;
+          }
+        }
+        let equationRoot = sourcePanel;
+        const parent = sourcePanel.parentElement;
+        if (parent && parent !== root && parent.children.length >= 2
+          && ieeeLatexSource(parent.textContent)
+          && (parent.textContent || '').length <= latex.length * 2 + 1000) equationRoot = parent;
+        const formula = document.createElement('p');
+        formula.setAttribute(FORMULA_ATTR, '');
+        formula.append(document.createTextNode(latex));
+        equationRoot.replaceWith(formula);
+      }
+    }
+
     // 单根提取：清理 + 图片管线 + 悬浮内容管线 + 渲染。images/browserBytes 跨根共享（占位符索引连续、流量预算合并）
     async function extractFrom(sourceRoot) {
       const tagged = tagHoverPanels(sourceRoot); // 打标须在克隆前，标记随克隆带入
       const root = sourceRoot.cloneNode(true);
+      const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
+      for (const [index, clone] of [...root.querySelectorAll('img')].entries()) {
+        clone.setAttribute('data-feishu-clip-image-index', String(index));
+      }
       for (const { original } of tagged) original.removeAttribute(HOVER_ATTR); // 还原原页面，标记只留在克隆树
 
       // arXiv abs 页排版对齐（#69）：左栏的分类面包屑和论文标题在页面里是 h1，但剪藏文档
@@ -294,6 +341,8 @@
           h1.replaceWith(h2);
         }
       }
+
+      prepareIeeeEquations(root);
 
       // iframe 管线（#47）：正文里的 iframe（如折叠 details 里的算法可视化面板）是有价值的内容，
       // 不能随垃圾清理丢掉。数据只取 src/title/尺寸（都在原树上），克隆树里原位留占位符，
@@ -412,12 +461,13 @@
       // 与悬浮面板无冲突：灯泡面板是 class 控制的 display:none，不带 hidden 属性/role
       root.querySelectorAll('[hidden],[role="tooltip"]').forEach((node) => node.remove());
 
-      const originalImages = [...sourceRoot.querySelectorAll('img')].slice(0, 30);
       const clonedImages = [...root.querySelectorAll('img')];
       const preTails = new Map(); // pre 元素 → 当前锚点插入点，保证同一 pre 多图锚点按原顺序排列
-      for (const [cloneIndex, clone] of clonedImages.entries()) {
-        if (cloneIndex >= 30) { clone.remove(); continue; }
-        const original = originalImages[cloneIndex] || clone;
+      for (const clone of clonedImages) {
+        const originalIndexValue = clone.getAttribute('data-feishu-clip-image-index');
+        const originalIndex = originalIndexValue === null ? Number.NaN : Number(originalIndexValue);
+        if (!Number.isInteger(originalIndex) || originalIndex < 0 || originalIndex >= 30) { clone.remove(); continue; }
+        const original = originalImages[originalIndex] || clone;
         // 原页面未渲染的图片（display:none 子树内）没有布局盒。若在打标的悬浮面板内
         // （悬停可见，如代码行内灯泡提示图），作为该面板的内容保留并按面板编号标注；
         // 否则用户看不见，剪藏也不应出现，跳过并从克隆树移除，避免产生孤立锚点

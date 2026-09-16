@@ -122,6 +122,7 @@ Date: 2026-09-08 (Asia/Shanghai). 规划来源：wayfinder map #56 的全部决�
   - picker：drive 适配器的导航/分页/错误分类与 wiki 适配器同规；`createTargetPicker` 泛化后 wiki 侧行为不变（回归）。
   - 扩展识别：executeScript 探针读 `document.contentType` 判定 PDF 标签页；注入失败回退 `tab.url` 后缀兜底；HTML 页 `citation_pdf_url` meta 与 arXiv 站点规则识别主 PDF；页面上非主 PDF 链接不误报。
   - IEEE Xplore 正文：标题优先取 `citation_title`，缺失时从页面标题移除 IEEE 站点后缀，不混入分类徽章；论文 `main` 内的 Alerts/下载/权限操作区、折叠摘要副本、章节序号标签和 More Like This 推荐区不进入正文；SVG 图标清理后不残留空的 `**` Markdown 标记。
+  - IEEE Xplore 富文本：`strong`/`em` 标签边缘空格移到 Markdown 标记外，避免飞书显示裸 `**`/`*`；公式组件只保留 View Source 中的 LaTeX，以独立 `$$` 块写入，渲染副本、控件和帮助图标不重复进入正文。
 - `npm run check` 覆盖新增模块。
 
 ### Real Feishu account via production Bridge path (planned)
