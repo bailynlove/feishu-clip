@@ -192,19 +192,20 @@ async function readPdfPass(pdfUrl, onChunk = null) {
   return { sizeBytes, sha256: hash.hex() };
 }
 
-async function feedPdfBytes({ attemptId, pdfUrl, name = null }) {
+async function feedPdfBytes({ attemptId, attachmentId = null, pdfUrl, name = null }) {
   if (!attemptId || !/^https?:/.test(pdfUrl || '')) {
     throw Object.assign(new Error('PDF 回传参数不完整'), { code: 'PDF_FEED_INVALID' });
   }
-  if (pdfFeedInFlight.has(attemptId)) return pdfFeedInFlight.get(attemptId);
-  const task = doFeedPdfBytes({ attemptId, pdfUrl, name }).finally(() => pdfFeedInFlight.delete(attemptId));
-  pdfFeedInFlight.set(attemptId, task);
+  const feedKey = JSON.stringify([attemptId, attachmentId]);
+  if (pdfFeedInFlight.has(feedKey)) return pdfFeedInFlight.get(feedKey);
+  const task = doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }).finally(() => pdfFeedInFlight.delete(feedKey));
+  pdfFeedInFlight.set(feedKey, task);
   return task;
 }
 
-async function doFeedPdfBytes({ attemptId, pdfUrl, name }) {
+async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
   const { jobs } = await bridge(`/v1/jobs/${attemptId}`);
-  const job = (jobs ?? []).find((candidate) => candidate.kind === 'pdf');
+  const job = (jobs ?? []).find((candidate) => candidate.kind === 'pdf' && (candidate.attachmentId ?? null) === attachmentId);
   if (!job || job.status !== 'awaiting_bytes') return { fed: false, status: job?.status ?? 'missing' };
   let declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
   if (!declared) {
@@ -219,9 +220,15 @@ async function doFeedPdfBytes({ attemptId, pdfUrl, name }) {
       totalChunks: Math.ceil(measured.sizeBytes / PDF_CHUNK_BYTES),
       sha256: measured.sha256,
     };
-    await bridge('/v1/jobs', { method: 'POST', body: { attemptId, pdfSource: declared } });
+    await bridge('/v1/jobs', {
+      method: 'POST',
+      body: attachmentId == null
+        ? { attemptId, pdfSource: declared }
+        : { attemptId, pdfSources: [{ ...declared, attachmentId }] },
+    });
   }
-  const { bitmap } = await bridge(`/v1/jobs/${attemptId}/pdf-chunks`);
+  const chunkPath = `/v1/jobs/${attemptId}/pdf-chunks${attachmentId == null ? '' : `?attachmentId=${encodeURIComponent(attachmentId)}`}`;
+  const { bitmap } = await bridge(chunkPath);
   const received = new Set(bitmap ?? []);
   // 第二遍流式读：按 4 MiB 切块，只补位图缺失的块（bridge 侧重发幂等，断点续传）
   let index = 0;
@@ -232,7 +239,7 @@ async function doFeedPdfBytes({ attemptId, pdfUrl, name }) {
       const chunk = pending.slice(0, Math.min(PDF_CHUNK_BYTES, pending.byteLength));
       pending = pending.slice(chunk.byteLength);
       if (!received.has(index)) {
-        await bridge(`/v1/jobs/${attemptId}/pdf-chunks`, {
+        await bridge(chunkPath, {
           method: 'POST',
           body: { index, totalChunks: declared.totalChunks, dataBase64: toBase64(chunk) },
         });
@@ -393,6 +400,17 @@ async function handle(message) {
     // 凭据回传（#68）：弹窗轮询看到 awaiting_bytes 后触发；SW 内 in-flight 去重，
     // 中断重连由 bridge 位图保证只补缺块
     case 'FEED_PDF_BYTES': return feedPdfBytes(message);
+    case 'RETRY_PDF_ATTACHMENT': {
+      if (!message.attemptId || !message.pdfSource?.url) throw Object.assign(new Error('PDF 重试参数不完整'), { code: 'PDF_RETRY_INVALID' });
+      return bridge('/v1/jobs', {
+        method: 'POST',
+        body: {
+          attemptId: message.attemptId,
+          pdfSources: [{ ...message.pdfSource, attachmentId: message.attachmentId ?? null }],
+          pdfFolderToken: message.pdfFolderToken ?? null,
+        },
+      });
+    }
     // 任务日志（开发者模式）：bridge 侧统一记录耗时时间线，设置页透传展示
     case 'LIST_JOBS': return bridge('/v1/jobs?limit=20');
     // 预览懒提取（#37）：只抓快照、不建 job；弹窗首次展开预览时调用

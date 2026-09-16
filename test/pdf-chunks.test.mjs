@@ -103,3 +103,20 @@ test('discardForJob：pdf job 清理 staging；非 pdf/空输入空转', async (
     assert.equal(await exists(staging.filePath(ATTEMPT)), true, '非 pdf 输入空转，不误删');
   });
 });
+
+test('同一 attempt 的附件按 attachmentId 隔离位图、字节与清理', async () => {
+  await withStaging(async ({ staging }) => {
+    const a = Buffer.from('first attachment');
+    const b = Buffer.from('second attachment');
+    await staging.putChunk(ATTEMPT, 'main', 0, a);
+    await staging.putChunk(ATTEMPT, 'supplement', 0, b);
+    assert.notEqual(staging.filePath(ATTEMPT, 'main'), staging.filePath(ATTEMPT, 'supplement'));
+    assert.deepEqual(await staging.bitmap(ATTEMPT, 'main'), [0]);
+    assert.deepEqual(await staging.bitmap(ATTEMPT, 'supplement'), [0]);
+    await staging.verify(ATTEMPT, 'main', { sizeBytes: a.length, sha256: createHash('sha256').update(a).digest('hex') });
+    await staging.verify(ATTEMPT, 'supplement', { sizeBytes: b.length, sha256: createHash('sha256').update(b).digest('hex') });
+    await staging.discard(ATTEMPT, 'main');
+    assert.equal(await exists(staging.filePath(ATTEMPT, 'main')), false);
+    assert.equal(await exists(staging.filePath(ATTEMPT, 'supplement')), true, '清理一个附件不得删除另一个');
+  });
+});

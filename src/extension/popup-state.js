@@ -4,10 +4,10 @@
 import { createDefaultPreset, createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, resolveDigest, resolveImageMode, resolvePdfDrive } from './presets.js';
 import { buildContext, renderBody, renderTemplate, renderTitle, sanitizeClipTitle, sanitizeFilename } from './templates.js';
 
-export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
+export const TERMINAL_STATUSES = new Set(['succeeded', 'succeeded_with_warnings', 'skipped', 'failed', 'needs_attention', 'expired', 'cancelled', 'cancelled_with_document']);
 
 // pdf job 用最小状态集（#60）：无 reconciling/needs_attention
-const PDF_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'expired']);
+const PDF_TERMINAL_STATUSES = new Set(['succeeded', 'skipped', 'failed', 'cancelled', 'expired']);
 
 // job 恢复只属于发起它的页面：跨页面恢复会把旧文档的成功态（含「查看飞书文档」按钮）
 // 铺到无关页面上，看起来像"没点保存就存好了"。忽略 hash 差异（同页锚点跳转不算换页）；
@@ -124,8 +124,19 @@ export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds
 
   const docOk = clip ? clipSucceeded(clip) : false;
   const clipTerminal = clip ? TERMINAL_STATUSES.has(clip.status) : false;
+  const pdfFiles = pdfJobs.map((job) => ({
+    attachmentId: job.attachmentId ?? null,
+    name: job.pdfSource?.name || job.title || 'PDF',
+    status: job.status,
+    url: job.document?.url || null,
+    error: job.error || job.warnings?.[0] || null,
+    source: job.pdfSource || null,
+  }));
+  const withFiles = (view) => ({ ...view, pdfFiles });
   const pdfOk = pdfJobs.length > 0 && pdfJobs.every((job) => job.status === 'succeeded');
+  const pdfAllTerminal = pdfJobs.every((job) => PDF_TERMINAL_STATUSES.has(job.status));
   const pdfFailed = pdfJobs.some((job) => PDF_TERMINAL_STATUSES.has(job.status) && job.status !== 'succeeded');
+  const pdfRetryable = pdfJobs.some((job) => job.status === 'failed' || job.status === 'expired');
   const pdfCount = pdfJobs.length;
   const pdfFailureCount = pdfJobs.filter((job) => PDF_TERMINAL_STATUSES.has(job.status) && job.status !== 'succeeded').length;
   const documentUrl = clip?.document?.url || null;
@@ -135,35 +146,35 @@ export function describeAttemptView(jobs, { recovered = false, digestWaitSeconds
   if (docOk && pdfOk) {
     const warning = clip ? warningsText(clip.warnings) : null;
     if (warning) {
-      return { kind: 'warning', message: `已保存 ✓ 文档与 PDF 均已入库 · ${warning}`, swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false, pdfAwaitingBytes };
+      return withFiles({ kind: 'warning', message: `已保存 ✓ 文档与 PDF 均已入库 · ${warning}`, swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false, pdfAwaitingBytes });
     }
-    return { kind: 'success', message: '已保存 ✓ 文档与 PDF 均已入库。', swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false, pdfAwaitingBytes };
+    return withFiles({ kind: 'success', message: '已保存 ✓ 文档与 PDF 均已入库。', swapPrimary: !recovered, documentUrl, pdfUrl, pdfRetry: false, pdfAwaitingBytes });
   }
   // PDF 失败：文档不受影响，警告横幅 + [打开文档][重试 PDF]
-  if (docOk && pdfFailed) {
-      return { kind: 'warning', message: `文档已保存 ✓，${pdfCount > 1 ? `${pdfFailureCount}/${pdfCount} 个 PDF 上传失败` : `PDF 上传失败（${pdf.error || '未知错误'}）`}。文档不受影响。`, swapPrimary: false, documentUrl, pdfUrl: null, pdfRetry: true, pdfAwaitingBytes };
+  if (docOk && pdfFailed && pdfAllTerminal) {
+      return withFiles({ kind: 'warning', message: `文档已保存 ✓，${pdfCount > 1 ? `${pdfFailureCount}/${pdfCount} 个 PDF 未上传` : `PDF 上传失败（${pdf.error || '未知错误'}）`}。文档不受影响。`, swapPrimary: false, documentUrl, pdfUrl: null, pdfRetry: pdfRetryable, pdfAwaitingBytes });
   }
   // 文档失败：错误横幅 + [重试文档]（主按钮保持可点），PDF 成功时链接仍可打开
-  if (clip && clipTerminal && !docOk) {
+  if (clip && clipTerminal && !docOk && pdfAllTerminal) {
     if (pdfFailed) {
-      return { kind: 'failure', message: `${clip.error || '剪藏未完成'}；PDF 上传也失败（${pdf.error || '未知错误'}）。`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: true, pdfAwaitingBytes };
+      return withFiles({ kind: 'failure', message: `${clip.error || '剪藏未完成'}；PDF 上传也失败（${pdf.error || '未知错误'}）。`, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: pdfRetryable, pdfAwaitingBytes });
     }
     if (pdfOk) {
-      return { kind: 'failure', message: clip.error || '剪藏未完成，请修复后重新发起。', swapPrimary: false, documentUrl: null, pdfUrl, pdfRetry: false, pdfAwaitingBytes };
+      return withFiles({ kind: 'failure', message: clip.error || '剪藏未完成，请修复后重新发起。', swapPrimary: false, documentUrl: null, pdfUrl, pdfRetry: false, pdfAwaitingBytes });
     }
   }
   // pdf-only 尝试（PDF 标签页等，本切片不产生但协议允许）：直接呈现 pdf job 状态
   if (!clip) {
-    if (pdfOk) return { kind: 'success', message: 'PDF 已存云盘 ✓', swapPrimary: !recovered, documentUrl: null, pdfUrl, pdfRetry: false, pdfAwaitingBytes };
-    if (pdfFailed) return { kind: 'failure', message: pdf.error || 'PDF 上传失败。', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: true, pdfAwaitingBytes };
-    if (pdfAwaitingBytes) return { kind: 'progress', message: '需要浏览器凭据回传 PDF，正在传输…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
-    return { kind: 'progress', message: 'PDF 上传中…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
+    if (pdfOk) return withFiles({ kind: 'success', message: 'PDF 已存云盘 ✓', swapPrimary: !recovered, documentUrl: null, pdfUrl, pdfRetry: false, pdfAwaitingBytes });
+    if (pdfFailed && pdfAllTerminal) return withFiles({ kind: 'failure', message: pdf.error || 'PDF 上传失败。', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: pdfRetryable, pdfAwaitingBytes });
+    if (pdfAwaitingBytes) return withFiles({ kind: 'progress', message: '需要浏览器凭据回传 PDF，正在传输…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes });
+    return withFiles({ kind: 'progress', message: 'PDF 上传中…', swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes });
   }
   // 运行中：单条进度 + 阶段文案轮替。文档已成（带警告）但 PDF 仍在途时警告随进度条呈现——
   // 否则「已按纯文本生成摘要」这类降级在 PDF 未完成期间完全不可见（MDPI 事故复盘）
   const runningWarning = docOk && clip ? warningsText(clip.warnings) : null;
   const runningMessage = `${clipPhase(clip, digestWaitSeconds)} · ${pdfCount > 1 ? `PDF ${pdfJobs.filter((job) => job.status === 'succeeded').length}/${pdfCount}` : pdfPhase(pdf)}`;
-  return { kind: 'progress', message: runningWarning ? `${runningMessage} · ${runningWarning}` : runningMessage, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes };
+  return withFiles({ kind: 'progress', message: runningWarning ? `${runningMessage} · ${runningWarning}` : runningMessage, swapPrimary: false, documentUrl: null, pdfUrl: null, pdfRetry: false, pdfAwaitingBytes });
 }
 
 // ——— PDF 存云盘会话开关（#65）：识别结果与会话开关都是仅本次状态，不回写预设 ———

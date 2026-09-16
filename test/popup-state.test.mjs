@@ -982,6 +982,21 @@ test('describeAttemptView：pdf awaiting_bytes → 回传进度文案 + pdfAwait
   assert.equal(noPdf.pdfAwaitingBytes, false, '无 pdf job 恒为 false');
 });
 
+test('describeAttemptView：多 PDF 等全部终态后再汇总，并暴露逐文件状态', () => {
+  const clip = { kind: 'clip', status: 'succeeded', document: { url: 'https://feishu.test/doc' }, warnings: [] };
+  const failed = { kind: 'pdf', attachmentId: 'main', status: 'failed', error: 'boom', pdfSource: { name: 'main.pdf', url: 'https://example.test/main.pdf' } };
+  const running = { kind: 'pdf', attachmentId: 'supp', status: 'running', pdfSource: { name: 'supp.pdf', url: 'https://example.test/supp.pdf' } };
+  const progress = describeAttemptView([clip, failed, running]);
+  assert.equal(progress.kind, 'progress', '单文件失败时仍等待其余文件完成');
+  assert.deepEqual(progress.pdfFiles.map(({ attachmentId, status }) => ({ attachmentId, status })), [
+    { attachmentId: 'main', status: 'failed' },
+    { attachmentId: 'supp', status: 'running' },
+  ]);
+  const final = describeAttemptView([clip, failed, { ...running, status: 'succeeded', document: { url: 'https://drive.test/supp' } }]);
+  assert.equal(final.kind, 'warning');
+  assert.equal(final.pdfRetry, true);
+});
+
 // ——— PDF 存云盘会话开关（#65）：仅本次状态，不回写预设；保存/改预设时写 pdfDrive ———
 
 test('会话 PDF 开关：初值 = 预设默认，偏离预设即「仅本次」并计入修改检测', () => {

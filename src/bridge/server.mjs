@@ -428,8 +428,6 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         const clientTiming = validateClientTiming(body.clientTiming);
         const rawPdfSources = Array.isArray(body.pdfSources) ? body.pdfSources : (body.pdfSource == null ? [] : [body.pdfSource]);
         const normalizedPdfSources = rawPdfSources.map((source) => ({ ...validatePdfSource(source), attachmentId: source.attachmentId ?? null }));
-        const knownPdfBytes = normalizedPdfSources.reduce((sum, source) => sum + (source.sizeBytes || 0), 0);
-        if (knownPdfBytes > 300 * 1024 * 1024) return send(response, 400, { ok: false, code: 'PDF_TOTAL_TOO_LARGE', message: 'PDF 总大小超过 300 MiB' }, origin);
         const declaredNoPrimary = Object.hasOwn(body, 'primaryAttachmentId') && body.primaryAttachmentId === null;
         const pdfSource = normalizedPdfSources.find((source, index) => rawPdfSources[index]?.primary === true)
           ?? (declaredNoPrimary ? null : normalizedPdfSources[0] ?? null);
@@ -498,9 +496,11 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
       // GET 返回已收块位图（续传断点）；POST 写一块（4 MiB 原字节 base64 + index）。
       // 全部到齐 + 整文件 SHA-256 验证通过 → job 转 queued（executor 走 staging 上传）；
       // hash 不匹配 → 422 + job failed + 清理 staging。端点只服务 awaiting_bytes 的 pdf job
-      const chunksMatch = request.url?.match(/^\/v1\/jobs\/([0-9a-f-]{36})\/pdf-chunks$/i);
+      const chunkUrl = new URL(request.url, 'http://127.0.0.1');
+      const chunksMatch = chunkUrl.pathname.match(/^\/v1\/jobs\/([0-9a-f-]{36})\/pdf-chunks$/i);
+      const chunkAttachmentId = chunkUrl.searchParams.get('attachmentId') || null;
       if (chunksMatch && request.method === 'GET') {
-        const job = await store.get(chunksMatch[1], JOB_KIND.PDF);
+        const job = await store.get(chunksMatch[1], JOB_KIND.PDF, chunkAttachmentId);
         if (!job) return send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
         if (job.status !== JOB_STATUS.AWAITING_BYTES) return send(response, 409, { ok: false, code: 'PDF_BYTES_NOT_EXPECTED' }, origin);
         // declared=false 表示 url 型回退尚未补交 bytes 声明（扩展先做声明再喂块）
@@ -510,11 +510,11 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           declared: Boolean(declared),
           totalChunks: declared?.totalChunks ?? null,
           sizeBytes: declared?.sizeBytes ?? null,
-          bitmap: await staging.bitmap(job.attemptId),
+          bitmap: await staging.bitmap(job.attemptId, job.attachmentId),
         }, origin);
       }
       if (chunksMatch && request.method === 'POST') {
-        const job = await store.get(chunksMatch[1], JOB_KIND.PDF);
+        const job = await store.get(chunksMatch[1], JOB_KIND.PDF, chunkAttachmentId);
         if (!job) return send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
         if (job.status !== JOB_STATUS.AWAITING_BYTES) return send(response, 409, { ok: false, code: 'PDF_BYTES_NOT_EXPECTED' }, origin);
         const declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
@@ -530,19 +530,19 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           ? declared.sizeBytes - body.index * PDF_CHUNK_BYTES
           : PDF_CHUNK_BYTES;
         if (buffer.length !== expectedBytes || buffer.length < 1) throw bad('PDF_CHUNK_INVALID');
-        const bitmap = await staging.putChunk(job.attemptId, body.index, buffer);
+        const bitmap = await staging.putChunk(job.attemptId, job.attachmentId, body.index, buffer);
         if (bitmap.length < declared.totalChunks) {
           return send(response, 200, { ok: true, complete: false, received: bitmap.length, totalChunks: declared.totalChunks, bitmap }, origin);
         }
         try {
-          await staging.verify(job.attemptId, declared);
+          await staging.verify(job.attemptId, job.attachmentId, declared);
         } catch {
           // 整验失败：拒收——job failed、staging 清理，不产生云盘文件
-          await staging.discard(job.attemptId);
-          await store.failBytes(job.attemptId, 'PDF 字节校验失败（SHA-256 不匹配），已拒绝接收');
+          await staging.discard(job.attemptId, job.attachmentId);
+          await store.failBytes(job.attemptId, 'PDF 字节校验失败（SHA-256 不匹配），已拒绝接收', job.attachmentId);
           return send(response, 422, { ok: false, code: 'PDF_HASH_MISMATCH' }, origin);
         }
-        await store.markBytesReady(job.attemptId);
+        await store.markBytesReady(job.attemptId, job.attachmentId);
         executor.kick();
         return send(response, 200, { ok: true, complete: true, received: bitmap.length, totalChunks: declared.totalChunks }, origin);
       }

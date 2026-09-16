@@ -13,6 +13,7 @@ export const JOB_STATUS = Object.freeze({
   CANCEL_PENDING_RECONCILIATION: 'cancel_pending_reconciliation',
   SUCCEEDED: 'succeeded',
   SUCCEEDED_WITH_WARNINGS: 'succeeded_with_warnings',
+  SKIPPED: 'skipped',
   FAILED: 'failed',
   CANCELLED: 'cancelled',
   CANCELLED_WITH_DOCUMENT: 'cancelled_with_document',
@@ -309,6 +310,7 @@ export class PersistentJobStore {
         // PDF 云盘引用回填的幂等标记（#88）：pdf job 上传成功后把 PDF 插到本文档开头，
         // 置位后 pdf job 重试/重跑不再重复插入
         pdfRefInserted: false,
+        pdfRefAttachmentIds: [],
         status: JOB_STATUS.QUEUED,
         step: JOB_STEP.CREATE_DOCUMENT,
         document: null,
@@ -482,13 +484,24 @@ export class PersistentJobStore {
   // 插入失败由调用方以 inserted=false 清除标记，重试可补插。返回 { job, claimed }：
   // claimed=true 仅当本调用完成 false→true 跃迁（抢到了插入权）。
   // clip job 此时通常已是终态（凭据回退场景 pdf 晚于 clip 完成），故不做 worker 守卫
-  async markPdfRefInserted(attemptId, inserted = true) {
+  async markPdfRefInserted(attemptId, inserted = true, attachmentId = null) {
     if (typeof inserted !== 'boolean') throw new TypeError('inserted must be a boolean');
     return this.#mutate(async (data) => {
       const job = this.#findJob(data, attemptId, JOB_KIND.CLIP);
-      const claimed = inserted === true && job.pdfRefInserted !== true;
-      if (job.pdfRefInserted === inserted) return { result: { job: structuredClone(job), claimed }, changed: false };
-      job.pdfRefInserted = inserted;
+      job.pdfRefAttachmentIds ??= [];
+      if (attachmentId === null) {
+        const claimed = inserted === true && job.pdfRefInserted !== true;
+        if (job.pdfRefInserted === inserted) return { result: { job: structuredClone(job), claimed }, changed: false };
+        job.pdfRefInserted = inserted;
+        job.updatedAt = this.#now();
+        return { result: { job: structuredClone(job), claimed }, changed: true };
+      }
+      const present = job.pdfRefAttachmentIds.includes(attachmentId);
+      const claimed = inserted && !present;
+      if (present === inserted) return { result: { job: structuredClone(job), claimed }, changed: false };
+      job.pdfRefAttachmentIds = inserted
+        ? [...job.pdfRefAttachmentIds, attachmentId]
+        : job.pdfRefAttachmentIds.filter((id) => id !== attachmentId);
       job.updatedAt = this.#now();
       return { result: { job: structuredClone(job), claimed }, changed: true };
     });
@@ -589,9 +602,9 @@ export class PersistentJobStore {
   }
 
   // 分块全部到齐且 SHA-256 整验通过 → 重排队，executor 拾取后走 staging 字节上传
-  async markBytesReady(attemptId) {
+  async markBytesReady(attemptId, attachmentId = null) {
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
       if (job.status !== JOB_STATUS.AWAITING_BYTES) throw new Error(`Cannot mark bytes ready in ${job.status} state`);
       job.status = JOB_STATUS.QUEUED;
       job.updatedAt = this.#now();
@@ -600,14 +613,45 @@ export class PersistentJobStore {
   }
 
   // 整验失败（SHA-256/大小不匹配）→ failed；staging 清理由调用方负责
-  async failBytes(attemptId, error) {
+  async failBytes(attemptId, error, attachmentId = null) {
     if (!error) throw new TypeError('error is required');
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
       if (job.status !== JOB_STATUS.AWAITING_BYTES) throw new Error(`Cannot fail awaiting-bytes job in ${job.status} state`);
       job.status = JOB_STATUS.FAILED;
       job.error = error;
       job.step = JOB_STEP.DONE;
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
+  // 以实际取得的字节数原子占用本次尝试的 PDF 总预算。重试同一附件不会重复计数。
+  async reservePdfBytes(attemptId, workerId, sizeBytes, attachmentId = null, maxBytes = 300 * 1024 * 1024) {
+    if (!Number.isInteger(sizeBytes) || sizeBytes < 1) throw new TypeError('sizeBytes must be a positive integer');
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
+      this.#assertActiveWorker(job, workerId);
+      if (job.actualSizeBytes === sizeBytes) return { result: true, changed: false };
+      const used = data.jobs
+        .filter((candidate) => candidate.attemptId === attemptId && jobKind(candidate) === JOB_KIND.PDF && candidate !== job)
+        .reduce((sum, candidate) => sum + (candidate.actualSizeBytes || 0), 0);
+      if (used + sizeBytes > maxBytes) return { result: false, changed: false };
+      job.actualSizeBytes = sizeBytes;
+      job.updatedAt = this.#now();
+      return { result: true, changed: true };
+    });
+  }
+
+  async skipPdf(attemptId, workerId, warning, attachmentId = null) {
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
+      this.#assertActiveWorker(job, workerId);
+      job.status = JOB_STATUS.SKIPPED;
+      job.warnings = [warning];
+      job.error = warning;
+      job.step = JOB_STEP.DONE;
+      this.#releaseLease(job);
       job.updatedAt = this.#now();
       return { result: structuredClone(job), changed: true };
     });
@@ -733,9 +777,11 @@ export class PersistentJobStore {
           job.primaryAttachmentId ??= null;
           // 引用回填（#88）：存量 clip job 没有 pdfRefInserted，读取时补 false
           job.pdfRefInserted ??= false;
+          job.pdfRefAttachmentIds ??= [];
           // 摘要子文档（#98）：存量 clip job 没有 digestDoc，读取时补 null
           job.digestDoc ??= null;
         }
+        if (job.kind === JOB_KIND.PDF) job.actualSizeBytes ??= null;
       }
       return data;
     } catch (error) {

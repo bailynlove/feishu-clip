@@ -98,7 +98,7 @@ const PDF_SHARE_WAIT_MS = 30_000;
 const PDF_SHARE_CREDENTIALS = 'PDF_SHARE_CREDENTIALS';
 // 等待期间的放弃态：pdf 最小状态集里的四个终态（succeeded 时先尝试读 staging 残留再放弃——
 // pdf 收尾会为非终态 clip 保留字节，见 #executePdf finally）
-const PDF_GIVE_UP_STATUSES = new Set([JOB_STATUS.SUCCEEDED, JOB_STATUS.FAILED, JOB_STATUS.CANCELLED, JOB_STATUS.EXPIRED]);
+const PDF_GIVE_UP_STATUSES = new Set([JOB_STATUS.SUCCEEDED, JOB_STATUS.SKIPPED, JOB_STATUS.FAILED, JOB_STATUS.CANCELLED, JOB_STATUS.EXPIRED]);
 // clip 终态全集：pdf 收尾据此决定是否保留 staging 字节给摘要阶段（succeeded_with_warnings 也是终态）
 const CLIP_TERMINAL_STATUSES = new Set([
   JOB_STATUS.SUCCEEDED, JOB_STATUS.SUCCEEDED_WITH_WARNINGS, JOB_STATUS.FAILED,
@@ -401,13 +401,18 @@ export class ClipExecutor {
     const startedAt = Date.now();
     const timeline = [];
     let browserFallbackError = null;
+    let actualSizeBytes = null;
     const timing = () => ({ timeline, totalMs: Date.now() - startedAt });
     try {
       const name = pdfFileName({ title: job.title, url: job.pdfSource.url, fallback: job.pdfSource.name });
       if (isBytes) {
         // staging 文件已按声明整验（size + SHA-256）；复制成正式文件名供 lark-cli 相对路径上传
         const stageAt = Date.now();
-        await copyFile(this.staging.filePath(job.attemptId), path.join(scratch, name));
+        await copyFile(this.staging.filePath(job.attemptId, job.attachmentId), path.join(scratch, name)).catch((error) => {
+          if (error.code === 'ENOENT' && job.attachmentId != null) return copyFile(this.staging.filePath(job.attemptId), path.join(scratch, name));
+          throw error;
+        });
+        actualSizeBytes = job.pdfSource.sizeBytes;
         timeline.push({ kind: 'stage', name: 'pdf_staging', ms: Date.now() - stageAt });
       } else {
         const downloadAt = Date.now();
@@ -425,10 +430,18 @@ export class ClipExecutor {
         }
         timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
         await writeFile(path.join(scratch, name), fetched.buffer);
+        actualSizeBytes = fetched.buffer.length;
         // 字节共享（#94）：同次 clip 的摘要阶段可能在等这份字节，下载成功即共享，
         // 免摘要第二次下载。仅当 clip job 存在且非终态时才建共享条目
         const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
         if ((job.attachmentId ?? null) === (clip?.primaryAttachmentId ?? null) && clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) this.#pdfShareEntry(job.attemptId, job.attachmentId).resolve({ buffer: fetched.buffer });
+      }
+      const withinBudget = this.store.reservePdfBytes
+        ? await this.store.reservePdfBytes(job.attemptId, workerId, actualSizeBytes, job.attachmentId)
+        : true;
+      if (!withinBudget) {
+        await this.store.skipPdf(job.attemptId, workerId, '本次 PDF 总大小超过 300 MiB，已跳过此文件', job.attachmentId);
+        return;
       }
       const uploadAt = Date.now();
       this.#assertLease(lease);
@@ -489,7 +502,7 @@ export class ClipExecutor {
       if (isBytes) {
         const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
         const clipOpen = clip && !CLIP_TERMINAL_STATUSES.has(clip.status);
-        if (!clipOpen) await this.staging?.discard(job.attemptId).catch(() => {});
+        if (!clipOpen) await this.staging?.discard(job.attemptId, job.attachmentId).catch(() => {});
       }
     }
   }
@@ -510,15 +523,15 @@ export class ClipExecutor {
     if (!clip.document?.documentId) {
       return CLIP_DOC_PENDING_STATUSES.has(clip.status) ? { warning: 'clip 文档尚未建好，PDF 引用未插入' } : null;
     }
-    if (clip.pdfRefInserted) return null;
-    const inserted = await this.#claimAndInsertPdfReference(job.attemptId, clip.document.documentId, uploaded, name);
+    if ((job.attachmentId == null && clip.pdfRefInserted) || clip.pdfRefAttachmentIds?.includes(job.attachmentId)) return null;
+    const inserted = await this.#claimAndInsertPdfReference(job.attemptId, clip.document.documentId, uploaded, name, job.attachmentId);
     return inserted ? { inserted: true } : null;
   }
 
   // mark-before-insert 共享核（#88 pdf 侧 / #93 clip 侧）：原子置位抢到插入权才插，
   // 两侧竞态不双插；插入失败清标记后抛出（重试可补插）。true=已插入 / false=未抢到
-  async #claimAndInsertPdfReference(attemptId, documentId, uploaded, name) {
-    const { claimed } = await this.store.markPdfRefInserted(attemptId);
+  async #claimAndInsertPdfReference(attemptId, documentId, uploaded, name, attachmentId = null) {
+    const { claimed } = await this.store.markPdfRefInserted(attemptId, true, attachmentId);
     if (!claimed) return false;
     try {
       await this.lark.insertDocFileReference({
@@ -528,7 +541,7 @@ export class ClipExecutor {
         name,
       });
     } catch (error) {
-      await this.store.markPdfRefInserted(attemptId, false).catch(() => {});
+      await this.store.markPdfRefInserted(attemptId, false, attachmentId).catch(() => {});
       throw error;
     }
     return true;
@@ -538,18 +551,24 @@ export class ClipExecutor {
   // 跳过（#88 协议空隙成常态）；clip 建档完成后反向检查——pdf 已 succeeded 且未插过则补插。
   // 插入失败只记警告，job 不失败
   async #backfillPdfReference(job, document, warnings, timeline) {
-    const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF, job.primaryAttachmentId ?? null).catch(() => null);
-    if (pdfJob?.status !== JOB_STATUS.SUCCEEDED || !pdfJob.document?.fileToken) return;
-    if (job.pdfRefInserted) return;
-    // 引用名与 pdf 侧同一命名规则，优先取 pdf job 的标题/来源（即实际上传名）
-    const name = pdfFileName({ title: pdfJob.title ?? job.snapshot?.title, url: pdfJob.pdfSource?.url, fallback: pdfJob.pdfSource?.name });
-    const refAt = Date.now();
-    try {
-      const inserted = await this.#claimAndInsertPdfReference(job.attemptId, document.documentId, pdfJob.document, name);
-      if (inserted) timeline.push({ kind: 'stage', name: 'pdf_ref_insert', ms: Date.now() - refAt });
-    } catch (error) {
-      timeline.push({ kind: 'stage', name: 'pdf_ref_insert', ms: Date.now() - refAt, detail: String(error?.message || error).slice(0, 300) });
-      warnings.push(`PDF 云盘引用插入失败：${error?.message || '未知错误'}`);
+    const attemptJobs = await this.store.get(job.attemptId).catch(() => []);
+    const isAttemptList = Array.isArray(attemptJobs);
+    const candidates = isAttemptList
+      ? attemptJobs
+      : [await this.store.get(job.attemptId, JOB_KIND.PDF, job.primaryAttachmentId ?? null).catch(() => null)];
+    const pdfJobs = candidates
+      .filter((candidate) => (!isAttemptList || candidate?.kind === JOB_KIND.PDF) && candidate?.status === JOB_STATUS.SUCCEEDED && candidate.document?.fileToken);
+    for (const pdfJob of pdfJobs) {
+      if (job.pdfRefAttachmentIds?.includes(pdfJob.attachmentId)) continue;
+      const name = pdfFileName({ title: pdfJob.title ?? job.snapshot?.title, url: pdfJob.pdfSource?.url, fallback: pdfJob.pdfSource?.name });
+      const refAt = Date.now();
+      try {
+        const inserted = await this.#claimAndInsertPdfReference(job.attemptId, document.documentId, pdfJob.document, name, pdfJob.attachmentId);
+        if (inserted) timeline.push({ kind: 'stage', name: 'pdf_ref_insert', ms: Date.now() - refAt });
+      } catch (error) {
+        timeline.push({ kind: 'stage', name: 'pdf_ref_insert', ms: Date.now() - refAt, detail: String(error?.message || error).slice(0, 300) });
+        warnings.push(`PDF 云盘引用插入失败：${error?.message || '未知错误'}`);
+      }
     }
   }
 
@@ -568,10 +587,13 @@ export class ClipExecutor {
     const readTerminalStaged = async (pdfJob) => {
       if (pdfJob?.status !== JOB_STATUS.SUCCEEDED || pdfJob.pdfSource?.type !== 'bytes') return null;
       try {
-        const filePath = await this.staging.verify(job.attemptId, pdfJob.pdfSource);
+        const filePath = await this.staging.verify(job.attemptId, pdfJob.attachmentId, pdfJob.pdfSource).catch((error) => {
+          if (error.code === 'ENOENT' && pdfJob.attachmentId != null) return this.staging.verify(job.attemptId, pdfJob.pdfSource);
+          throw error;
+        });
         const buffer = await readFile(filePath);
         // 字节已入云盘，staging 不再有人消费，顺手收尾（正常路径由 pdf job 终态清理）
-        await this.staging.discard(job.attemptId).catch(() => {});
+        await this.staging.discard(job.attemptId, pdfJob.attachmentId).catch(() => {});
         return { buffer };
       } catch {
         return null;
@@ -617,7 +639,10 @@ export class ClipExecutor {
           // awaiting_bytes → queued 即 markBytesReady（server 已整验）；读前按声明再验一次，
           // 防半途文件/并发写
           try {
-            const filePath = await this.staging.verify(job.attemptId, pdfJob.pdfSource);
+            const filePath = await this.staging.verify(job.attemptId, pdfJob.attachmentId, pdfJob.pdfSource).catch((error) => {
+              if (error.code === 'ENOENT' && pdfJob.attachmentId != null) return this.staging.verify(job.attemptId, pdfJob.pdfSource);
+              throw error;
+            });
             return { buffer: await readFile(filePath) };
           } catch {
             return { warning: 'PDF 字节校验失败，已按纯文本生成摘要' };

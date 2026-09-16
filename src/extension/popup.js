@@ -383,8 +383,8 @@ async function savePdfTab() {
     attemptId = result.pdfJob?.attemptId ?? attemptId;
     recoveredAttempt = false;
     // 新 attempt 复位回传触发器与粘滞错误（同 CLIP 主流程）
-    pdfFeedStarted = false;
-    pdfFeedError = null;
+    pdfFeedStarted = new Set();
+    pdfFeedErrors = new Map();
     poll();
   } catch (error) {
     show(error.message, 'error');
@@ -446,16 +446,40 @@ async function inspect() {
 // 重开弹窗可重试——bridge 位图保证不重传已确认块。
 // pdfFeedError：回传失败须粘滞呈现——poll 每轮覆盖状态条，瞬时 toast 会被立即刷掉
 //（MDPI 事故：CORS 拒绝后用户只见「凭据回传中…」假象），故随进度态持续展示直到 job 离开 awaiting_bytes
-let pdfFeedStarted = false;
-let pdfFeedError = null;
+let pdfFeedStarted = new Set();
+let pdfFeedErrors = new Map();
 function triggerPdfFeed(jobs) {
-  if (pdfFeedStarted) return;
-  const pdfJob = jobs.find((job) => job.kind === 'pdf');
-  const pdfUrl = pdfJob?.pdfSource?.url ?? presetState?.pdf?.url;
-  if (!pdfJob || !pdfUrl) return;
-  pdfFeedStarted = true;
-  message({ type: 'FEED_PDF_BYTES', attemptId, pdfUrl, name: pdfJob.pdfSource?.name ?? presetState?.pdf?.name ?? null })
-    .catch((error) => { pdfFeedError = error.message; show(`PDF 凭据回传失败：${error.message}。重开弹窗可重试。`, 'error'); });
+  for (const pdfJob of jobs.filter((job) => job.kind === 'pdf' && job.status === 'awaiting_bytes')) {
+    const key = pdfJob.attachmentId ?? '__legacy__';
+    const pdfUrl = pdfJob.pdfSource?.url ?? presetState?.pdf?.url;
+    if (!pdfUrl || pdfFeedStarted.has(key)) continue;
+    pdfFeedStarted.add(key);
+    message({ type: 'FEED_PDF_BYTES', attemptId, attachmentId: pdfJob.attachmentId ?? null, pdfUrl, name: pdfJob.pdfSource?.name ?? presetState?.pdf?.name ?? null })
+      .catch((error) => { pdfFeedErrors.set(key, error.message); show(`PDF 凭据回传失败：${error.message}。重开弹窗可重试。`, 'error'); });
+  }
+}
+
+const PDF_STATUS_TEXT = { queued: '等待中', awaiting_bytes: '回传中', running: '上传中', succeeded: '已完成', skipped: '已跳过', failed: '失败', expired: '已过期', cancelled: '已取消' };
+function renderPdfFiles(files = []) {
+  const list = $('#pdf-job-list');
+  list.replaceChildren();
+  list.classList.toggle('hidden', files.length === 0);
+  for (const file of files) {
+    const row = document.createElement('div'); row.className = 'pdf-job-row';
+    const name = document.createElement('span'); name.className = 'pdf-job-name'; name.textContent = file.name;
+    const status = document.createElement('span'); status.className = 'pdf-job-status'; status.textContent = PDF_STATUS_TEXT[file.status] ?? file.status;
+    row.append(name, status);
+    if (['failed', 'expired'].includes(file.status)) {
+      const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'pdf-job-retry'; retry.textContent = '重试';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try { await message({ type: 'RETRY_PDF_ATTACHMENT', attemptId, attachmentId: file.attachmentId, pdfSource: file.source, pdfFolderToken: presetState.pdfFolder?.folderToken ?? null }); poll(); }
+        catch (error) { show(error.message, 'error'); retry.disabled = false; }
+      });
+      row.append(retry);
+    }
+    list.append(row);
+  }
 }
 
 async function poll() {
@@ -469,9 +493,10 @@ async function poll() {
     syncDigestTick();
     const view = describeAttemptView(jobs, { recovered: recoveredAttempt, digestWaitSeconds: digestWaitSeconds() });
     if (!view) return;
+    renderPdfFiles(view.pdfFiles);
     // 凭据回传触发（#68）：两种页面形态共用 poll，awaiting_bytes 即开始/继续喂字节
     if (view.pdfAwaitingBytes) triggerPdfFeed(jobs);
-    else pdfFeedError = null; // job 离开 awaiting_bytes（已喂齐/超时/失败）即清除粘滞错误
+    else pdfFeedErrors.clear(); // job 离开 awaiting_bytes（已喂齐/超时/失败）即清除粘滞错误
     // PDF 标签页形态（#67）：view 落到单面板主按钮/状态条，不触碰网页形态的 CTA 区
     if (presetState.pageKind === 'pdf-tab') {
       applyPdfTabView(view);
@@ -494,6 +519,7 @@ async function poll() {
       recoveredAttempt = false;
     } else {
       // 回传失败粘滞呈现（pdfFeedError）：错误优先于轮替进度文案，轮询不停以便恢复后自愈
+      const pdfFeedError = [...pdfFeedErrors.values()][0];
       show(view.pdfAwaitingBytes && pdfFeedError ? `PDF 凭据回传失败：${pdfFeedError}。重开弹窗可重试。（${view.message}）` : view.message);
       pollTimer = setTimeout(poll, 900);
     }
@@ -654,8 +680,8 @@ async function clipToFeishu() {
     attemptId = result.job.attemptId;
     recoveredAttempt = false;
     // 新 attempt 可能带新 pdf job：回传触发器与粘滞错误随 attempt 复位
-    pdfFeedStarted = false;
-    pdfFeedError = null;
+    pdfFeedStarted = new Set();
+    pdfFeedErrors = new Map();
     $('#open').classList.add('hidden'); $('#open-pdf').classList.add('hidden'); $('#retry-pdf').classList.add('hidden');
     setSaveVisible(true);
     poll();

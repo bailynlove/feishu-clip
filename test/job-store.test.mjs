@@ -940,3 +940,29 @@ test('PDF jobs 重试按稳定 attachmentId 绑定，不受候选顺序变化影
     assert.equal((await store.get('attempt-order', 'pdf', 'supplement')).pdfSource.url, 'https://example.test/supplement.pdf');
   });
 });
+
+test('PDF 引用幂等标记按 attachmentId 独立', async () => {
+  await withStore(async ({ store }) => {
+    await store.submit({ attemptId: 'attempt-refs', sourceUrl: 'https://example.test/article' });
+    assert.equal((await store.markPdfRefInserted('attempt-refs', true, 'main')).claimed, true);
+    assert.equal((await store.markPdfRefInserted('attempt-refs', true, 'main')).claimed, false);
+    assert.equal((await store.markPdfRefInserted('attempt-refs', true, 'supplement')).claimed, true);
+    assert.deepEqual((await store.get('attempt-refs', 'clip')).pdfRefAttachmentIds, ['main', 'supplement']);
+    await store.markPdfRefInserted('attempt-refs', false, 'main');
+    assert.deepEqual((await store.get('attempt-refs', 'clip')).pdfRefAttachmentIds, ['supplement']);
+  });
+});
+
+test('实际 PDF 总量预算按附件原子占用，超限附件单独 skipped', async () => {
+  await withStore(async ({ store }) => {
+    for (const id of ['main', 'supplement']) {
+      await store.submit({ attemptId: 'attempt-budget', sourceUrl: 'https://example.test/article', kind: 'pdf', attachmentId: id, pdfSource: { type: 'url', url: `https://example.test/${id}.pdf` } });
+      await store.claim('attempt-budget', `worker-${id}`, 'pdf', id);
+    }
+    assert.equal(await store.reservePdfBytes('attempt-budget', 'worker-main', 200 * 1024 * 1024, 'main'), true);
+    assert.equal(await store.reservePdfBytes('attempt-budget', 'worker-supplement', 101 * 1024 * 1024, 'supplement'), false);
+    await store.skipPdf('attempt-budget', 'worker-supplement', '本次 PDF 总大小超过 300 MiB，已跳过此文件', 'supplement');
+    assert.equal((await store.get('attempt-budget', 'pdf', 'main')).status, 'running', '已占用预算的附件不受影响');
+    assert.equal((await store.get('attempt-budget', 'pdf', 'supplement')).status, 'skipped');
+  });
+});

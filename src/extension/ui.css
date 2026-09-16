@@ -254,6 +254,7 @@
 .popup .status.error{background:#fff0f1;color:#962932;box-shadow:none}
 /* 与 error 同理：warning 需盖过上方 .popup .status 的品牌底纹（同优先级后定义者胜出） */
 .popup .status.warning{background:#fff5dd;color:#7a4800;box-shadow:none}
+.popup .pdf-job-list{display:grid;gap:6px;margin-top:8px}.popup .pdf-job-list.hidden{display:none}.popup .pdf-job-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;font-size:12px}.popup .pdf-job-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.popup .pdf-job-status{color:var(--muted);white-space:nowrap}.popup .pdf-job-retry{border:0;background:transparent;color:var(--blue);cursor:pointer;padding:2px 0}
 .popup .cta{margin-top:auto;display:flex;flex-direction:column;gap:8px}
 /* 双产物链接并排（#65）：单链接时自然占满整行 */
 .popup .cta-links{display:flex;gap:8px}
