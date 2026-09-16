@@ -913,13 +913,15 @@ $('#pdf-translator-files').addEventListener('change', async (event) => {
   for (const file of event.target.files || []) {
     try {
       const parsed = parsePdfTranslatorFile(await file.text());
-      if (!parsed.ok) throw new Error(parsed.diagnostics.map((item) => item.message).join('；'));
-      const view = pdfTranslatorView({ ...parsed, confirmed: true, enabled: true });
+      const candidate = parsed.translator || { metadata: { translatorID: `invalid-${crypto.randomUUID()}`, label: file.name, creator: '未知', target: '', priority: Number.MAX_SAFE_INTEGER, requestOrigins: [] }, code: '', source: await file.text() };
+      const safeParsed = { ...parsed, translator: candidate };
+      const view = pdfTranslatorView({ ...safeParsed, confirmed: true, enabled: parsed.ok });
       const previous = pdfTranslators.find((item) => item.translator?.metadata?.translatorID === view.translatorID);
       const previousView = previous ? pdfTranslatorView(previous) : null;
       const replacement = previousView ? `\n\n将替换当前版本：${previousView.version} → ${view.version}\n跨域权限：${previousView.requestOrigins.join(', ') || '无'} → ${view.requestOrigins.join(', ') || '无'}` : '';
-      if (!window.confirm(`确认导入「${view.label}」？\n作者：${view.creator}\nID：${view.translatorID}\n适用网址：${view.target}\n跨域权限：${view.requestOrigins.join(', ') || '无'}${replacement}`)) continue;
-      pdfTranslators = upsertPdfTranslator(pdfTranslators, { ...parsed, confirmed: true, enabled: true });
+      const warning = parsed.ok ? '' : `\n\n兼容性：不兼容（将保留为停用状态）\n诊断：${parsed.diagnostics.map((item) => item.message).join('；')}`;
+      if (!window.confirm(`确认导入「${view.label}」？\n作者：${view.creator}\nID：${view.translatorID}\n适用网址：${view.target}\n跨域权限：${view.requestOrigins.join(', ') || '无'}${warning}${replacement}`)) continue;
+      pdfTranslators = upsertPdfTranslator(pdfTranslators, { ...safeParsed, confirmed: true, enabled: parsed.ok });
       await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators });
     } catch (error) { toast(`${file.name} 导入失败：${error.message}`, 'error'); }
   }
