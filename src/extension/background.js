@@ -171,25 +171,137 @@ async function openPdfStream(pdfUrl) {
   if (response.status === 401 || response.status === 403) {
     throw Object.assign(new Error('源站仍要求登录，请先在源站登录后重试'), { code: 'PDF_SOURCE_AUTH' });
   }
-  if (!response.ok || !response.body) {
+  const challenge = String(response.headers?.get?.('x-amzn-waf-action') || '').toLowerCase() === 'challenge';
+  const ieee = (() => { try { return /(^|\.)ieee\.org$/i.test(new URL(pdfUrl).hostname); } catch { return false; } })();
+  if (challenge || (ieee && (response.status === 202 || response.status === 418))) {
+    await response.body?.cancel?.().catch?.(() => {});
+    throw Object.assign(new Error('源站要求在浏览器中完成验证'), { code: 'PDF_SOURCE_VERIFICATION_REQUIRED' });
+  }
+  if (response.status !== 200 || !response.body) {
     throw Object.assign(new Error(`源站返回 HTTP ${response.status}，无法读取 PDF`), { code: 'PDF_SOURCE_FETCH_FAILED' });
   }
-  return response.body.getReader();
+  return { reader: response.body.getReader(), contentType: response.headers?.get?.('content-type') || '' };
 }
 
 // 流式过一遍源站：累计大小 + 增量 SHA-256；onChunk 用于第二遍的切块回调
 async function readPdfPass(pdfUrl, onChunk = null) {
-  const reader = await openPdfStream(pdfUrl);
+  const { reader, contentType } = await openPdfStream(pdfUrl);
+  if (/^text\/html\b/i.test(contentType)) {
+    await reader.cancel().catch(() => {});
+    throw Object.assign(new Error('源站返回的内容不是 PDF'), { code: 'PDF_SOURCE_TYPE' });
+  }
   const hash = createIncrementalSha256();
   let sizeBytes = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  let receivedBytes = 0;
+  let verified = false;
+  const held = [];
+  let prefix = new Uint8Array(0);
+  const consume = async (value) => {
     sizeBytes += value.byteLength;
     hash.update(value);
     if (onChunk) await onChunk(value);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedBytes += value.byteLength;
+    if (!verified) {
+      held.push(value);
+      const needed = Math.max(0, 5 - prefix.byteLength);
+      if (needed) {
+        const next = new Uint8Array(prefix.byteLength + Math.min(needed, value.byteLength));
+        next.set(prefix);
+        next.set(value.subarray(0, needed), prefix.byteLength);
+        prefix = next;
+      }
+      if (prefix.byteLength >= 5) {
+        verified = String.fromCharCode(...prefix) === '%PDF-';
+        if (!verified) {
+          await reader.cancel().catch(() => {});
+          throw Object.assign(new Error('源站返回的内容不是 PDF'), { code: 'PDF_SOURCE_TYPE' });
+        }
+        for (const chunk of held.splice(0)) await consume(chunk);
+      }
+    } else {
+      await consume(value);
+    }
   }
+  if (!verified) throw Object.assign(new Error(receivedBytes ? '源站返回的内容不是 PDF' : '源站返回空内容'), { code: receivedBytes ? 'PDF_SOURCE_TYPE' : 'PDF_SOURCE_FETCH_FAILED' });
   return { sizeBytes, sha256: hash.hex() };
+}
+
+const PDF_VERIFICATION_TIMEOUT_MS = 5 * 60 * 1000;
+const PDF_VERIFICATION_POLL_MS = 1000;
+
+function verificationPage(job, pdfUrl) {
+  try {
+    const source = new URL(job?.sourceUrl);
+    if (source.origin === new URL(pdfUrl).origin) return source.href;
+  } catch {}
+  return pdfUrl;
+}
+
+async function probePdfAccess(pdfUrl) {
+  let response;
+  try { response = await fetch(pdfUrl, { credentials: 'include' }); } catch { return false; }
+  const challenge = String(response.headers?.get?.('x-amzn-waf-action') || '').toLowerCase() === 'challenge';
+  const contentType = response.headers?.get?.('content-type') || '';
+  const candidate = response.status === 200 && !challenge && !/^text\/html\b/i.test(contentType) && Boolean(response.body);
+  if (!candidate) {
+    await response.body?.cancel?.().catch?.(() => {});
+    return false;
+  }
+  const reader = response.body.getReader();
+  let prefix = new Uint8Array(0);
+  try {
+    while (prefix.byteLength < 5) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const needed = 5 - prefix.byteLength;
+      const next = new Uint8Array(prefix.byteLength + Math.min(needed, value.byteLength));
+      next.set(prefix);
+      next.set(value.subarray(0, needed), prefix.byteLength);
+      prefix = next;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return prefix.byteLength === 5 && String.fromCharCode(...prefix) === '%PDF-';
+}
+
+async function waitForPdfVerification(job, pdfUrl) {
+  if (!chrome.windows?.create) {
+    throw Object.assign(new Error('浏览器无法打开验证窗口，请先手动打开来源网页完成验证后重试'), { code: 'PDF_SOURCE_VERIFICATION_UNAVAILABLE' });
+  }
+  const window = await chrome.windows.create({
+    url: verificationPage(job, pdfUrl), type: 'popup', focused: true, width: 960, height: 720,
+  });
+  const deadline = Date.now() + PDF_VERIFICATION_TIMEOUT_MS;
+  let verified = false;
+  try {
+    while (Date.now() < deadline) {
+      if (window?.id != null && chrome.windows.get) {
+        try { await chrome.windows.get(window.id); } catch {
+          throw Object.assign(new Error('验证窗口已关闭，未能取得 PDF'), { code: 'PDF_SOURCE_VERIFICATION_CANCELLED' });
+        }
+      }
+      if (await probePdfAccess(pdfUrl)) { verified = true; return; }
+      await new Promise((resolve) => setTimeout(resolve, PDF_VERIFICATION_POLL_MS));
+    }
+    throw Object.assign(new Error('等待源站验证超时，请重试'), { code: 'PDF_SOURCE_VERIFICATION_TIMEOUT' });
+  } finally {
+    if (verified && window?.id != null && chrome.windows.remove) await chrome.windows.remove(window.id).catch(() => {});
+  }
+}
+
+async function readPdfPassWithVerification(job, pdfUrl, onChunk = null) {
+  try {
+    return await readPdfPass(pdfUrl, onChunk);
+  } catch (error) {
+    if (error?.code !== 'PDF_SOURCE_VERIFICATION_REQUIRED') throw error;
+    await waitForPdfVerification(job, pdfUrl);
+    return readPdfPass(pdfUrl, onChunk);
+  }
 }
 
 async function feedPdfBytes({ attemptId, attachmentId = null, pdfUrl, name = null }) {
@@ -210,7 +322,7 @@ async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
   let declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
   if (!declared) {
     // 第一遍流式读：只算 SHA-256 与总大小（bytes 声明必须先于分块，#61）
-    const measured = await readPdfPass(pdfUrl);
+    const measured = await readPdfPassWithVerification(job, pdfUrl);
     if (measured.sizeBytes < 1) throw Object.assign(new Error('源站返回空内容'), { code: 'PDF_SOURCE_FETCH_FAILED' });
     declared = {
       type: 'bytes',
@@ -248,7 +360,7 @@ async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
       index += 1;
     }
   };
-  await readPdfPass(pdfUrl, async (value) => {
+  await readPdfPassWithVerification(job, pdfUrl, async (value) => {
     const merged = new Uint8Array(pending.byteLength + value.byteLength);
     merged.set(pending);
     merged.set(value, pending.byteLength);

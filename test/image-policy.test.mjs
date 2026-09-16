@@ -180,6 +180,18 @@ test('requestPublicBytes: 正常响应带 buffer 与 content-type', async () => 
   });
 });
 
+test('requestPublicBytes: 保留源站 WAF challenge 标记供浏览器回退判定', async () => {
+  await withHttpServer((_request, response) => {
+    response.writeHead(202, { 'Content-Type': 'text/html', 'x-amzn-waf-action': 'challenge' });
+    response.end('<html>challenge</html>');
+  }, async (base) => {
+    await assert.rejects(
+      () => requestPublicBytes(new URL(`${base}/challenge`), LOCAL_RECORD, { accept: 'application/pdf', maxBytes: 1024, label: 'PDF' }),
+      (error) => error.statusCode === 202 && error.challenge === true && error.failureType === 'http',
+    );
+  });
+});
+
 test('requestPublicBytes: 响应超时携带 transport 错误类型', async () => {
   await withHttpServer((_request, response) => {
     response.writeHead(200, { 'Content-Type': 'application/pdf' });

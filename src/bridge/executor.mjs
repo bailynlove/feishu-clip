@@ -62,11 +62,15 @@ export function aiErrorMessage(error) {
   return error?.message || 'AI 摘要生成失败';
 }
 
-// 浏览器回退判定（#68/#105）：url 型下载撞 401/403，或 Bridge 网络路径不可达时，
+// 浏览器回退判定（#68/#105）：url 型下载撞 401/403、源站 WAF 验证，或 Bridge 网络路径不可达时，
 // 转 awaiting_bytes 让扩展使用浏览器网络环境抓取并分块回传。
-function needsBrowserFallback(error) {
+function needsBrowserFallback(error, sourceUrl = null) {
+  let ieee = false;
+  try { ieee = /(^|\.)ieee\.org$/i.test(new URL(sourceUrl).hostname); } catch {}
   return error?.failureType === 'transport'
     || (error?.code === 'PDF_FETCH_FAILED' && (error.statusCode === 401 || error.statusCode === 403))
+    || (error?.code === 'PDF_FETCH_FAILED' && error.challenge === true)
+    || (error?.code === 'PDF_FETCH_FAILED' && ieee && (error.statusCode === 202 || error.statusCode === 418))
     || isTransientNetworkError(error);
 }
 
@@ -452,7 +456,7 @@ export class ClipExecutor {
             onRetry: (error, attempt) => timeline.push({ kind: 'retry', name: 'pdf_download', detail: `${error?.code || error?.message}，第 ${attempt} 次重试` }),
           });
         } catch (error) {
-          if (needsBrowserFallback(error)) browserFallbackError = error;
+          if (needsBrowserFallback(error, job.pdfSource.url)) browserFallbackError = error;
           throw error;
         }
         timeline.push({ kind: 'stage', name: 'pdf_download', ms: Date.now() - downloadAt });
@@ -801,7 +805,7 @@ export class ClipExecutor {
             } catch (error) {
               // 凭据回退（#80）：401/403 时转 staging 等待路径，复用扩展喂给 pdf job 的
               // 同一份字节；其余下载失败维持 #79 降级语义
-              if (needsBrowserFallback(error) && this.staging) {
+              if (needsBrowserFallback(error, job.pdfSource.url) && this.staging) {
                 const staged = await this.#awaitStagedPdf(job, workerId);
                 if (staged.buffer) {
                   pdf = toPdfAttachment(staged.buffer);

@@ -989,7 +989,7 @@ test('pdf job：下载超限/类型不符映射为中文失败文案，上传歧
 
 // ——— 凭据回退（#68）：url 型撞 401/403 转 awaiting_bytes；bytes 型走 staging 上传 ———
 
-test('pdf job：下载撞 401/403 不 fail，转 awaiting_bytes（其余 HTTP 错误仍 fail）', async () => {
+test('pdf job：下载撞 401/403 或 IEEE 验证响应不 fail，转 awaiting_bytes（其余 HTTP 错误仍 fail）', async () => {
   for (const statusCode of [401, 403]) {
     const store = pdfFakeStore({ ...PDF_JOB, attemptId: `pdf-${statusCode}` });
     const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
@@ -1000,6 +1000,21 @@ test('pdf job：下载撞 401/403 不 fail，转 awaiting_bytes（其余 HTTP �
     assert.equal(store.awaitedBytes.attemptId, `pdf-${statusCode}`);
     assert.equal(store.failed, null, `${statusCode} 不得落 failed`);
     assert.equal(store.completed, null);
+  }
+
+  for (const statusCode of [202, 418]) {
+    const sourceUrl = 'https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=11146309&ref=';
+    const store = pdfFakeStore({ ...PDF_JOB, attemptId: `pdf-ieee-${statusCode}`, pdfSource: { ...PDF_JOB.pdfSource, url: sourceUrl } });
+    const lark = { async uploadDriveFile() { throw new Error('不应走到上传'); } };
+    const downloadPdf = async () => {
+      throw Object.assign(new Error(`PDF_HTTP_${statusCode}`), {
+        code: 'PDF_FETCH_FAILED', statusCode, challenge: statusCode === 202,
+      });
+    };
+    new ClipExecutor({ store, lark, logger: { warn() {}, error() {}, log() {} }, downloadPdf }).kick();
+    await store.settled;
+    assert.ok(store.awaitedBytes, `IEEE HTTP ${statusCode} 应转 awaiting_bytes`);
+    assert.equal(store.failed, null);
   }
 
   // 对照组：404 等其他 HTTP 错误仍按失败处理

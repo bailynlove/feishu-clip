@@ -263,8 +263,13 @@ export function requestPublicBytes(url, record, { accept, maxBytes, label, timeo
       }
       if (response.statusCode !== 200) {
         response.resume();
-        // statusCode 透传给调用方：pdf 下载撞 401/403 要转凭据回退（awaiting_bytes，#68）而非失败
-        reject(resourceError(`${label}_HTTP_${response.statusCode}`, `${label}_FETCH_FAILED`, RESOURCE_FAILURE_TYPE.HTTP, { statusCode: response.statusCode }));
+        // statusCode 与 WAF 标记透传给调用方：需要浏览器会话的响应转凭据回退，
+        // 由扩展让用户在可见窗口完成验证，而不是把挑战页当成普通下载失败。
+        reject(resourceError(`${label}_HTTP_${response.statusCode}`, `${label}_FETCH_FAILED`, RESOURCE_FAILURE_TYPE.HTTP, {
+          statusCode: response.statusCode,
+          challenge: String(response.headers['x-amzn-waf-action'] || '').toLowerCase() === 'challenge',
+          contentType: response.headers['content-type'] || null,
+        }));
         return;
       }
       const advertised = Number(response.headers['content-length'] || 0);

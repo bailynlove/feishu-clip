@@ -37,14 +37,30 @@ let lastAiDeleteBody = null; // DELETE_AI_PROVIDER 转发给 bridge 的 POST /v1
 let lastAiTestBody = null; // TEST_AI 转发给 bridge 的 POST /v1/ai/test 请求体
 let lastProxyBody = null;
 // ——— 凭据回传（#68）FEED_PDF_BYTES 用例的桩状态 ———
-const PDF_SOURCE_URL = 'https://pub.example.com/paywalled.pdf';
-let pdfSourceServer = null; // 非 null 时源站 URL 返回流式 Response；{ body } 或 { failStatus }
+const PDF_SOURCE_URL = 'https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=11146309&ref=';
+const IEEE_PAGE_URL = 'https://ieeexplore.ieee.org/document/11146309';
+let pdfSourceServer = null; // 非 null 时源站 URL 返回流式 Response；{ body } / { failStatus } / { challengeOnce, body }
 let feedJob = null; // FEED 用例的 pdf job 视图（GET /v1/jobs/:id 返回）
 let chunkBitmap = []; // pdf-chunks GET 返回的位图
 let postedChunks = []; // 记录分块 POST 请求体
+let verificationWindows = [];
+let removedWindows = [];
 globalThis.chrome = {
   runtime: { id: 'ext-id', onMessage: { addListener: (fn) => listeners.push(fn) } },
   tabs: { query: async () => [{ id: 1, url: tabUrl }] },
+  windows: {
+    async create(options) {
+      const window = { id: 70 + verificationWindows.length, ...options };
+      verificationWindows.push(window);
+      return window;
+    },
+    async get(id) {
+      const window = verificationWindows.find((item) => item.id === id && !removedWindows.includes(id));
+      if (!window) throw new Error('No window');
+      return window;
+    },
+    async remove(id) { removedWindows.push(id); },
+  },
   scripting: {
     executeScript: async ({ files, func } = {}) => {
       if (func) {
@@ -78,14 +94,18 @@ globalThis.fetch = async (url, options) => {
   }
   // 源站 PDF（#68 凭据抓取）：流式 Response，分段 enqueue 模拟真实流
   if (url === PDF_SOURCE_URL && pdfSourceServer) {
-    if (pdfSourceServer.failStatus) return { ok: false, status: pdfSourceServer.failStatus, body: null };
+    if (pdfSourceServer.challengeOnce && !pdfSourceServer.challenged) {
+      pdfSourceServer.challenged = true;
+      return new Response('<html>challenge</html>', { status: pdfSourceServer.challengeStatus ?? 202, headers: { 'content-type': 'text/html', 'x-amzn-waf-action': 'challenge' } });
+    }
+    if (pdfSourceServer.failStatus) return { ok: false, status: pdfSourceServer.failStatus, headers: { get: () => null }, body: null };
     const bytes = pdfSourceServer.body;
     return new Response(new ReadableStream({
       start(controller) {
         for (let offset = 0; offset < bytes.length; offset += 1000) controller.enqueue(bytes.subarray(offset, offset + 1000));
         controller.close();
       },
-    }), { status: 200 });
+    }), { status: 200, headers: { 'content-type': pdfSourceServer.contentType ?? 'application/pdf' } });
   }
   // 分块通道端点（#68）
   if (url.includes('/pdf-chunks')) {
@@ -381,10 +401,18 @@ function resetFeedStubs(body) {
   lastJobsBody = null;
   pdfSourceServer = { body };
   feedJob = null;
+  verificationWindows = [];
+  removedWindows = [];
+}
+
+function pdfBytes(size) {
+  const bytes = randomBytes(size);
+  bytes.set(Buffer.from('%PDF-'));
+  return bytes;
 }
 
 test('FEED_PDF_BYTES：url 型 awaiting_bytes → 先声明（SHA-256/总块数）再逐块 POST', async () => {
-  const body = randomBytes(FEED_BODY_SIZE);
+  const body = pdfBytes(FEED_BODY_SIZE);
   resetFeedStubs(body);
   feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper', pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'paywalled.pdf' } };
   try {
@@ -413,7 +441,7 @@ test('FEED_PDF_BYTES：url 型 awaiting_bytes → 先声明（SHA-256/总块数�
 });
 
 test('FEED_PDF_BYTES：声明已在库时跳过第一遍；位图续传只补缺块', async () => {
-  const body = randomBytes(FEED_BODY_SIZE);
+  const body = pdfBytes(FEED_BODY_SIZE);
   resetFeedStubs(body);
   feedJob = {
     attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper',
@@ -431,7 +459,7 @@ test('FEED_PDF_BYTES：声明已在库时跳过第一遍；位图续传只补缺
 });
 
 test('FEED_PDF_BYTES：job 不在 awaiting_bytes 不动作；源站仍 401/403 报错可重试', async () => {
-  resetFeedStubs(randomBytes(100));
+  resetFeedStubs(pdfBytes(100));
   feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'failed', pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'x.pdf' } };
   try {
     assert.deepEqual(await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL }), { fed: false, status: 'failed' });
@@ -449,6 +477,43 @@ test('FEED_PDF_BYTES：job 不在 awaiting_bytes 不动作；源站仍 401/403 �
       send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL }),
       (error) => error.code === 'PDF_SOURCE_FETCH_FAILED',
     );
+  } finally {
+    resetFeedStubs(null);
+  }
+});
+
+test('FEED_PDF_BYTES：IEEE challenge 打开来源页验证窗口，验证通过后自动重试并关闭', async () => {
+  const body = pdfBytes(4096);
+  resetFeedStubs(body);
+  pdfSourceServer = { body, challengeOnce: true, challengeStatus: 418 };
+  feedJob = {
+    attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper', sourceUrl: IEEE_PAGE_URL,
+    pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'paper.pdf' },
+  };
+  try {
+    const result = await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL });
+    assert.deepEqual(result, { fed: true, uploaded: 1, totalChunks: 1 });
+    assert.equal(verificationWindows.length, 1);
+    assert.equal(verificationWindows[0].url, IEEE_PAGE_URL, '验证窗口打开用户原先访问的论文页');
+    assert.equal(verificationWindows[0].type, 'popup');
+    assert.deepEqual(removedWindows, [verificationWindows[0].id], '验证通过后自动关闭窗口');
+  } finally {
+    resetFeedStubs(null);
+  }
+});
+
+test('FEED_PDF_BYTES：HTTP 200 的 HTML 页面不会被声明或上传为 PDF', async () => {
+  const body = Buffer.from('<html>unable to load page</html>');
+  resetFeedStubs(body);
+  pdfSourceServer = { body, contentType: 'text/html' };
+  feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', sourceUrl: PAGE, pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'x.pdf' } };
+  try {
+    await assert.rejects(
+      send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL }),
+      (error) => error.code === 'PDF_SOURCE_TYPE',
+    );
+    assert.equal(lastJobsBody, null);
+    assert.deepEqual(postedChunks, []);
   } finally {
     resetFeedStubs(null);
   }

@@ -105,7 +105,7 @@ _Avoid_: JavaScript 沙箱、插件宿主、脚本执行器
 _Avoid_: Zotero Connector、完整 Zotero Translator、Zotero 插件
 
 **PDF 上传任务（PDF Upload Job）**:
-与剪藏 job 共享同一剪藏尝试、并绑定一个稳定附件标识的独立 job；同一尝试可以包含多个 PDF 上传任务。状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），各附件独立下载、回传、上传和重试，单个失败不阻塞其他附件。上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403 或传输层网络错误时转入 awaiting_bytes 等待扩展喂字节，HTTP 内容、类型、大小和 SSRF 拒绝仍直接失败。每个上传成功的 PDF 都以「@」引用插入本次剪藏文档；插入按附件分别幂等，失败只影响对应附件的警告。剪藏结果聚合展示全部附件状态，允许部分成功。
+与剪藏 job 共享同一剪藏尝试、并绑定一个稳定附件标识的独立 job；同一尝试可以包含多个 PDF 上传任务。状态机为最小集（queued / awaiting_bytes / running / succeeded / failed / cancelled / expired），各附件独立下载、回传、上传和重试，单个失败不阻塞其他附件。上传歧义按失败处理（飞书云盘同名复传合法并存，多传一份无害），不做 reconcile 或查重。字节来源在提交时声明：Bridge 按 URL 下载（url 型），或扩展带凭据抓取后分块喂入（bytes 型）；url 型撞 401/403、源站 WAF 验证响应或传输层网络错误时转入 awaiting_bytes 等待扩展喂字节。扩展遇到 WAF 验证响应时打开来源论文页的浏览器弹窗供用户完成验证，验证通过后自动重试并关闭弹窗；两遍回传都校验 `%PDF-` 文件头，禁止把挑战页或错误页 HTML 当成 PDF 上传。普通 HTTP、大小和 SSRF 拒绝仍直接失败。每个上传成功的 PDF 都以「@」引用插入本次剪藏文档；插入按附件分别幂等，失败只影响对应附件的警告。剪藏结果聚合展示全部附件状态，允许部分成功。
 _Avoid_: 附件同步、文献库条目
 
 **云盘目录（Drive Folder）**:
