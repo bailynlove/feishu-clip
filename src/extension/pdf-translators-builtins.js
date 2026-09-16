@@ -1,10 +1,10 @@
 // Built-in PDF Translator registry (#110). Each site rule is shipped as an ordinary Zotero-style
 // .js file and goes through the same parser as a community import.
 import { parsePdfTranslatorFile } from './pdf-translator.js';
+import { PAPER_SITES } from './paper-sites.js';
 
 export const BUILT_IN_PDF_TRANSLATORS = Object.freeze([
-  Object.freeze({ label: 'arXiv PDF', path: './pdf-translators/arxiv.js' }),
-  Object.freeze({ label: 'Hugging Face PDF', path: './pdf-translators/hugging-face.js' }),
+  ...PAPER_SITES.map(({ label, path }) => Object.freeze({ label, path })),
   Object.freeze({ label: 'citation_pdf_url', path: './pdf-translators/citation-pdf-url.js' }),
 ]);
 

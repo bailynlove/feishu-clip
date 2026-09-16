@@ -41,7 +41,9 @@ PDF Translator 是从论文页面识别 PDF Attachment Candidate 的可执行 Ja
 
 同一 `translatorID` 只选择一个有效版本。通过兼容检查的用户导入版本覆盖内置版本；用户停用覆盖版本时该 ID 不执行，移除用户版本后内置版本自然恢复。不兼容的用户文件仍显示在设置页，但不会静默禁用可用的内置版本。有效版本按 `priority` 从小到大执行。
 
-随扩展提供的默认规则也使用相同文件格式，位于 `src/extension/pdf-translators/`。设置页打开时加载这些文件，并默认启用。
+随扩展提供的默认规则也使用相同文件格式，位于 `src/extension/pdf-translators/`。设置页打开时加载这些文件，并默认启用。`src/extension/paper-sites.js` 是 paper trigger 与预置 Translator 的共享站点清单，新增或删除站点必须同时影响两处，避免规则漂移。
+
+预置规则参考 Zotero 官方 `zotero/translators` 仓库（核对基线 `c83003773b65359e41466e1d419b2d1df5512af7`）中对应站点 Translator，以及其 Embedded Metadata 对 `citation_pdf_url` 的处理。这里只保留 PDF 发现部分，并改写为本项目沙箱支持的接口；不携带 Zotero 的文献元数据导入逻辑。
 
 ## PDF 附件输出
 

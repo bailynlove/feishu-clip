@@ -9,15 +9,28 @@
   "lastUpdated": "2026-09-16 00:00:00"
 }
 
+function findPdf(document, url) {
+  var page = new URL(url);
+  var paper = page.pathname.match(/^\/papers\/([^/]+)/);
+  if (paper) return 'https://arxiv.org/pdf/' + paper[1];
+  if (/^\/(?:datasets\/)?[^/]+\/[^/]+\/blob\/[^/]+\/.+\.pdf$/i.test(page.pathname)) {
+    return page.origin + page.pathname.replace('/blob/', '/resolve/');
+  }
+  var meta = document.querySelector('meta[name="citation_pdf_url" i]');
+  if (meta && meta.getAttribute('content')) return new URL(meta.getAttribute('content'), url).href;
+  return null;
+}
+
 function detectWeb(document, url) {
-  return /^https?:\/\/huggingface\.co\/(?:datasets\/)?[^/]+\/[^/]+\/blob\/[^/]+\/.+\.pdf(?:$|[?#])/.test(url) ? 'journalArticle' : false;
+  return findPdf(document, url) ? 'journalArticle' : false;
 }
 
 function doWeb(document, url) {
-  var page = new URL(url);
+  var resolved = findPdf(document, url);
+  if (!resolved) return;
   var item = new Zotero.Item('journalArticle');
-  var resolved = page.origin + page.pathname.replace('/blob/', '/resolve/');
-  var name = page.pathname.split('/').pop();
+  var name = new URL(resolved).pathname.split('/').pop() || 'paper.pdf';
+  if (!/\.pdf$/i.test(name)) name += '.pdf';
   item.attachments = [{ url: resolved, title: name, mimeType: 'application/pdf', primary: true }];
   item.complete();
 }

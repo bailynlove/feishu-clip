@@ -3,6 +3,7 @@
 // 所有操作返回新 state；删除到最后一套等非法操作返回 null 表示拒绝。
 
 import { createDefaultPreset } from './presets.js';
+import { PAPER_TRIGGER_RULES } from './paper-sites.js';
 
 // 模板变量快捷插入（决议 #30 的 v1 变量集；#75 增加 digest——仅预设开了 AI 摘要开关时
 // 占位符才会被替换，否则按未知变量置空，插入按钮不做开关感知）
@@ -445,40 +446,7 @@ export function appendTriggerRule(text, rule) {
 // 常驻不可删：读取时经 mergeBuiltInTriggerPresets 缺失即补，UI 不给删除入口。
 // 规则语法与 triggers 校验一致（一行一条；/pattern/i 正则或 http(s) 前缀）——
 // 每行一个站点域名，([a-z0-9-]+\.)* 覆盖任意级子域名 ———
-const PAPER_TRIGGER_RULES = `/^https?:\\/\\/([a-z0-9-]+\\.)*arxiv\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*doi\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*semanticscholar\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*dblp\\.org\\//i
-/^https?:\\/\\/scholar\\.google\\.[a-z.]{2,}\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*nlm\\.nih\\.gov\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*ieee\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*acm\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*usenix\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*springer\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*nature\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*science\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*sciencedirect\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*wiley\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*tandfonline\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*jstor\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*oup\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*cambridge\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*rsc\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*aps\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*aip\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*iop\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*cell\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*plos\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*frontiersin\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*mdpi\\.com\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*biorxiv\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*medrxiv\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*openreview\\.net\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*aclanthology\\.org\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*neurips\\.cc\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*mlr\\.press\\//i
-/^https?:\\/\\/([a-z0-9-]+\\.)*thecvf\\.com\\//i
-/^https?:\\/\\/huggingface\\.co\\/papers\\//i`;
+
 
 export const BUILT_IN_TRIGGER_PRESETS = Object.freeze([
   { id: 'builtin-paper', name: 'paper', rule: PAPER_TRIGGER_RULES },
