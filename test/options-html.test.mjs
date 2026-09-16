@@ -78,8 +78,11 @@ test('preset editor has a PDF folder row and drive picker panel (#66)', () => {
 
 test('PDF Translator picker and loaded-file list live in the PDF save subsection', () => {
   const pdf = subSection('PDF 保存');
+  const body = pdf.match(/<div class="pc-sub-body hidden" id="f-pdf-drive-body">([\s\S]*)/);
+  assert.ok(body, 'PDF 保存小节应有随开关折叠的 body');
   for (const id of ['pdf-translator-files', 'pdf-translator-list']) {
     assert.ok(pdf.includes(`id="${id}"`), `PDF 保存小节应包含 #${id}`);
+    assert.ok(body[1].includes(`id="${id}"`), `#${id} 应位于 #f-pdf-drive-body 内并随开关折叠`);
     assert.equal(html.match(new RegExp(`id="${id}"`, 'g'))?.length, 1, `#${id} 只出现一次`);
   }
   const otherStart = html.indexOf('<h2>4. 其他设置</h2>');
