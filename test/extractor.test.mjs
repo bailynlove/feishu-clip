@@ -102,10 +102,8 @@ test('普通页面回归：body 内容足够时正常提取，不触发 frameset
   assert.ok(result.markdown.includes('足够长的正文内容'));
 });
 
-test('IEEE Xplore 论文页：移除控件区和重复摘要，标题只保留 citation title', async () => {
+test('IEEE Xplore 论文页：缺少 citation_title 时仍移除控件区和重复摘要', async () => {
   const paperTitle = 'Double DQN-GAMO: A Cyber Threat Detection Framework for Zero-Day Attacks';
-  const citationTitle = element('meta');
-  citationTitle.setAttribute('content', paperTitle);
   const emptyBold = element('b', [element('svg')]);
   const main = element('main', [
     element('p', [emptyBold]),
@@ -143,7 +141,7 @@ test('IEEE Xplore 论文页：移除控件区和重复摘要，标题只保留 c
     title: `${paperTitle} - IEEE Conference Publication - IEEE Xplore`,
     body: main,
     querySelector(selector) {
-      if (selector === 'meta[name="citation_title"]') return citationTitle;
+      if (selector === 'meta[name="citation_title"]') return null;
       if (selector === 'article, main, [role="main"]') return main;
       return null;
     },

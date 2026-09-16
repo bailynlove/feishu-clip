@@ -548,9 +548,14 @@
       } catch { return false; }
     }
 
-    function ieeeCitationTitle() {
+    function ieeePaperTitle() {
       if (!isIeeeDocumentPage(location.href)) return null;
-      return document.querySelector('meta[name="citation_title"]')?.getAttribute('content')?.trim() || null;
+      const citationTitle = document.querySelector('meta[name="citation_title"]')?.getAttribute('content')?.trim();
+      if (citationTitle) return citationTitle;
+      const pageTitle = document.title.trim();
+      const ieeeSuffix = /\s+(?:\||-|–|—|·)\s+IEEE(?:\s+(?:Conference|Journal)\s+Publication|\s+Xplore)\b/i;
+      const suffixAt = pageTitle.search(ieeeSuffix);
+      return (suffixAt >= 0 ? pageTitle.slice(0, suffixAt) : pageTitle).trim() || null;
     }
 
     // IEEE 的 main 同时包含论文和操作面板；响应式页面还会同时挂载折叠摘要与完整摘要。
@@ -597,7 +602,8 @@
     // （下载按钮/浏览上下文/引用服务等导航噪音），对齐 Obsidian web clipper 产出
     const arxivColumn = isArxivAbsPage(location.href) ? document.querySelector('#abs-outer .leftcolumn') : null;
     const primary = arxivColumn || document.querySelector('article, main, [role="main"]') || body;
-    const ieeeTitle = ieeeCitationTitle();
+    const ieeePage = isIeeeDocumentPage(location.href);
+    const ieeeTitle = ieeePaperTitle();
     let markdown = primary ? await extractFrom(primary) : '';
     if (markdown.length < 20) {
       const bodies = frameBodies();
@@ -608,7 +614,7 @@
         markdown = parts.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
       }
     }
-    if (ieeeTitle) markdown = cleanIeeeMarkdown(markdown, ieeeTitle);
+    if (ieeePage) markdown = cleanIeeeMarkdown(markdown, ieeeTitle);
     if (markdown.length < 20) throw new Error('未提取到足够的正文内容');
     const title = hfBlobTitle(location.href) || ieeeTitle || document.title.trim() || '网页剪藏';
     return { title, sourceUrl: location.href, capturedAt: new Date().toISOString(), markdown, images, iframes };
