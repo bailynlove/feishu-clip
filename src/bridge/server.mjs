@@ -430,7 +430,10 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
         const normalizedPdfSources = rawPdfSources.map((source) => ({ ...validatePdfSource(source), attachmentId: source.attachmentId ?? null }));
         const knownPdfBytes = normalizedPdfSources.reduce((sum, source) => sum + (source.sizeBytes || 0), 0);
         if (knownPdfBytes > 300 * 1024 * 1024) return send(response, 400, { ok: false, code: 'PDF_TOTAL_TOO_LARGE', message: 'PDF 总大小超过 300 MiB' }, origin);
-        const pdfSource = normalizedPdfSources.find((source, index) => rawPdfSources[index]?.primary === true) ?? normalizedPdfSources[0] ?? null;
+        const declaredNoPrimary = Object.hasOwn(body, 'primaryAttachmentId') && body.primaryAttachmentId === null;
+        const pdfSource = normalizedPdfSources.find((source, index) => rawPdfSources[index]?.primary === true)
+          ?? (declaredNoPrimary ? null : normalizedPdfSources[0] ?? null);
+        const primaryAttachmentId = declaredNoPrimary ? null : (body.primaryAttachmentId ?? pdfSource?.attachmentId ?? null);
         // pdf 目标目录（#66）：null = 云盘根目录；非空须是合法 token 形态
         const pdfFolderToken = body.pdfFolderToken === undefined || body.pdfFolderToken === null ? null : body.pdfFolderToken;
         if (pdfFolderToken !== null && (typeof pdfFolderToken !== 'string' || !WIKI_TOKEN.test(pdfFolderToken))) {
@@ -477,6 +480,7 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
           digest,
           // {{@file}} 附件（#79）：clip job 同携 pdfSource，digest 阶段检出占位符时据此下载
           pdfSource,
+          primaryAttachmentId,
         });
         // 双 job（#60/#65）：同一 attemptId 附带 pdf job，title 用渲染后的快照标题做云盘文件命名；
         // folderToken（#66）是 picker/弹窗选定的云盘目录，null 即根目录

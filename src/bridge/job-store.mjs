@@ -197,7 +197,7 @@ export class PersistentJobStore {
     this.#awaitingBytesTtlMs = awaitingBytesTtlMs;
   }
 
-  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, title = null, folderToken = null, digest = null, attachmentId = null }) {
+  async submit({ attemptId, sourceUrl, snapshot = null, destination = null, includeImages = true, imageMode, clientTiming = null, kind = JOB_KIND.CLIP, pdfSource = null, primaryAttachmentId = null, title = null, folderToken = null, digest = null, attachmentId = null }) {
     if (!attemptId || !sourceUrl) throw new TypeError('attemptId and sourceUrl are required');
     if (!JOB_KINDS.has(kind)) throw new TypeError(`Unknown job kind: ${kind}`);
     // pdf job（#65）：url 型 pdfSource 必填；title 是扩展侧标题模板渲染结果，用于云盘文件命名；
@@ -305,6 +305,7 @@ export class PersistentJobStore {
         digestDoc: null,
         // {{@file}} 附件（#79）：本次剪藏检出的 PDF，digest 阶段据此下载字节随摘要请求发出
         pdfSource: normalizedPdfSource ? structuredClone(normalizedPdfSource) : null,
+        primaryAttachmentId: typeof primaryAttachmentId === 'string' && primaryAttachmentId ? primaryAttachmentId : null,
         // PDF 云盘引用回填的幂等标记（#88）：pdf job 上传成功后把 PDF 插到本文档开头，
         // 置位后 pdf job 重试/重跑不再重复插入
         pdfRefInserted: false,
@@ -574,9 +575,9 @@ export class PersistentJobStore {
   // 排在队列里（提交序 clip 在前、executor 串行消费），等不到它自己撞凭据——由 clip 侧把
   // 排队中的 url 型 pdf job 直接转 awaiting_bytes（与 awaitBytes 同终态），弹窗轮询看到后喂字节。
   // 已 awaiting（含 bytes 型提交）幂等空转；其余状态拒绝，调用方按降级语义处理
-  async requestBytes(attemptId) {
+  async requestBytes(attemptId, attachmentId = null) {
     return this.#mutate(async (data) => {
-      const job = this.#findJob(data, attemptId, JOB_KIND.PDF);
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
       if (job.status === JOB_STATUS.AWAITING_BYTES) return { result: structuredClone(job), changed: false };
       if (job.status !== JOB_STATUS.QUEUED || job.pdfSource?.type !== 'url') {
         throw new Error(`Cannot request bytes for pdf job in ${job.status} state`);
@@ -729,6 +730,7 @@ export class PersistentJobStore {
           job.digest ??= null;
           job.digestText ??= null;
           job.pdfSource ??= null;
+          job.primaryAttachmentId ??= null;
           // 引用回填（#88）：存量 clip job 没有 pdfRefInserted，读取时补 false
           job.pdfRefInserted ??= false;
           // 摘要子文档（#98）：存量 clip job 没有 digestDoc，读取时补 null

@@ -861,12 +861,13 @@ test('recordDigest 缓存摘要结果：worker 守卫仿 recordDocument（但不
 
 // ——— clip job 携带 pdfSource（#79）：digest 阶段的 {{@file}} 附件用；重复提交幂等，存量补 null ———
 
-test('clip job 落库带 pdfSource：重复提交幂等保留首值，存量 job 读取补 null', async () => {
+test('clip job 落库带主 PDF source/attachmentId：重复提交幂等保留首值，存量 job 读取补 null', async () => {
   await withStore(async ({ store, filePath }) => {
     const pdfSource = { type: 'url', url: 'https://example.test/paper.pdf', name: 'paper.pdf' };
-    const submitted = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', pdfSource });
+    const submitted = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article', pdfSource, primaryAttachmentId: 'main-pdf' });
     assert.equal(submitted.created, true);
     assert.deepEqual(submitted.job.pdfSource, pdfSource, 'clip job 落库带 pdfSource');
+    assert.equal(submitted.job.primaryAttachmentId, 'main-pdf');
 
     // 重复提交幂等：同 (attemptId, clip) 键返回既有 job，不带 pdfSource 的重复提交不清空首值
     const again = await store.submit({ attemptId: 'attempt-1', sourceUrl: 'https://example.test/article' });
@@ -878,9 +879,10 @@ test('clip job 落库带 pdfSource：重复提交幂等保留首值，存量 job
 
     // 存量 job 文件没有 pdfSource 字段，读取侧补 null（与 digest/kind 迁移同一约定）
     const data = JSON.parse(await readFile(filePath, 'utf8'));
-    for (const job of data.jobs) delete job.pdfSource;
+    for (const job of data.jobs) { delete job.pdfSource; delete job.primaryAttachmentId; }
     await writeFile(filePath, JSON.stringify(data));
     assert.equal((await store.get('attempt-1', 'clip')).pdfSource, null);
+    assert.equal((await store.get('attempt-1', 'clip')).primaryAttachmentId, null);
   });
 });
 
@@ -923,5 +925,18 @@ test('同一剪藏尝试可拥有多个带稳定 attachmentId 的独立 PDF jobs
     assert.deepEqual(jobs.filter((job) => job.kind === 'pdf').map((job) => job.attachmentId), [null, 'pdf-2']);
     const second = await store.claim('attempt-1', 'worker-b', 'pdf', 'pdf-2');
     assert.equal(second.pdfSource.url, 'https://example.test/b.pdf');
+  });
+});
+
+test('PDF jobs 重试按稳定 attachmentId 绑定，不受候选顺序变化影响', async () => {
+  await withStore(async ({ store }) => {
+    const sources = [
+      ['supplement', 'https://example.test/supplement.pdf'],
+      ['main', 'https://example.test/main.pdf'],
+    ];
+    for (const [attachmentId, url] of sources) await store.submit({ attemptId: 'attempt-order', sourceUrl: 'https://example.test/article', kind: 'pdf', attachmentId, pdfSource: { type: 'url', url } });
+    for (const [attachmentId, url] of sources.toReversed()) await store.submit({ attemptId: 'attempt-order', sourceUrl: 'https://example.test/article', kind: 'pdf', attachmentId, pdfSource: { type: 'url', url } });
+    assert.equal((await store.get('attempt-order', 'pdf', 'main')).pdfSource.url, 'https://example.test/main.pdf');
+    assert.equal((await store.get('attempt-order', 'pdf', 'supplement')).pdfSource.url, 'https://example.test/supplement.pdf');
   });
 });

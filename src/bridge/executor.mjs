@@ -330,14 +330,19 @@ export class ClipExecutor {
   // 主机的暴露面。offer/reject 仅在 clip job 存在时调用（PDF 标签页直存云盘不产生共享）；
   // reject 也建条目——clip 可能尚未开始等，拒绝须留痕；promise 预挂 catch 防无人消费时
   // 变 unhandledRejection
-  #pdfShareEntry(attemptId) {
-    let entry = this.pdfShares.get(attemptId);
+  #pdfShareKey(attemptId, attachmentId) {
+    return JSON.stringify([attemptId, attachmentId ?? null]);
+  }
+
+  #pdfShareEntry(attemptId, attachmentId) {
+    const key = this.#pdfShareKey(attemptId, attachmentId);
+    let entry = this.pdfShares.get(key);
     if (!entry) {
       let settle;
       const promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
       promise.catch(() => {});
       entry = { promise, ...settle };
-      this.pdfShares.set(attemptId, entry);
+      this.pdfShares.set(key, entry);
     }
     return entry;
   }
@@ -352,12 +357,13 @@ export class ClipExecutor {
   // 无 pdf job、pdf 已终态且没留下字节、pdf 为 bytes 型（走 #80 staging）、等待超时、
   // pdf 下载失败——都回 null 由调用方自己下载（带 #92 重试）
   async #awaitSharedPdf(job) {
-    const existing = this.pdfShares.get(job.attemptId);
+    const attachmentId = job.primaryAttachmentId ?? null;
+    const existing = this.pdfShares.get(this.#pdfShareKey(job.attemptId, attachmentId));
     if (!existing) {
-      const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF).catch(() => null);
+      const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF, attachmentId).catch(() => null);
       if (!pdfJob || PDF_GIVE_UP_STATUSES.has(pdfJob.status) || pdfJob.pdfSource?.type !== 'url') return null;
     }
-    const entry = existing ?? this.#pdfShareEntry(job.attemptId);
+    const entry = existing ?? this.#pdfShareEntry(job.attemptId, attachmentId);
     const TIMEOUT = Symbol('pdf-share-timeout');
     // 超时用独立 unref 定时器而非注入 sleep：race 落败的 sleep 定时器会 ref 住进程（测试
     // 退出慢/挂起），且注入的脚本化 sleep 是按调用次数驱动状态机的，此处多消费一次会把
@@ -422,7 +428,7 @@ export class ClipExecutor {
         // 字节共享（#94）：同次 clip 的摘要阶段可能在等这份字节，下载成功即共享，
         // 免摘要第二次下载。仅当 clip job 存在且非终态时才建共享条目
         const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
-        if (!job.attachmentId && clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) this.#pdfShareEntry(job.attemptId).resolve({ buffer: fetched.buffer });
+        if ((job.attachmentId ?? null) === (clip?.primaryAttachmentId ?? null) && clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) this.#pdfShareEntry(job.attemptId, job.attachmentId).resolve({ buffer: fetched.buffer });
       }
       const uploadAt = Date.now();
       this.#assertLease(lease);
@@ -460,13 +466,13 @@ export class ClipExecutor {
             // 共享以凭据语义拒绝（#94）：摘要侧直接进 #80 staging 等待，不重复撞 401
             const clip = await this.store.get(job.attemptId, JOB_KIND.CLIP).catch(() => null);
             if (clip && !PDF_GIVE_UP_STATUSES.has(clip.status)) {
-              this.#pdfShareEntry(job.attemptId).reject(Object.assign(new Error('PDF 需登录凭据'), { code: PDF_SHARE_CREDENTIALS }));
+              if ((job.attachmentId ?? null) === (clip.primaryAttachmentId ?? null)) this.#pdfShareEntry(job.attemptId, job.attachmentId).reject(Object.assign(new Error('PDF 需登录凭据'), { code: PDF_SHARE_CREDENTIALS }));
             }
             this.logger.log?.('pdf download requires browser fallback, awaiting extension bytes', { attemptId: job.attemptId, failureType: error.failureType, statusCode: error.statusCode });
           } else {
             await this.store.fail(job.attemptId, workerId, { stage: FAILURE_STAGE.PDF, error: pdfErrorMessage(error), ...timing() }, JOB_KIND.PDF, job.attachmentId);
             // 共享拒绝（#94）：摘要侧收到后回退自己下载
-            this.pdfShares.get(job.attemptId)?.reject(error);
+            this.pdfShares.get(this.#pdfShareKey(job.attemptId, job.attachmentId))?.reject(error);
             this.logger.error('pdf job failed', { attemptId: job.attemptId, error });
           }
         } else {
@@ -532,7 +538,7 @@ export class ClipExecutor {
   // 跳过（#88 协议空隙成常态）；clip 建档完成后反向检查——pdf 已 succeeded 且未插过则补插。
   // 插入失败只记警告，job 不失败
   async #backfillPdfReference(job, document, warnings, timeline) {
-    const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF).catch(() => null);
+    const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF, job.primaryAttachmentId ?? null).catch(() => null);
     if (pdfJob?.status !== JOB_STATUS.SUCCEEDED || !pdfJob.document?.fileToken) return;
     if (job.pdfRefInserted) return;
     // 引用名与 pdf 侧同一命名规则，优先取 pdf job 的标题/来源（即实际上传名）
@@ -572,13 +578,13 @@ export class ClipExecutor {
       }
     };
     try {
-      await this.store.requestBytes(job.attemptId);
+      await this.store.requestBytes(job.attemptId, job.primaryAttachmentId ?? null);
     } catch {
       // 双通道并行（#91）后 pdf job 可能正在 running——它自身下载也会撞 401/403 并转
       // awaiting_bytes（#68），等它转入可喂字节状态即可，不立即降级；其余状态照旧放弃。
       // pdf 凭据回传快于 clip 建档时（#99 续）：摘要开始等字节前 pdf 已 succeeded，
       // staging 字节还在——先读再判放弃
-      const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF).catch(() => null);
+      const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF, job.primaryAttachmentId ?? null).catch(() => null);
       const staged = await readTerminalStaged(pdfJob);
       if (staged) return staged;
       if (pdfJob?.status === JOB_STATUS.SUCCEEDED) {
@@ -596,7 +602,7 @@ export class ClipExecutor {
       } catch {
         return { warning: '等待 PDF 字节期间任务租约异常，已按纯文本生成摘要' };
       }
-      const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF);
+      const pdfJob = await this.store.get(job.attemptId, JOB_KIND.PDF, job.primaryAttachmentId ?? null);
       if (!pdfJob || PDF_GIVE_UP_STATUSES.has(pdfJob.status)) {
         const staged = await readTerminalStaged(pdfJob);
         if (staged) return staged;
@@ -1429,7 +1435,7 @@ export class ClipExecutor {
     } finally {
       lease.stop();
       // 字节共享表收尾（#94）：clip 终态后条目不再有人消费，防泄漏
-      this.pdfShares.delete(job.attemptId);
+      this.pdfShares.delete(this.#pdfShareKey(job.attemptId, job.primaryAttachmentId ?? null));
       // 摘要进度表收尾（#86）：终态后视图不再带 digestProgress
       this.digestProgress.delete(job.attemptId);
       await rm(scratch, { recursive: true, force: true });

@@ -350,11 +350,11 @@ async function handle(message) {
         ? normalizePdfCandidates(snapshot.pdfAttachments ?? (detected ? [detected] : [])).attachments
         : [];
       const pdfSources = normalizedPdfs.map((item) => ({ type: 'url', url: item.url, name: item.name, sizeBytes: item.sizeBytes, attachmentId: item.id, primary: item.primary }));
-      const primarySource = pdfSources.find((item) => item.primary) ?? pdfSources[0] ?? null;
+      const primarySource = pdfSources.find((item) => item.primary) ?? null;
       const { primary: _primary, attachmentId: _attachmentId, ...pdfSource } = primarySource || {};
       // pdf 目标目录（#66）：弹窗 chip 选定的 folderToken（null = 云盘根目录），随 job 透传
       const pdfFolderToken = typeof message.pdfFolderToken === 'string' && message.pdfFolderToken ? message.pdfFolderToken : null;
-      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot: { ...snapshot, pdfAttachments: normalizedPdfs }, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource: primarySource ? pdfSource : null, pdfSources, pdfFolderToken, digest } });
+      const result = await bridge('/v1/jobs', { method: 'POST', body: { attemptId, snapshot: { ...snapshot, pdfAttachments: normalizedPdfs }, destination: message.destination, includeImages: message.includeImages, imageMode: message.imageMode, clientTiming: { extractMs }, pdfSource: primarySource ? pdfSource : null, primaryAttachmentId: primarySource?.attachmentId ?? null, pdfSources, pdfFolderToken, digest } });
       await chrome.storage.local.set({ activeAttempt: attemptId });
       return result;
     }

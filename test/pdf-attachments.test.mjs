@@ -30,3 +30,13 @@ test('AI receives only a usable primary PDF', () => {
   assert.equal(primaryPdfForAi(result).attachment, null);
   assert.match(primaryPdfForAi(result).warning, /超过/);
 });
+
+test('does not promote a supplement when the explicit primary is filtered out', () => {
+  const result = normalizePdfCandidates([
+    { id: 'supplement', url: 'https://example.test/supplement.pdf' },
+    { id: 'main', url: 'https://example.test/main.pdf', primary: true, sizeBytes: 101 * 1024 * 1024 },
+  ]);
+  assert.equal(result.attachments.length, 1);
+  assert.equal(result.attachments[0].primary, false);
+  assert.equal(result.primary, null);
+});

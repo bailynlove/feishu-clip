@@ -203,6 +203,8 @@ test('CLIP 的多个 PDF source 保留稳定 attachmentId 与主文件标记', a
       { attachmentId: 'supplement', primary: false },
       { attachmentId: 'main-paper', primary: true },
     ]);
+    assert.equal(lastJobsBody.primaryAttachmentId, 'main-paper');
+    assert.equal(lastJobsBody.pdfSource.url, 'https://example.test/main.pdf');
   } finally {
     stubSnapshotPdfAttachments = null;
   }

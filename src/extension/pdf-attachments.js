@@ -5,13 +5,15 @@ import { normalizePdfAttachments } from './pdf-translator.js';
 export const PDF_ATTACHMENT_LIMITS = Object.freeze({ maxCount: 10, maxEachBytes: 100 * 1024 * 1024, maxTotalBytes: 300 * 1024 * 1024 });
 
 export function normalizePdfCandidates(candidates, limits = PDF_ATTACHMENT_LIMITS) {
+  const source = Array.isArray(candidates) ? candidates : [];
+  const hadExplicitPrimary = source.some((candidate) => candidate?.primary === true);
   const normalized = normalizePdfAttachments(candidates);
   const warnings = normalized.diagnostics.map((entry) => (
     entry.code === 'DUPLICATE_ATTACHMENT' ? `已去重 PDF：${entry.url}` : entry.message
   ));
   const attachments = [];
   for (const candidate of normalized.candidates) {
-    const original = candidates[candidate.order] || {};
+    const original = source[candidate.order] || {};
     if (attachments.length >= limits.maxCount) { warnings.push(`超过 ${limits.maxCount} 个 PDF，后续附件已跳过`); continue; }
     const sizeBytes = Number.isInteger(original.sizeBytes) && original.sizeBytes > 0 ? original.sizeBytes : null;
     if (sizeBytes !== null && sizeBytes > limits.maxEachBytes) { warnings.push(`PDF 超过单文件 ${limits.maxEachBytes} 字节限制：${candidate.url}`); continue; }
@@ -27,7 +29,7 @@ export function normalizePdfCandidates(candidates, limits = PDF_ATTACHMENT_LIMIT
     });
   }
   let primaryIndex = attachments.findIndex((item) => item.primary);
-  if (primaryIndex < 0 && attachments.length) { attachments[0].primary = true; primaryIndex = 0; }
+  if (primaryIndex < 0 && attachments.length && !hadExplicitPrimary) { attachments[0].primary = true; primaryIndex = 0; }
   return { attachments: attachments.map((item, index) => ({ ...item, primary: index === primaryIndex })), primary: attachments[primaryIndex] || null, warnings };
 }
 

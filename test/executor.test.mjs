@@ -1804,10 +1804,11 @@ function shareSetup() {
     kind: 'clip', attemptId, imageMode: 'off',
     digest: { enabled: true, instruction: '结合附件总结 {{@file}}', mode: 'inline' },
     pdfSource: { type: 'url', url: 'https://arxiv.org/pdf/2608.26263', name: '2608.26263.pdf' },
+    primaryAttachmentId: 'main-pdf',
   };
   const pdfJob = {
     kind: 'pdf', attemptId, title: 'T', sourceUrl: clipJob.snapshot.sourceUrl,
-    status: 'queued', pdfSource: { ...clipJob.pdfSource }, document: null,
+    status: 'queued', attachmentId: 'main-pdf', pdfSource: { ...clipJob.pdfSource }, document: null,
   };
   const jobs = { clip: clipJob, pdf: pdfJob };
   const workers = {};
@@ -1827,11 +1828,14 @@ function shareSetup() {
     async beginCreate() {},
     async recordDocument() {},
     async recordDigest() {},
-    async get(_id, kind) {
-      if (kind === 'pdf') return { ...pdfJob, workerId: workers.pdf };
+    async get(_id, kind, attachmentId) {
+      if (kind === 'pdf') {
+        assert.equal(attachmentId, 'main-pdf', '摘要始终按 primaryAttachmentId 读取 PDF job');
+        return { ...pdfJob, workerId: workers.pdf };
+      }
       return { ...clipJob, status: queued.has('clip') ? 'running' : 'succeeded', document: queued.has('clip') ? null : { documentId: 'doc1', url: 'https://doc1' } };
     },
-    async requestBytes() { if (pdfJob.status !== 'awaiting_bytes') pdfJob.status = 'awaiting_bytes'; },
+    async requestBytes(_id, attachmentId) { assert.equal(attachmentId, 'main-pdf'); if (pdfJob.status !== 'awaiting_bytes') pdfJob.status = 'awaiting_bytes'; },
     async awaitBytes() { pdfJob.status = 'awaiting_bytes'; queued.delete('pdf'); },
     async markPdfRefInserted() { return { claimed: false }; },
     async complete(_id, _w, result, kind = 'clip') {
