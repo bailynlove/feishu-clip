@@ -2,6 +2,7 @@ import { DEFAULT_DIGEST_DOC_TITLE, ensurePresets, resolveDigestInstruction } fro
 import { buildContext, renderBody, renderTemplate, sanitizeClipTitle } from './templates.js';
 import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
+import { detectBuiltInPdf } from './pdf-translators-builtins.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 // 分块切块口径与 src/bridge/job-store.mjs 的 PDF_CHUNK_BYTES 保持一致（SW 与 bridge 分属
@@ -44,7 +45,12 @@ async function extractActiveTab() {
   const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['extractor.js'] });
   if (!execution?.result) throw new Error('未能读取当前页面');
   if (execution.result.error) throw new Error(execution.result.error);
-  return execution.result;
+  const result = execution.result;
+  // Built-in registry is authoritative for known paper URLs; retain the extractor's measured
+  // size when it already performed the lightweight HEAD probe.
+  const builtin = detectBuiltInPdf(result.sourceUrl, null);
+  if (builtin) result.pdf = { ...builtin, sizeBytes: result.pdf?.sizeBytes ?? null };
+  return result;
 }
 
 // ——— PDF 标签页识别（#67，调研结论见 #58/research/pdf-tab-detection）———
