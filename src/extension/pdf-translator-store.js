@@ -11,6 +11,7 @@ export function normalizePdfTranslatorEntries(raw) {
     .map((entry) => ({
       ...entry,
       source: 'imported',
+      filePath: typeof entry.filePath === 'string' ? entry.filePath : '',
       enabled: entry.enabled !== false,
       confirmed: entry.confirmed === true,
       translator: entry.translator && {
@@ -50,6 +51,7 @@ export function pdfTranslatorView(entry) {
     version: metadata.version || metadata.lastUpdated || '未知版本', translatorID: metadata.translatorID || '',
     target: metadata.target || '', priority: metadata.priority ?? '—', enabled: entry?.enabled !== false,
     compatibility: entry?.compatibility || 'incompatible', requestOrigins: metadata.requestOrigins || [], source: entry?.source || 'imported',
+    filePath: entry?.filePath || `本机文件/${metadata.label || '未命名 Translator'}.js`,
     diagnostics: entry?.diagnostics || [],
   };
 }

@@ -127,7 +127,9 @@
 .options .pdf-translator-list:empty{display:none}
 .options .pdf-translator-row{display:flex;align-items:center;gap:10px;padding:8px 11px}
 .options .pdf-translator-row+.pdf-translator-row{border-top:1px solid #eef1f6}
-.options .pdf-translator-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600;color:#1a2233}
+.options .pdf-translator-identity{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px}
+.options .pdf-translator-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600;color:#1a2233}
+.options .pdf-translator-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;font-weight:400;color:#9aa3b2}
 .options .pdf-translator-toggle{border:1px solid #dfe4ec;background:#f7f9fc;color:#7b8494;border-radius:999px;padding:4px 9px;font:600 11px/1.2 inherit;cursor:pointer}
 .options .pdf-translator-toggle.on{border-color:var(--brand-line);background:var(--brand-soft);color:var(--brand-deep)}
 .options .pdf-translator-toggle:disabled{cursor:default;opacity:.65}

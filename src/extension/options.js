@@ -892,9 +892,16 @@ async function renderPdfTranslators() {
     const view = pdfTranslatorView(entry);
     const row = document.createElement('div');
     row.className = 'pdf-translator-row';
+    const identity = document.createElement('span');
+    identity.className = 'pdf-translator-identity';
     const title = document.createElement('span');
     title.className = 'pdf-translator-name';
     title.textContent = displayNames[index];
+    const path = document.createElement('span');
+    path.className = 'pdf-translator-path';
+    path.textContent = view.filePath;
+    path.title = view.filePath;
+    identity.append(title, path);
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = `pdf-translator-toggle${view.enabled ? ' on' : ''}`;
@@ -913,7 +920,7 @@ async function renderPdfTranslators() {
       }
       await renderPdfTranslators();
     });
-    row.append(title, toggle);
+    row.append(identity, toggle);
     list.append(row);
   });
 }
@@ -922,7 +929,8 @@ $('#pdf-translator-files').addEventListener('change', async (event) => {
     try {
       const parsed = parsePdfTranslatorFile(await file.text());
       const candidate = parsed.translator || { metadata: { translatorID: `invalid-${crypto.randomUUID()}`, label: file.name, creator: '未知', target: '', priority: Number.MAX_SAFE_INTEGER, requestOrigins: [] }, code: '', source: await file.text() };
-      const safeParsed = { ...parsed, translator: candidate };
+      const filePath = file.path || file.webkitRelativePath || file.name;
+      const safeParsed = { ...parsed, filePath, translator: candidate };
       const view = pdfTranslatorView({ ...safeParsed, confirmed: true, enabled: parsed.ok });
       const previous = pdfTranslators.find((item) => item.translator?.metadata?.translatorID === view.translatorID);
       const replacement = previous ? '\n\n将替换当前已加载的同一 Translator 文件。' : '';

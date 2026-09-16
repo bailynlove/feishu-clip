@@ -16,6 +16,7 @@ export async function createBuiltInPdfTranslatorEntries({ readText } = {}) {
   });
   return Promise.all(BUILT_IN_PDF_TRANSLATORS.map(async ({ path }) => ({
     ...parsePdfTranslatorFile(await load(path)),
+    filePath: `扩展目录/${path.replace(/^\.\//, '')}`,
     enabled: true,
     confirmed: true,
     source: 'builtin',

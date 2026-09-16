@@ -18,8 +18,11 @@ test('normalizes and upserts multiple imported translator files by stable ID', (
 
 test('toggle, remove, and display preserve current file state', () => {
   const entries = [entry(), entry('two')];
+  entries[0].filePath = '/Users/example/Paper.js';
   const disabled = setPdfTranslatorEnabled(entries, 'two', false);
   assert.equal(pdfTranslatorView(disabled[1]).enabled, false);
+  assert.equal(pdfTranslatorView(disabled[0]).filePath, '/Users/example/Paper.js');
+  assert.equal(pdfTranslatorView(disabled[1]).filePath, '本机文件/two.js');
   assert.equal(removePdfTranslator(disabled, 'one').length, 1);
   assert.equal(normalizePdfTranslatorEntries(null).length, 0);
 });
