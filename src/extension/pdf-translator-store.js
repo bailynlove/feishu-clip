@@ -1,6 +1,10 @@
 // Persistent user Translator files (#109). The options page stores validated source snapshots so
 // changing or deleting the original local file never changes the active extension copy.
+import { resolvePdfTranslatorVersions } from './pdf-translator.js';
+import { createBuiltInPdfTranslatorEntries } from './pdf-translators-builtins.js';
+
 export const PDF_TRANSLATORS_STORAGE_KEY = 'pdfTranslators';
+export const PDF_TRANSLATOR_DISABLED_BUILTINS_KEY = 'pdfTranslatorDisabledBuiltins';
 
 export function normalizePdfTranslatorEntries(raw) {
   return (Array.isArray(raw) ? raw : []).filter((entry) => entry && typeof entry === 'object')
@@ -45,7 +49,16 @@ export function pdfTranslatorView(entry) {
     label: metadata.label || '未命名 Translator', creator: metadata.creator || '未知作者',
     version: metadata.version || metadata.lastUpdated || '未知版本', translatorID: metadata.translatorID || '',
     target: metadata.target || '', priority: metadata.priority ?? '—', enabled: entry?.enabled !== false,
-    compatibility: entry?.compatibility || 'incompatible', requestOrigins: metadata.requestOrigins || [],
+    compatibility: entry?.compatibility || 'incompatible', requestOrigins: metadata.requestOrigins || [], source: entry?.source || 'imported',
     diagnostics: entry?.diagnostics || [],
   };
+}
+
+export function effectivePdfTranslatorRegistry(imported, disabledBuiltIns = []) {
+  const disabled = new Set(Array.isArray(disabledBuiltIns) ? disabledBuiltIns : []);
+  const builtIn = createBuiltInPdfTranslatorEntries().map((entry) => ({
+    ...entry,
+    enabled: !disabled.has(entry.translator.metadata.translatorID),
+  }));
+  return resolvePdfTranslatorVersions({ builtIn, imported: normalizePdfTranslatorEntries(imported) });
 }

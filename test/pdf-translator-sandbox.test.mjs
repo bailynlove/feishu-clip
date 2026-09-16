@@ -11,6 +11,9 @@ test('manifest exposes a scripts-only translator sandbox', () => {
   const html = fs.readFileSync(path.join(root, 'src/extension/translator-sandbox.html'), 'utf8');
   assert.match(html, /script-src 'self' 'unsafe-eval'/);
   assert.match(html, /translator-sandbox\.js/);
+  assert.ok(manifest.permissions.includes('offscreen'));
+  const host = fs.readFileSync(path.join(root, 'src/extension/translator-host.html'), 'utf8');
+  assert.match(host, /translator-host\.js/);
 });
 
 test('sandbox runtime has no direct network or extension API access', () => {

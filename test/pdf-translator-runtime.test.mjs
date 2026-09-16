@@ -153,3 +153,22 @@ test('runner stops on the first translator that returns PDF attachments', async 
   assert.equal(result.translator.translator.metadata.label, 'Winner');
   assert.deepEqual(calls, ['Loser', 'Winner']);
 });
+
+test('runner executes doWeb after detectWeb matches and returns extracted attachments', async () => {
+  const phases = [];
+  const entry = translator('Paper', '^https://example\\.test/', 1);
+  const runner = createPdfTranslatorRunner({
+    sandboxFactory: {
+      async run({ phase }) {
+        phases.push(phase);
+        return phase === 'detectWeb'
+          ? { detected: true, detection: 'journalArticle', attachments: [] }
+          : { attachments: [{ url: 'https://example.test/main.pdf', mimeType: 'application/pdf' }] };
+      },
+    },
+  });
+  const result = await runner.runDetectionChain({ translators: [entry], page: { url: 'https://example.test/paper' } });
+  assert.deepEqual(phases, ['detectWeb', 'doWeb']);
+  assert.equal(result.translator, entry);
+  assert.equal(result.attachments[0].url, 'https://example.test/main.pdf');
+});

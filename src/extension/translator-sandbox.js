@@ -27,13 +27,15 @@
 
   function responseLike(result) {
     const bytes = Uint8Array.from(atob(result.bodyBase64 || ''), (character) => character.charCodeAt(0));
+    const bodyText = result.bodyText ?? new TextDecoder().decode(bytes);
     return {
       status: result.status,
       ok: result.ok,
       url: result.url,
+      responseText: bodyText,
       headers: { get(name) { return result.headers?.[String(name).toLowerCase()] ?? null; } },
-      text: async () => result.bodyText ?? new TextDecoder().decode(bytes),
-      json: async () => JSON.parse(result.bodyText ?? new TextDecoder().decode(bytes)),
+      text: async () => bodyText,
+      json: async () => JSON.parse(bodyText),
       arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     };
   }
@@ -58,7 +60,7 @@
     return result.singleNodeValue;
   }
 
-  function buildApis(target, runId, pageUrl, items) {
+  function buildApis(target, runId, pageUrl, items, lifecycle) {
     class Item {
       constructor(type = 'journalArticle') {
         this.itemType = type;
@@ -79,6 +81,9 @@
     const Zotero = {
       Item,
       HTTP: { request },
+      debug: () => {},
+      wait: () => { lifecycle.waiting = true; },
+      done: () => lifecycle.resolveDone(),
       Utilities: {
         trimInternal: (value) => String(value ?? '').replace(/\s+/g, ' ').trim(),
         cleanAuthor: (firstName, lastName, creatorType = 'author') => ({ firstName, lastName, creatorType }),
@@ -87,8 +92,8 @@
       },
     };
     const ZU = {
-      doGet: (url, processor, options) => request('GET', url, options).then((result) => processor(result)),
-      doPost: (url, body, processor, options = {}) => request('POST', url, { ...options, body }).then((result) => processor(result)),
+      doGet: (url, processor, options) => request('GET', url, options).then((result) => processor(result.responseText, result)),
+      doPost: (url, body, processor, options = {}) => request('POST', url, { ...options, body }).then((result) => processor(result.responseText, result)),
       processDocuments: async (urls, processor, done) => {
         for (const url of Array.isArray(urls) ? urls : [urls]) {
           const result = await request('GET', url);
@@ -108,12 +113,24 @@
       strToISO: Zotero.Utilities.strToISO,
       capitalizeTitle: Zotero.Utilities.capitalizeTitle,
     };
+    Object.assign(Zotero.Utilities, {
+      doGet: ZU.doGet,
+      doPost: ZU.doPost,
+      processDocuments: ZU.processDocuments,
+      xpath: ZU.xpath,
+      xpathText: ZU.xpathText,
+      attr: ZU.attr,
+      text: ZU.text,
+    });
     return { Zotero, ZU };
   }
 
   async function execute(event, payload) {
     const items = [];
-    const { Zotero, ZU } = buildApis(event.source, payload.runId, payload.page?.url || location.href, items);
+    let resolveDone;
+    const done = new Promise((resolve) => { resolveDone = resolve; });
+    const lifecycle = { waiting: false, resolveDone };
+    const { Zotero, ZU } = buildApis(event.source, payload.runId, payload.page?.url || location.href, items, lifecycle);
     const page = parsePage(payload.page?.html);
     const locationObject = new URL(payload.page?.url || location.href);
     const exports = new Function('document', 'location', 'Zotero', 'ZU',
@@ -124,6 +141,7 @@
     }
     if (!exports.doWeb) throw new Error('Translator 缺少 doWeb');
     await exports.doWeb(page, locationObject.href);
+    if (lifecycle.waiting) await done;
     const attachments = items.flatMap((item) => item.attachments || []).filter((attachment) => attachment?.url);
     return { detected: true, attachments };
   }

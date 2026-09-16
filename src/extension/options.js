@@ -15,7 +15,7 @@ import {
 import { createDriveFolder, DEFAULT_DIGEST_DOC_TITLE, DEFAULT_DIGEST_INSTRUCTION, readDigestConfig, readPdfDriveConfig, resolveImageMode, resolvePdfDrive } from './presets.js';
 import { createProxySettingsController } from './options-proxy.js';
 import { parsePdfTranslatorFile } from './pdf-translator.js';
-import { PDF_TRANSLATORS_STORAGE_KEY, normalizePdfTranslatorEntries, pdfTranslatorView, removePdfTranslator, setPdfTranslatorEnabled, upsertPdfTranslator } from './pdf-translator-store.js';
+import { effectivePdfTranslatorRegistry, PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY, normalizePdfTranslatorEntries, pdfTranslatorView, removePdfTranslator, setPdfTranslatorEnabled, upsertPdfTranslator } from './pdf-translator-store.js';
 
 const $ = (selector) => document.querySelector(selector);
 $('#extension-id').textContent = chrome.runtime.id;
@@ -880,23 +880,41 @@ const proxySettings = createProxySettingsController({ input: $('#proxy-port'), r
 $('#proxy-save').addEventListener('click', () => proxySettings.save());
 
 let pdfTranslators = [];
+let disabledBuiltInTranslators = [];
 function renderPdfTranslators() {
   const list = $('#pdf-translator-list');
   list.replaceChildren();
-  if (!pdfTranslators.length) { list.textContent = '当前没有导入文件。'; return; }
-  for (const entry of pdfTranslators) {
+  const registry = effectivePdfTranslatorRegistry(pdfTranslators, disabledBuiltInTranslators);
+  const entries = [...registry.selected, ...registry.shadowed, ...registry.rejected];
+  if (!entries.length) { list.textContent = '当前没有可用文件。'; return; }
+  for (const entry of entries) {
     const view = pdfTranslatorView(entry);
     const row = document.createElement('div');
     row.className = 'ps-note';
     const title = document.createElement('strong');
-    title.textContent = `${view.label} · ${view.version}`;
+    const current = registry.active.includes(entry);
+    const shadowed = registry.shadowed.includes(entry);
+    title.textContent = `${view.label} · ${view.version} · ${view.source === 'builtin' ? '内置' : '已导入'}${current ? ' · 当前使用' : shadowed ? ' · 已被覆盖' : ''}`;
     const detail = document.createElement('div');
     detail.textContent = `${view.creator} · priority ${view.priority} · ${view.compatibility} · ${view.enabled ? '启用' : '停用'}${view.requestOrigins.length ? ` · 跨域：${view.requestOrigins.join(', ')}` : ''}`;
     const toggle = document.createElement('button');
     toggle.type = 'button'; toggle.className = 'link'; toggle.textContent = view.enabled ? '停用' : '启用';
-    toggle.addEventListener('click', async () => { pdfTranslators = setPdfTranslatorEnabled(pdfTranslators, view.translatorID, !view.enabled); await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators }); renderPdfTranslators(); });
+    toggle.classList.toggle('hidden', shadowed);
+    toggle.addEventListener('click', async () => {
+      if (view.source === 'builtin') {
+        disabledBuiltInTranslators = view.enabled
+          ? [...new Set([...disabledBuiltInTranslators, view.translatorID])]
+          : disabledBuiltInTranslators.filter((id) => id !== view.translatorID);
+        await chrome.storage.local.set({ [PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]: disabledBuiltInTranslators });
+      } else {
+        pdfTranslators = setPdfTranslatorEnabled(pdfTranslators, view.translatorID, !view.enabled);
+        await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators });
+      }
+      renderPdfTranslators();
+    });
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'link'; remove.textContent = '移除';
+    remove.classList.toggle('hidden', view.source === 'builtin');
     remove.addEventListener('click', async () => { if (!window.confirm(`移除 Translator「${view.label}」？`)) return; pdfTranslators = removePdfTranslator(pdfTranslators, view.translatorID); await chrome.storage.local.set({ [PDF_TRANSLATORS_STORAGE_KEY]: pdfTranslators }); renderPdfTranslators(); });
     const source = document.createElement('button');
     source.type = 'button'; source.className = 'link'; source.textContent = '查看/复制源代码';
@@ -905,7 +923,10 @@ function renderPdfTranslators() {
       try { await navigator.clipboard.writeText(code); toast('源代码已复制', 'success'); }
       catch { window.prompt('复制源代码', code); }
     });
-    row.append(title, detail, toggle, document.createTextNode(' '), source, document.createTextNode(' '), remove);
+    row.append(title, detail);
+    if (!shadowed) row.append(toggle, document.createTextNode(' '));
+    row.append(source);
+    if (view.source !== 'builtin') row.append(document.createTextNode(' '), remove);
     list.append(row);
   }
 }
@@ -1045,7 +1066,9 @@ async function init() {
   initAiSection(settings.aiDigestInstruction);
   initCollapsibleSections(settings.optionsUiCollapsed);
   await proxySettings.load();
-  pdfTranslators = normalizePdfTranslatorEntries((await chrome.storage.local.get(PDF_TRANSLATORS_STORAGE_KEY))[PDF_TRANSLATORS_STORAGE_KEY]);
+  const translatorSettings = await chrome.storage.local.get([PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
+  pdfTranslators = normalizePdfTranslatorEntries(translatorSettings[PDF_TRANSLATORS_STORAGE_KEY]);
+  disabledBuiltInTranslators = Array.isArray(translatorSettings[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]) ? translatorSettings[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY] : [];
   renderPdfTranslators();
   // 触发规则预设气泡（#101）：直读 chrome.storage.local；内置 paper 常驻不可删（#95），缺失即补
   triggerPresets = mergeBuiltInTriggerPresets((await chrome.storage.local.get(TRIGGER_PRESETS_KEY))[TRIGGER_PRESETS_KEY]);

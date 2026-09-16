@@ -3,7 +3,7 @@
   "name": "先存飞书",
   "version": "0.1.2",
   "description": "先进团队，先存飞书——一键将当前网页剪藏为飞书知识库文档",
-  "permissions": ["activeTab", "scripting", "storage", "downloads"],
+  "permissions": ["activeTab", "scripting", "storage", "downloads", "offscreen"],
   "host_permissions": ["http://127.0.0.1:38479/*", "http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "sandbox": { "pages": ["translator-sandbox.html"] },

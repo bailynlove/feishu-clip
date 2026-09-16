@@ -4,6 +4,7 @@ import { isJobForPage } from './popup-state.js';
 import { createIncrementalSha256 } from './sha256.js';
 import { detectBuiltInPdf } from './pdf-translators-builtins.js';
 import { normalizePdfCandidates } from './pdf-attachments.js';
+import { effectivePdfTranslatorRegistry, PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY } from './pdf-translator-store.js';
 
 const BRIDGE = 'http://127.0.0.1:38479';
 // 分块切块口径与 src/bridge/job-store.mjs 的 PDF_CHUNK_BYTES 保持一致（SW 与 bridge 分属
@@ -47,11 +48,51 @@ async function extractActiveTab() {
   if (!execution?.result) throw new Error('未能读取当前页面');
   if (execution.result.error) throw new Error(execution.result.error);
   const result = execution.result;
-  // Built-in registry is authoritative for known paper URLs; retain the extractor's measured
-  // size when it already performed the lightweight HEAD probe.
-  const builtin = detectBuiltInPdf(result.sourceUrl, null);
-  if (builtin) result.pdf = { ...builtin, sizeBytes: result.pdf?.sizeBytes ?? null };
+  if (supportsPdfTranslatorHost()) {
+    const translated = await runPdfTranslators(tab).catch(() => null);
+    if (translated?.attachments?.length) {
+      result.pdfAttachments = translated.attachments;
+      result.pdf = translated.attachments.find((item) => item.primary) ?? translated.attachments[0];
+      result.pdfTranslatorDiagnostics = translated.diagnostics;
+    }
+  } else {
+    // Test/legacy browser fallback while offscreen documents are unavailable.
+    const builtin = detectBuiltInPdf(result.sourceUrl, null);
+    if (builtin) result.pdf = { ...builtin, sizeBytes: result.pdf?.sizeBytes ?? null };
+  }
   return result;
+}
+
+function supportsPdfTranslatorHost() {
+  return Boolean(chrome.offscreen?.createDocument && chrome.runtime?.sendMessage && chrome.runtime?.getURL);
+}
+
+function pageSnapshot() {
+  const html = document.documentElement?.outerHTML || '';
+  return { url: location.href, html: html.length > 5 * 1024 * 1024 ? html.slice(0, 5 * 1024 * 1024) : html };
+}
+
+let translatorHostCreating = null;
+async function ensurePdfTranslatorHost() {
+  if (await chrome.offscreen.hasDocument?.()) return;
+  translatorHostCreating ??= chrome.offscreen.createDocument({
+    url: 'translator-host.html',
+    reasons: ['DOM_SCRAPING'],
+    justification: 'Run user-installed PDF translators inside a scripts-only sandbox iframe',
+  }).finally(() => { translatorHostCreating = null; });
+  await translatorHostCreating;
+}
+
+async function runPdfTranslators(tab) {
+  const stored = await localGet([PDF_TRANSLATORS_STORAGE_KEY, PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
+  const registry = effectivePdfTranslatorRegistry(stored[PDF_TRANSLATORS_STORAGE_KEY], stored[PDF_TRANSLATOR_DISABLED_BUILTINS_KEY]);
+  if (!registry.active.length) return { attachments: [], diagnostics: [] };
+  const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageSnapshot });
+  if (!execution?.result) return { attachments: [], diagnostics: [] };
+  await ensurePdfTranslatorHost();
+  const response = await chrome.runtime.sendMessage({ target: 'pdf-translator-host', type: 'RUN_PDF_TRANSLATORS', translators: registry.active, page: execution.result });
+  if (!response?.ok) throw Object.assign(new Error(response?.error?.message || 'PDF Translator 执行失败'), response?.error);
+  return response.result;
 }
 
 // ——— PDF 标签页识别（#67，调研结论见 #58/research/pdf-tab-detection）———
@@ -344,6 +385,11 @@ async function handle(message) {
       try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab?.id || !/^https?:/.test(tab.url || '')) return { pdf: null };
+        if (supportsPdfTranslatorHost()) {
+          const translated = await runPdfTranslators(tab);
+          const normalized = normalizePdfCandidates(translated.attachments);
+          return { pdf: normalized.primary, pdfAttachments: normalized.attachments, diagnostics: [...translated.diagnostics, ...normalized.warnings] };
+        }
         const [execution] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['pdf-detect.js'] });
         return execution?.result ?? { pdf: null };
       } catch {
@@ -374,6 +420,7 @@ async function handle(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.target === 'pdf-translator-host') return false;
   handle(message).then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: { code: error.code || 'ERROR', message: error.message } }));
   return true;
 });

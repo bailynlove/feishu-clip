@@ -191,7 +191,10 @@ export function createPdfTranslatorRunner({
       try {
         const result = await execute(entry, { page, phase: 'detectWeb' });
         if (result?.detected === false || !result?.detected) continue;
-        const attachments = Array.isArray(result.attachments) ? result.attachments : [];
+        const detectedAttachments = Array.isArray(result.attachments) ? result.attachments : [];
+        if (detectedAttachments.length > 0) return { translator: entry, attachments: detectedAttachments, diagnostics };
+        const extracted = await execute(entry, { page, phase: 'doWeb' });
+        const attachments = Array.isArray(extracted?.attachments) ? extracted.attachments : [];
         if (attachments.length > 0) return { translator: entry, attachments, diagnostics };
       } catch (error) {
         diagnostics.push({ level: 'warning', code: error.code || 'TRANSLATOR_FAILED', message: error.message, translatorID: entry.translator.metadata.translatorID });
