@@ -9,6 +9,7 @@ const BRIDGE = 'http://127.0.0.1:38479';
 // 分块切块口径与 src/bridge/job-store.mjs 的 PDF_CHUNK_BYTES 保持一致（SW 与 bridge 分属
 // 两个运行时，无法共享模块，修改须两边同步）
 const PDF_CHUNK_BYTES = 4 * 1024 * 1024;
+const PDF_RESPONSE_CACHE = 'feishu-clip-pdf-v1';
 
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 
@@ -160,7 +161,7 @@ function toBase64(bytes) {
   return btoa(binary);
 }
 
-async function openPdfStream(pdfUrl) {
+async function openPdfResponse(pdfUrl) {
   let response;
   try {
     response = await fetch(pdfUrl, { credentials: 'include' });
@@ -180,12 +181,15 @@ async function openPdfStream(pdfUrl) {
   if (response.status !== 200 || !response.body) {
     throw Object.assign(new Error(`源站返回 HTTP ${response.status}，无法读取 PDF`), { code: 'PDF_SOURCE_FETCH_FAILED' });
   }
-  return { reader: response.body.getReader(), contentType: response.headers?.get?.('content-type') || '' };
+  return response;
 }
 
-// 流式过一遍源站：累计大小 + 增量 SHA-256；onChunk 用于第二遍的切块回调
-async function readPdfPass(pdfUrl, onChunk = null) {
-  const { reader, contentType } = await openPdfStream(pdfUrl);
+// 流式读取一份已经固定的响应：累计大小 + 增量 SHA-256；onChunk 用于切块回调。
+// 动态生成的 PDF（IEEE stampPDF 等）每次请求可能字节不同，因此声明和上传不能各抓一次源站。
+async function readPdfResponse(response, onChunk = null) {
+  if (!response?.body) throw Object.assign(new Error('PDF 缓存不可用'), { code: 'PDF_SOURCE_FETCH_FAILED' });
+  const reader = response.body.getReader();
+  const contentType = response.headers?.get?.('content-type') || '';
   if (/^text\/html\b/i.test(contentType)) {
     await reader.cancel().catch(() => {});
     throw Object.assign(new Error('源站返回的内容不是 PDF'), { code: 'PDF_SOURCE_TYPE' });
@@ -294,14 +298,41 @@ async function waitForPdfVerification(job, pdfUrl) {
   }
 }
 
-async function readPdfPassWithVerification(job, pdfUrl, onChunk = null) {
+async function fetchPdfResponseWithVerification(job, pdfUrl) {
   try {
-    return await readPdfPass(pdfUrl, onChunk);
+    return await openPdfResponse(pdfUrl);
   } catch (error) {
     if (error?.code !== 'PDF_SOURCE_VERIFICATION_REQUIRED') throw error;
     await waitForPdfVerification(job, pdfUrl);
-    return readPdfPass(pdfUrl, onChunk);
+    return openPdfResponse(pdfUrl);
   }
+}
+
+function pdfResponseCacheKey(attemptId, attachmentId) {
+  return `${BRIDGE}/__pdf-cache__/${encodeURIComponent(attemptId)}/${encodeURIComponent(attachmentId ?? 'primary')}`;
+}
+
+async function openPdfCache() {
+  if (!globalThis.caches?.open) {
+    throw Object.assign(new Error('浏览器 PDF 缓存不可用'), { code: 'PDF_CACHE_UNAVAILABLE' });
+  }
+  return caches.open(PDF_RESPONSE_CACHE);
+}
+
+async function ensureCachedPdf(job, pdfUrl, cacheKey) {
+  const cache = await openPdfCache();
+  if (await cache.match(cacheKey)) return cache;
+  const response = await fetchPdfResponseWithVerification(job, pdfUrl);
+  const contentType = response.headers?.get?.('content-type') || '';
+  // 只保留读取所需的响应信息，规避源站 Vary:* 等禁止 Cache.put 的头。
+  await cache.put(cacheKey, new Response(response.body, { status: 200, headers: { 'content-type': contentType } }));
+  return cache;
+}
+
+async function readCachedPdf(cache, cacheKey, onChunk = null) {
+  const response = await cache.match(cacheKey);
+  if (!response) throw Object.assign(new Error('PDF 缓存已失效，请重试'), { code: 'PDF_CACHE_MISS' });
+  return readPdfResponse(response, onChunk);
 }
 
 async function feedPdfBytes({ attemptId, attachmentId = null, pdfUrl, name = null }) {
@@ -319,10 +350,17 @@ async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
   const { jobs } = await bridge(`/v1/jobs/${attemptId}`);
   const job = (jobs ?? []).find((candidate) => candidate.kind === 'pdf' && (candidate.attachmentId ?? null) === attachmentId);
   if (!job || job.status !== 'awaiting_bytes') return { fed: false, status: job?.status ?? 'missing' };
+  const chunkPath = `/v1/jobs/${attemptId}/pdf-chunks${attachmentId == null ? '' : `?attachmentId=${encodeURIComponent(attachmentId)}`}`;
+  const initialChunks = await bridge(chunkPath);
+  const received = new Set(initialChunks.bitmap ?? []);
+  const cacheKey = pdfResponseCacheKey(attemptId, attachmentId);
+  const cache = await ensureCachedPdf(job, pdfUrl, cacheKey);
+  const measured = await readCachedPdf(cache, cacheKey).catch(async (error) => {
+    await cache.delete(cacheKey);
+    throw error;
+  });
   let declared = job.pdfSource?.type === 'bytes' ? job.pdfSource : null;
   if (!declared) {
-    // 第一遍流式读：只算 SHA-256 与总大小（bytes 声明必须先于分块，#61）
-    const measured = await readPdfPassWithVerification(job, pdfUrl);
     if (measured.sizeBytes < 1) throw Object.assign(new Error('源站返回空内容'), { code: 'PDF_SOURCE_FETCH_FAILED' });
     declared = {
       type: 'bytes',
@@ -338,11 +376,22 @@ async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
         ? { attemptId, pdfSource: declared }
         : { attemptId, pdfSources: [{ ...declared, attachmentId }] },
     });
+  } else if (declared.sizeBytes !== measured.sizeBytes || declared.sha256 !== measured.sha256) {
+    if (received.size) {
+      await cache.delete(cacheKey);
+      throw Object.assign(new Error('PDF 内容已变化且已有分块，请重新发起保存'), { code: 'PDF_SOURCE_CHANGED' });
+    }
+    declared = {
+      ...declared,
+      sizeBytes: measured.sizeBytes,
+      totalChunks: Math.ceil(measured.sizeBytes / PDF_CHUNK_BYTES),
+      sha256: measured.sha256,
+    };
+    await bridge(`/v1/jobs/${attemptId}/pdf-declaration${attachmentId == null ? '' : `?attachmentId=${encodeURIComponent(attachmentId)}`}`, {
+      method: 'PUT', body: { pdfSource: declared },
+    });
   }
-  const chunkPath = `/v1/jobs/${attemptId}/pdf-chunks${attachmentId == null ? '' : `?attachmentId=${encodeURIComponent(attachmentId)}`}`;
-  const { bitmap } = await bridge(chunkPath);
-  const received = new Set(bitmap ?? []);
-  // 第二遍流式读：按 4 MiB 切块，只补位图缺失的块（bridge 侧重发幂等，断点续传）
+  // 从同一份 Cache Storage 响应切块，只补位图缺失的块（bridge 侧重发幂等，断点续传）。
   let index = 0;
   let pending = new Uint8Array(0);
   let uploaded = 0;
@@ -360,7 +409,7 @@ async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
       index += 1;
     }
   };
-  await readPdfPassWithVerification(job, pdfUrl, async (value) => {
+  await readCachedPdf(cache, cacheKey, async (value) => {
     const merged = new Uint8Array(pending.byteLength + value.byteLength);
     merged.set(pending);
     merged.set(value, pending.byteLength);
@@ -368,6 +417,7 @@ async function doFeedPdfBytes({ attemptId, attachmentId, pdfUrl, name }) {
     await flush();
   });
   await flush(true);
+  await cache.delete(cacheKey);
   return { fed: true, uploaded, totalChunks: declared.totalChunks };
 }
 

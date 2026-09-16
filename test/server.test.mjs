@@ -494,6 +494,7 @@ test('POST /v1/jobs pdf-only submission queues a single pdf job without snapshot
 const ATTEMPT_BYTES = '51515151-5151-4511-8511-515151515151';
 const ATTEMPT_MISMATCH = '52525252-5252-4522-8522-525252525252';
 const ATTEMPT_FALLBACK = '53535353-5353-4533-8533-535353535353';
+const ATTEMPT_REPLACE = '56565656-5656-4566-8566-565656565656';
 
 async function bootBridge({ downloadPdf, uploads, sweepIntervalMs } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'feishu-clip-server-chunks-'));
@@ -564,6 +565,38 @@ test('cancelled 的 pdf job：未喂齐的 staging 由周期 sweep 即时清理'
     const cancelled = await store.cancel(attemptId, 'pdf');
     assert.equal(cancelled.status, 'cancelled', 'awaiting_bytes 可直接取消');
     assert.deepEqual(await waitStagingGone(attemptId), [], 'cancelled 后 staging 由周期 sweep 即时清理');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PDF bytes 声明：空位图可替换动态响应声明，收到分块后锁定', async () => {
+  const { directory, server, call } = await bootBridge();
+  const pdfUrl = 'https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?arnumber=11146309';
+  const declaration = (sizeBytes, sha256) => ({ type: 'bytes', url: pdfUrl, name: 'paper.pdf', sizeBytes, totalChunks: Math.ceil(sizeBytes / PDF_CHUNK_BYTES), sha256 });
+  try {
+    const submitted = await call('/v1/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ attemptId: ATTEMPT_REPLACE, pdfSource: declaration(10, 'a'.repeat(64)) }),
+    });
+    assert.equal(submitted.status, 202);
+
+    const replacement = declaration(PDF_CHUNK_BYTES + 20, 'b'.repeat(64));
+    const replaced = await call(`/v1/jobs/${ATTEMPT_REPLACE}/pdf-declaration`, {
+      method: 'PUT', body: JSON.stringify({ pdfSource: replacement }),
+    });
+    assert.equal(replaced.status, 200);
+    assert.deepEqual((await replaced.json()).pdfJob.pdfSource, replacement);
+
+    const partial = await call(`/v1/jobs/${ATTEMPT_REPLACE}/pdf-chunks`, {
+      method: 'POST', body: JSON.stringify({ index: 0, totalChunks: 2, dataBase64: Buffer.alloc(PDF_CHUNK_BYTES).toString('base64') }),
+    });
+    assert.equal(partial.status, 200);
+    const locked = await call(`/v1/jobs/${ATTEMPT_REPLACE}/pdf-declaration`, {
+      method: 'PUT', body: JSON.stringify({ pdfSource: declaration(30, 'c'.repeat(64)) }),
+    });
+    assert.equal(locked.status, 409);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });

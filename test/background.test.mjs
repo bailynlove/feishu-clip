@@ -40,11 +40,31 @@ let lastProxyBody = null;
 const PDF_SOURCE_URL = 'https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=11146309&ref=';
 const IEEE_PAGE_URL = 'https://ieeexplore.ieee.org/document/11146309';
 let pdfSourceServer = null; // 非 null 时源站 URL 返回流式 Response；{ body } / { failStatus } / { challengeOnce, body }
+let pdfSourceRequests = 0;
 let feedJob = null; // FEED 用例的 pdf job 视图（GET /v1/jobs/:id 返回）
 let chunkBitmap = []; // pdf-chunks GET 返回的位图
 let postedChunks = []; // 记录分块 POST 请求体
+let replacedDeclaration = null;
 let verificationWindows = [];
 let removedWindows = [];
+const pdfCacheEntries = new Map();
+globalThis.caches = {
+  async open() {
+    return {
+      async match(key) {
+        const entry = pdfCacheEntries.get(String(key));
+        return entry ? new Response(entry.bytes.slice(), { status: 200, headers: entry.headers }) : undefined;
+      },
+      async put(key, response) {
+        pdfCacheEntries.set(String(key), {
+          bytes: new Uint8Array(await response.arrayBuffer()),
+          headers: { 'content-type': response.headers.get('content-type') || '' },
+        });
+      },
+      async delete(key) { return pdfCacheEntries.delete(String(key)); },
+    };
+  },
+};
 globalThis.chrome = {
   runtime: { id: 'ext-id', onMessage: { addListener: (fn) => listeners.push(fn) } },
   tabs: { query: async () => [{ id: 1, url: tabUrl }] },
@@ -94,12 +114,13 @@ globalThis.fetch = async (url, options) => {
   }
   // 源站 PDF（#68 凭据抓取）：流式 Response，分段 enqueue 模拟真实流
   if (url === PDF_SOURCE_URL && pdfSourceServer) {
+    pdfSourceRequests += 1;
     if (pdfSourceServer.challengeOnce && !pdfSourceServer.challenged) {
       pdfSourceServer.challenged = true;
       return new Response('<html>challenge</html>', { status: pdfSourceServer.challengeStatus ?? 202, headers: { 'content-type': 'text/html', 'x-amzn-waf-action': 'challenge' } });
     }
     if (pdfSourceServer.failStatus) return { ok: false, status: pdfSourceServer.failStatus, headers: { get: () => null }, body: null };
-    const bytes = pdfSourceServer.body;
+    const bytes = pdfSourceServer.bodies?.[pdfSourceRequests - 1] ?? pdfSourceServer.body;
     return new Response(new ReadableStream({
       start(controller) {
         for (let offset = 0; offset < bytes.length; offset += 1000) controller.enqueue(bytes.subarray(offset, offset + 1000));
@@ -114,6 +135,11 @@ globalThis.fetch = async (url, options) => {
       return { ok: true, json: async () => ({ ok: true, complete: false, received: chunkBitmap.length + postedChunks.length }) };
     }
     return { ok: true, json: async () => ({ ok: true, declared: feedJob?.pdfSource?.type === 'bytes', totalChunks: feedJob?.pdfSource?.totalChunks ?? null, bitmap: chunkBitmap }) };
+  }
+  if (url.includes('/pdf-declaration') && options?.method === 'PUT') {
+    replacedDeclaration = JSON.parse(options.body).pdfSource;
+    feedJob.pdfSource = replacedDeclaration;
+    return { ok: true, json: async () => ({ ok: true, pdfJob: feedJob }) };
   }
   if (url.endsWith('/v1/jobs') && options?.method === 'POST') lastJobsBody = JSON.parse(options.body);
   if (url.endsWith('/v1/drive/folders/validate')) lastDriveValidateBody = JSON.parse(options.body);
@@ -397,12 +423,15 @@ const FEED_BODY_SIZE = 2 * 4 * 1024 * 1024 + 500; // 3 块：两块满块 + 500 
 
 function resetFeedStubs(body) {
   postedChunks = [];
+  replacedDeclaration = null;
   chunkBitmap = [];
   lastJobsBody = null;
   pdfSourceServer = { body };
+  pdfSourceRequests = 0;
   feedJob = null;
   verificationWindows = [];
   removedWindows = [];
+  pdfCacheEntries.clear();
 }
 
 function pdfBytes(size) {
@@ -440,12 +469,29 @@ test('FEED_PDF_BYTES：url 型 awaiting_bytes → 先声明（SHA-256/总块数�
   }
 });
 
+test('FEED_PDF_BYTES：动态 PDF 只抓取一次，声明与上传复用同一响应', async () => {
+  const first = pdfBytes(4096);
+  const changed = pdfBytes(5000);
+  resetFeedStubs(first);
+  pdfSourceServer = { body: first, bodies: [first, changed] };
+  feedJob = { attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper', pdfSource: { type: 'url', url: PDF_SOURCE_URL, name: 'dynamic.pdf' } };
+  try {
+    const result = await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL });
+    assert.deepEqual(result, { fed: true, uploaded: 1, totalChunks: 1 });
+    assert.equal(pdfSourceRequests, 1, '源站动态生成 PDF 时不得用第二次请求上传另一份内容');
+    assert.equal(lastJobsBody.pdfSource.sizeBytes, first.byteLength);
+    assert.ok(Buffer.from(postedChunks[0].dataBase64, 'base64').equals(first));
+  } finally {
+    resetFeedStubs(null);
+  }
+});
+
 test('FEED_PDF_BYTES：声明已在库时跳过第一遍；位图续传只补缺块', async () => {
   const body = pdfBytes(FEED_BODY_SIZE);
   resetFeedStubs(body);
   feedJob = {
     attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper',
-    pdfSource: { type: 'bytes', url: PDF_SOURCE_URL, name: 'paywalled.pdf', sizeBytes: FEED_BODY_SIZE, totalChunks: 3, sha256: 'f'.repeat(64) },
+    pdfSource: { type: 'bytes', url: PDF_SOURCE_URL, name: 'paywalled.pdf', sizeBytes: FEED_BODY_SIZE, totalChunks: 3, sha256: createHash('sha256').update(body).digest('hex') },
   };
   chunkBitmap = [0, 1]; // 模拟中断前已确认两块
   try {
@@ -453,6 +499,23 @@ test('FEED_PDF_BYTES：声明已在库时跳过第一遍；位图续传只补缺
     assert.deepEqual(result, { fed: true, uploaded: 1, totalChunks: 3 });
     assert.equal(lastJobsBody, null, '声明已就位不再重复提交');
     assert.deepEqual(postedChunks.map((chunk) => chunk.index), [2], '只补位图缺失的块，不重传已确认块');
+  } finally {
+    resetFeedStubs(null);
+  }
+});
+
+test('FEED_PDF_BYTES：旧声明没有缓存且源站内容已变化时，空位图允许替换声明', async () => {
+  const body = pdfBytes(6000);
+  resetFeedStubs(body);
+  feedJob = {
+    attemptId: FEED_ATTEMPT, kind: 'pdf', status: 'awaiting_bytes', title: 'Paper',
+    pdfSource: { type: 'bytes', url: PDF_SOURCE_URL, name: 'dynamic.pdf', sizeBytes: 4096, totalChunks: 1, sha256: 'f'.repeat(64) },
+  };
+  try {
+    const result = await send({ type: 'FEED_PDF_BYTES', attemptId: FEED_ATTEMPT, pdfUrl: PDF_SOURCE_URL });
+    assert.deepEqual(result, { fed: true, uploaded: 1, totalChunks: 1 });
+    assert.equal(replacedDeclaration.sizeBytes, body.byteLength);
+    assert.equal(replacedDeclaration.sha256, createHash('sha256').update(body).digest('hex'));
   } finally {
     resetFeedStubs(null);
   }

@@ -117,7 +117,7 @@ Date: 2026-09-08 (Asia/Shanghai). 规划来源：wayfinder map #56 的全部决�
 ### Automated (planned)
 
 - `npm test` 新增覆盖：
-  - job-store：`(attemptId, kind)` 双 job 幂等提交；pdf job 最小状态机（`queued / awaiting_bytes / running / succeeded / failed / cancelled / expired`，无 reconcile）；url 型下载 401/403 → `awaiting_bytes`；bytes 到齐 + SHA-256 验证通过 → `queued`，hash 不匹配拒收；chunk 位图断点续传（只补缺块）；staging 文件随终态删除、超龄孤儿由 sweep 清理；`get(attemptId)` 返回整次尝试的全部 job；job TTL → `expired`。
+  - job-store：`(attemptId, kind)` 双 job 幂等提交；pdf job 最小状态机（`queued / awaiting_bytes / running / succeeded / failed / cancelled / expired`，无 reconcile）；url 型下载 401/403/WAF challenge → `awaiting_bytes`；浏览器对动态 PDF 只抓取一次并用 Cache Storage 复用同一字节流做声明和上传；空 chunk 位图允许替换丢失缓存后的旧声明，收到首块后锁定；bytes 到齐 + SHA-256 验证通过 → `queued`，hash 不匹配拒收；chunk 位图断点续传（只补缺块）；staging 文件随终态删除、超龄孤儿由 sweep 清理；`get(attemptId)` 返回整次尝试的全部 job；job TTL → `expired`。
   - 预设：`pdfDrive` 读取时迁移（存量预设缺省 `null`）；`enabled + folderToken:null` = 云盘根目录的合法态。
   - picker：drive 适配器的导航/分页/错误分类与 wiki 适配器同规；`createTargetPicker` 泛化后 wiki 侧行为不变（回归）。
   - 扩展识别：executeScript 探针读 `document.contentType` 判定 PDF 标签页；注入失败回退 `tab.url` 后缀兜底；HTML 页 `citation_pdf_url` meta 与 arXiv 站点规则识别主 PDF；页面上非主 PDF 链接不误报。

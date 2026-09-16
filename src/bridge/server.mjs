@@ -498,6 +498,27 @@ export async function createBridge({ config, lark = new LarkClient({ cliPath: co
       }
 
       // ——— 分块通道（#61/#68）：扩展凭据回传 PDF 字节 ———
+      // 动态 PDF 的源站响应可能逐次变化。扩展缓存缺失后会重新抓取；若尚未收到任何块，
+      // 允许它用同 URL 的新大小/hash 原子替换旧声明，再从第 0 块开始上传。
+      const declarationUrl = new URL(request.url, 'http://127.0.0.1');
+      const declarationMatch = declarationUrl.pathname.match(/^\/v1\/jobs\/([0-9a-f-]{36})\/pdf-declaration$/i);
+      const declarationAttachmentId = declarationUrl.searchParams.get('attachmentId') || null;
+      if (declarationMatch && request.method === 'PUT') {
+        const job = await store.get(declarationMatch[1], JOB_KIND.PDF, declarationAttachmentId);
+        if (!job) return send(response, 404, { ok: false, code: 'JOB_NOT_FOUND' }, origin);
+        if (job.status !== JOB_STATUS.AWAITING_BYTES || job.pdfSource?.type !== 'bytes') {
+          return send(response, 409, { ok: false, code: 'PDF_BYTES_NOT_EXPECTED' }, origin);
+        }
+        if ((await staging.bitmap(job.attemptId, job.attachmentId)).length) {
+          return send(response, 409, { ok: false, code: 'PDF_DECLARATION_LOCKED' }, origin);
+        }
+        const body = await readJson(request);
+        const pdfSource = validatePdfSource(body?.pdfSource);
+        if (pdfSource.type !== 'bytes') return send(response, 400, { ok: false, code: 'PDF_SOURCE_INVALID' }, origin);
+        const replaced = await store.replaceBytesDeclaration(job.attemptId, pdfSource, job.attachmentId);
+        return send(response, 200, { ok: true, pdfJob: jobView(replaced) }, origin);
+      }
+
       // GET 返回已收块位图（续传断点）；POST 写一块（4 MiB 原字节 base64 + index）。
       // 全部到齐 + 整文件 SHA-256 验证通过 → job 转 queued（executor 走 staging 上传）；
       // hash 不匹配 → 422 + job failed + 清理 staging。端点只服务 awaiting_bytes 的 pdf job

@@ -613,6 +613,23 @@ export class PersistentJobStore {
     });
   }
 
+  // 扩展本地缓存丢失后，动态 PDF 可能与旧声明不同。调用方必须先确认 staging 位图为空；
+  // 此处只允许 awaiting_bytes 的 bytes job 在同一 URL 上替换完整声明。
+  async replaceBytesDeclaration(attemptId, pdfSource, attachmentId = null) {
+    const normalized = normalizePdfSource(pdfSource);
+    if (normalized.type !== 'bytes') throw new TypeError('pdfSource.type must be bytes');
+    return this.#mutate(async (data) => {
+      const job = this.#findJob(data, attemptId, JOB_KIND.PDF, attachmentId);
+      if (job.status !== JOB_STATUS.AWAITING_BYTES || job.pdfSource?.type !== 'bytes') {
+        throw new Error(`Cannot replace bytes declaration in ${job.status} state`);
+      }
+      if (job.pdfSource.url !== normalized.url) throw new Error('Cannot replace bytes declaration with another URL');
+      job.pdfSource = normalized;
+      job.updatedAt = this.#now();
+      return { result: structuredClone(job), changed: true };
+    });
+  }
+
   // 整验失败（SHA-256/大小不匹配）→ failed；staging 清理由调用方负责
   async failBytes(attemptId, error, attachmentId = null) {
     if (!error) throw new TypeError('error is required');
